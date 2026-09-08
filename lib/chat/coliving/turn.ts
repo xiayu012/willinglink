@@ -7,6 +7,7 @@ import { getLanguageModel } from "@/lib/ai/providers";
 import { buildContext } from "./context";
 import { kitchenEveningWindow } from "./coordination-bridge";
 import { advanceCoordinationSession } from "./coordination-session";
+import type { OutboundAction, State } from "../../coordination/types";
 import { critique, critiqueBatch, hasSafetySensitiveTopic } from "./critic";
 import type { Verdict } from "./critic";
 import { assertCanWrite } from "./guard";
@@ -698,6 +699,163 @@ export type TurnOutcome = {
  */
 const UNKNOWN_REPLY = "这个号码我这边没有记录，先确认一下你是哪一位。";
 
+/**
+ * coordination 替换分支的总入口（默认关闭，`COLIVING_COORDINATION_REPLACE=1` 才开）。
+ *
+ * 判断这条消息是不是厨房排班相关；是 → 用 `advanceCoordinationSession`（coordination
+ * 状态机）推进这一轮、把状态机 `actions` 按硬编码模板转成给发信人的回复，落库后返回
+ * `TurnOutcome`；判不准或任何异常 → 返回 `null`，由旧 AI 排班流程兜底，不让替换把整
+ * 轮搞挂。
+ *
+ * 状态机自己的事件/checkpoint 落在会话目录（缺省本地临时目录），不写 coliving 库；
+ * 这里照正常回合的样子把入站消息 + 一条 `reply_only` 回复落库，回复投递交给 route.ts。
+ */
+async function maybeCoordinationReply(args: {
+  sender: repo.Sender;
+  channel: string;
+  text: string;
+  history: Array<{ role: "user" | "assistant"; content: string }>;
+  conversationId: string;
+  turnStartedAt: Date;
+}): Promise<TurnOutcome | null> {
+  const { sender, channel, text, history, conversationId, turnStartedAt } = args;
+  try {
+    // 1) 排班相关判断（保守：判不准就 return null 走原 AI 流程）。
+    //    「正在回一条排班时段征询」或「正文同时带时间 + 带厨房/做饭语境」才算。
+    const answering = await repo.pendingCommunication(sender.personId);
+    const answeringSlotInquiry = isScheduleSlotInquiry(answering);
+    const hasTimeWord =
+      /\d{1,2}\s*[:：点时]/.test(text) || /[一二三四五六七八九十两]\s*点/.test(text);
+    const hasKitchenWord = /厨房|做饭|做菜|灶台|排班|排时间|时段|几点/.test(text);
+    if (!answeringSlotInquiry && !(hasTimeWord && hasKitchenWord)) return null;
+
+    // 2) 用 coordination 状态机推进这一轮（事件/checkpoint 落本地会话目录）。
+    const members = await repo.getMembers(sender.householdId, channel);
+    const participants = members.map((m) => m.name);
+    const res = await advanceCoordinationSession(
+      sender.householdId,
+      sender.name,
+      text,
+      {
+        window: kitchenEveningWindow(),
+        participants,
+        recentDialogue: history.map((h) =>
+          h.role === "assistant" ? `AI：${h.content}` : h.content
+        ),
+        dir: process.env.COLIVING_COORDINATION_SESSION_DIR,
+      }
+    );
+
+    // 3) 把状态机 actions 转成给发信人的回复文本（硬编码模板，够用即可）。
+    const reply = coordinationReplyForSender(res.actions, res.state, sender.name);
+
+    // 4) 落库与正常回合一致：先把这条入站消息写下，再把它接回它正在回答的沟通。
+    const inboundId = await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "inbound",
+      channel,
+      body: text,
+    });
+    if (inboundId) {
+      await repo.linkResponse({ personId: sender.personId, messageId: inboundId });
+    }
+
+    // 回复本身也算一次 communication（reply_only，同 isSimpleAffirmation 短路闸写法）。
+    const decisionId = await repo.recordDecision({
+      householdId: sender.householdId,
+      kind: "reply_only",
+      intent: "coordination 状态机接管厨房排班：把状态机动作转成回复，未走旧 AI 流程",
+      modelId: colivingModelId(),
+      doctrineModules: [],
+      contextChars: 0,
+      contextSnapshot: null,
+    });
+    const replyCommunicationId = await repo.queueCommunication({
+      householdId: sender.householdId,
+      decisionId,
+      caseId: null,
+      toPersonId: sender.personId,
+      channel,
+      purpose: "回复本人",
+      body: reply,
+    });
+    await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "outbound",
+      channel,
+      body: reply,
+      communicationId: replyCommunicationId,
+    });
+
+    return {
+      reply,
+      replyReview: { verified: true, pass: true, broke: "", why: "" },
+      scheduleFacts: [],
+      replyCommunicationId,
+      outbound: [],
+      allOutbound: [],
+      decisionId,
+      modules: [],
+      promptChars: 0,
+      toolsUsed: [],
+      unknownSender: false,
+      usage: {
+        steps: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+      },
+      turnStartedAt,
+    };
+  } catch (error) {
+    console.log(
+      "[coordination-replace] 状态机替换失败，回退旧 AI 流程：",
+      error instanceof Error ? error.message : String(error)
+    );
+    return null;
+  }
+}
+
+/**
+ * 把 coordination 状态机这轮产出的 `actions` 按「发信人本人」的视角转成一句短信回复：
+ * 只挑发给这个人的 settle/propose/remind；blocked 是全局诊断；其余按终态给短句。
+ * 模板是硬编码的（模型没被调用来写措辞，见「不要替大脑写话术」对硬编码的边界）。
+ */
+function coordinationReplyForSender(
+  actions: readonly OutboundAction[],
+  state: State,
+  self: string
+): string {
+  const settleForSelf = actions.find(
+    (a): a is Extract<OutboundAction, { type: "settle" }> =>
+      a.type === "settle" && a.person === self
+  );
+  if (settleForSelf) {
+    return `定案：你 ${formatMinutes(settleForSelf.slot.start)}-${formatMinutes(settleForSelf.slot.end)}。`;
+  }
+  const proposeForSelf = actions.find(
+    (a): a is Extract<OutboundAction, { type: "propose" }> =>
+      a.type === "propose" && a.person === self
+  );
+  if (proposeForSelf) {
+    return `关于厨房排班，先排你用 ${formatMinutes(proposeForSelf.slot.start)}-${formatMinutes(proposeForSelf.slot.end)}，这不是定案，愿意吗？`;
+  }
+  if (actions.some((a) => a.type === "remind" && a.person === self)) {
+    return `还没收到你的做饭时间，方便报一下吗？`;
+  }
+  const blocked = actions.find(
+    (a): a is Extract<OutboundAction, { type: "blocked" }> => a.type === "blocked"
+  );
+  if (blocked) {
+    return `暂时排不开：${blocked.reasons[0].message}`;
+  }
+  return state === "gathering" ? `收到，我记下了。` : `收到。`;
+}
+
 export async function runColivingTurn(args: {
   /** 从哪个渠道来：sms / wecom / xhs。决定认人用哪种地址、回信走哪条路 */
   channel?: string;
@@ -811,6 +969,29 @@ export async function runColivingTurn(args: {
         error instanceof Error ? error.message : String(error)
       );
     }
+  }
+
+  /**
+   * 厨房排班替换分支（coordination 状态机接管，默认关闭、可随时回滚）。
+   *
+   * `COLIVING_COORDINATION_REPLACE=1` 才开（不设/不是 1 一律不跑，行为与旧流程完全
+   * 一样）。命中厨房排班相关消息时，不再走下面「AI 硬撑排班」的整条链路，而是用
+   * `maybeCoordinationReply` 推进 coordination 状态机、把状态机动作说成回复；它返回
+   * 一个 `TurnOutcome` 就提前收工，返回 `null`（判不准/异常）就落回旧 AI 流程。
+   * 放在 coordination shadow 旁路之后、主生成之前：不影响旧流程的既有判断与短路闸。
+   * （本分支要不要命中依赖「正在回排班征询」，那个 answering 在 maybeCoordinationReply
+   * 内部另取，不跟下方 pendingCommunication 的取用耦合。）
+   */
+  if (process.env.COLIVING_COORDINATION_REPLACE === "1" && sender) {
+    const replaced = await maybeCoordinationReply({
+      sender,
+      channel,
+      text: args.text,
+      history,
+      conversationId,
+      turnStartedAt,
+    });
+    if (replaced) return replaced;
   }
 
   /**
