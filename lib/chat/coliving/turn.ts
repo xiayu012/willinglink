@@ -5,6 +5,8 @@ import { z } from "zod";
 import { assembleSystemPrompt } from "@/lib/ai/brains";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { buildContext } from "./context";
+import { kitchenEveningWindow } from "./coordination-bridge";
+import { advanceCoordinationSession } from "./coordination-session";
 import { critique, critiqueBatch, hasSafetySensitiveTopic } from "./critic";
 import type { Verdict } from "./critic";
 import { assertCanWrite } from "./guard";
@@ -765,6 +767,51 @@ export async function runColivingTurn(args: {
     channel,
   });
   const history = await repo.getRecentTurns(conversationId);
+
+  /**
+   * coordination 实时旁路（shadow，默认关闭）：真实短信照常由下面现有 AI 流程
+   * 处理并回复，这里只在后台用 coordination 状态机把这条消息跟一遍，结果只
+   * `console.log` 打印，不改变 `reply`/`outbound`/任何生产返回值。只读位置，
+   * 放在主生成/短路闸之前，避免影响下面正常流程。
+   *
+   * `COLIVING_COORDINATION_SHADOW=1` 才开（不设/不是 1 一律不跑）；可随时回滚。
+   * `COLIVING_COORDINATION_SESSION_DIR` 可选，指定事件日志/checkpoint 落盘目录，
+   * 缺省走 coordination-session 的默认临时目录。
+   */
+  if (process.env.COLIVING_COORDINATION_SHADOW === "1" && sender) {
+    try {
+      const members = await repo.getMembers(sender.householdId, channel);
+      const participants = members.map((m) => m.name);
+      const res = await advanceCoordinationSession(
+        sender.householdId,
+        sender.name,
+        args.text,
+        {
+          window: kitchenEveningWindow(),
+          participants,
+          recentDialogue: history.map((h) =>
+            h.role === "assistant" ? `AI：${h.content}` : h.content
+          ),
+          dir: process.env.COLIVING_COORDINATION_SESSION_DIR,
+        }
+      );
+      console.log(
+        "[coordination-shadow]",
+        JSON.stringify({
+          household: sender.householdLabel,
+          sender: sender.name,
+          text: args.text,
+          state: res.state,
+          actions: res.actions.map((a) => a.type),
+        })
+      );
+    } catch (error) {
+      console.log(
+        "[coordination-shadow] 旁路失败（不影响生产）：",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
 
   /**
    * 他这句多半是在回我们之前问的什么。**在轮次开始时就要知道**——
