@@ -7,6 +7,11 @@
  * 消息（outbound 只进 `recentDialogue`、inbound 走 `llmParseIntent + step`），返回
  * 终态、最后一版方案和（若最后停在 blocked）排不开的诊断。
  *
+ * 入口有两个，共用同一套回放实现：
+ * - `runCoordinationOnHousehold`：回放全户厨房相关消息；
+ * - `runCoordinationOnCase`：只回放派生 case == 指定 caseId 的消息（出站入站都算），
+ *   用于拿状态机方案对照真实定案 rule（见 scripts/coordination-compare.ts）。
+ *
  * 安全边界（照搬 real-data-db-e2e）：全程只 SELECT，不写库、不发短信、不 import 带
  * `server-only` 的 repo.ts，只直连 `POSTGRES_URL`（`max: 1`）。不产生任何出站发送。
  *
@@ -112,23 +117,30 @@ function lastProposalAssignments(events: readonly Event[]): Assignment[] | null 
 }
 
 /**
- * 只读地把一栋 household 的厨房协商流重放进状态机，返回终局。
+ * 共用实现：拉一栋 household 的成员与全部消息、在内存里派生 case，再按 keep 过滤
+ * 后重放协商流。`runCoordinationOnHousehold` 与 `runCoordinationOnCase` 都走这里——
+ * 两套入口的区别只剩 keep（回放哪些消息），循环语义不会各写一套漂移。
  *
  * 流程（照搬 real-data-db-e2e 已验证的步骤）：
  * 1. 查 `coliving.membership`（valid_to is null）的 display_name → participants（房东在前）；
  * 2. 查该 household 全部 `coliving.message`（join conversation/person/communication 拿
  *    case_id），按 sent_at 正序，用「同一 conversation 最近一条出站所属 case」给入站
  *    消息派生 case；
- * 3. 只回放厨房相关消息（见 `isKitchenRelevant`）；outbound 只进 recentDialogue 作消歧
- *    上下文，inbound 走 `llmParseIntent + step` 驱动状态机；机器已定案（settled 是终态）
- *    就不再解析后续消息；
+ * 3. 每条消息先过 keep（空正文一律不放行），再回放：outbound 只进 recentDialogue 作
+ *    消歧上下文，inbound 走 `llmParseIntent + step` 驱动状态机；机器已定案（settled 是
+ *    终态）就不再解析后续消息；
  * 4. 返回 reduce(events)、最后一版方案、以及若最后停在 blocked 的诊断。
+ *
+ * `expectCaseId` 只给按 case 回放入口用：给定且该户消息流里没有任何一条派生 case 等于
+ * 它（含出站）时直接抛错，避免调用方拿打错的 case id 得到「空方案」这种误导性结果。
  *
  * 全程只读 DB；LLM 只做意图翻译，不生成措辞/方案。
  */
-export async function runCoordinationOnHousehold(
+async function replayHouseholdMessages(
   householdId: string,
-  window: TimeWindow
+  window: TimeWindow,
+  keep: (row: MsgRow) => boolean,
+  expectCaseId?: string
 ): Promise<CoordinationHouseholdResult> {
   const url = process.env.POSTGRES_URL;
   if (!url) throw new Error("没有 POSTGRES_URL（检查 .env.local）");
@@ -180,15 +192,21 @@ export async function runCoordinationOnHousehold(
       return row;
     });
 
-    // 3) 只回放厨房相关消息；入站消息在机器定案前逐条驱动状态机。
+    // 按 case 回放时的保护：case id 在整户消息流里完全不存在 → 直接报错。
+    if (expectCaseId !== undefined && !rows.some((r) => r.derived === expectCaseId)) {
+      throw new Error(
+        `case ${expectCaseId} 在这栋房子（${householdId}）的消息流里没有匹配到任何派生 case`
+      );
+    }
+
+    // 3) 回放 keep 放行的消息；入站消息在机器定案前逐条驱动状态机。
     let events: Event[] = [];
     const recentDialogue: string[] = [];
     let blockedReasons: Infeasibility[] = [];
 
     for (const msg of rows) {
+      if (!keep(msg)) continue;
       const body = (msg.body ?? "").trim();
-      if (!body) continue;
-      if (!isKitchenRelevant(msg)) continue;
 
       if (msg.direction === "outbound") {
         // AI 说的：只进 recentDialogue 作上下文，不驱动状态机。
@@ -228,4 +246,42 @@ export async function runCoordinationOnHousehold(
   } finally {
     await sql.end();
   }
+}
+
+/**
+ * 只读地把一栋 household 的全部厨房协商流（不过滤 case）重放进状态机，返回终局。
+ * 过滤交给 keep：空正文跳过、厨房相关（有派生 case 或正文像厨房协调）才放行。
+ * 对外行为与旧实现一致。
+ */
+export async function runCoordinationOnHousehold(
+  householdId: string,
+  window: TimeWindow
+): Promise<CoordinationHouseholdResult> {
+  return replayHouseholdMessages(householdId, window, (row) => {
+    const body = (row.body ?? "").trim();
+    if (!body) return false;
+    return isKitchenRelevant(row);
+  });
+}
+
+/**
+ * 只读地把一栋 household 里**派生 case == caseId** 的协商流重放进状态机（出站入站都
+ * 算），返回终局。与 `runCoordinationOnHousehold` 同一套回放逻辑，只是范围收窄到单个
+ * case——用来拿状态机方案对照真实定案（见 scripts/coordination-compare.ts）。case id
+ * 在该户消息流里完全不存在时抛错。
+ */
+export async function runCoordinationOnCase(
+  householdId: string,
+  caseId: string,
+  window: TimeWindow
+): Promise<CoordinationHouseholdResult> {
+  return replayHouseholdMessages(
+    householdId,
+    window,
+    (row) => {
+      if (!(row.body ?? "").trim()) return false;
+      return row.derived === caseId;
+    },
+    caseId
+  );
 }
