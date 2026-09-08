@@ -1130,17 +1130,19 @@ export async function runColivingTurn(args: {
     (m) => m.personId !== sender.personId && args.text.includes(m.name)
   );
   const hasOpenConflictCase = ctx.openCases.some(isOpenConflictCase);
-  const forcedModules = [
-    ...(mentionsOther ? ["conflict"] : []),
-    ...(hasOpenConflictCase ? ["conflict"] : []),
-  ];
+  // 结构信号交给路由引擎（router.ts 的 when 条件）判断要不要加载 conflict，
+  // 不再手动构造 forcedModules——路由规则与装载理由只留在 brain 一处。
+  const signals = {
+    mentionsOther,
+    hasOpenConflictCase,
+  };
 
   const { doctrine, runtime, loadedModuleIds, chars } = assembleSystemPrompt({
     brainId: "coliving",
     routeOn: args.text,
     runtimeContext: ctx.text,
-    // “你好”没有话题词；未结冲突本身是比本轮关键词更可靠的结构信号。
-    forceModules: forcedModules.length ? [...new Set(forcedModules)] : undefined,
+    // 结构信号：名册提到其他住户，或存在未结冲突——比本轮关键词更可靠的路由依据。
+    signals,
   });
   const conflictContextActive =
     hasOpenConflictCase || loadedModuleIds.includes("conflict");

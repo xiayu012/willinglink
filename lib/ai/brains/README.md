@@ -29,23 +29,41 @@
 
 ```
 lib/ai/brains/
-  types.ts       Brain / RouteRule / RoutingDecision 类型
+  types.ts       Brain / DoctrineModule / RouteRule / SignalCondition 类型
   registry.ts    大脑注册表
-  router.ts      路由引擎（force / exclusive / 上限）
+  router.ts      路由引擎（match 文本 + when 信号，force / exclusive / 上限）
   loader.ts      doctrine 读取与缓存
   assemble.ts    组装 system prompt
   index.ts       对外入口 + 注册
   coliving/
-    index.ts     合租房大脑：清单 + 路由规则
-    doctrine/    准则正文（编辑这里就能改行为）
-      core.md            常驻 A：目标与仲裁（三道闸、优先次序、禁区）
-      craft.md           常驻 B：手法（格式、措辞、轻管理十条）
-      conflict.md        室友冲突调解
-      complaint-risk.md  主动询问 / 投诉 / 风险升级
-      tenancy.md         入住 / 规则 / 退租
-      money.md           金钱边界
-      records.md         记录 / 转交 / 拒绝不当指令
+    index.ts     合租房大脑：模块清单（带 layer）+ 路由规则
+    doctrine/    准则正文（按层分目录，编辑这里就能改行为）
+      always/              常驻层，每轮必带，数组顺序即同一层内优先级
+        identity.md        [identity]  你是谁、能力面、住户处境、真实价值
+        constitution.md    [invariant] 宪法十四条，新情况从这里推
+        arbitration.md     [domain]    三道闸、协调员定位、立场、禁区（常驻，见下）
+        craft.md           [communication] 手法：格式、措辞
+      domain/              domain 层：情境仲裁模块
+        conflict.md        室友冲突调解
+        complaint-risk.md  主动询问 / 投诉受理 / 风险升级
+        tenancy.md         入住 / 规则 / 退租
+      special-cases/       special-case 层：单点例外（后续细模块也放这层）
+        money.md           金钱边界
+      tool/                tool 层：工具使用规则
+        records.md         记录 / 转交 / 拒绝不当指令
+      rubric/              rubric 层：审稿清单（仅批判器读，不进任何一次生成）
+        rubric.md          审稿清单
 ```
+
+每个模块有一个 `layer` 字段，分层的**默认优先级**（在同一脑内按模块实际声明顺序拼，
+但 layer 给出跨脑一致的语义尺度）：
+
+```
+identity → invariant → domain → communication → memory → tool → special-case → rubric
+```
+
+`arbitration.md` 声明为 `layer: "domain"`，但它必须常驻——三道闸/禁区/决定权是
+每条消息的门槛，不能赌路由命中，所以放在 `always/`。
 
 ## 用法
 
@@ -61,18 +79,48 @@ const { system, loadedModuleIds } = assembleSystemPrompt({
 
 **只能在服务端调用**（doctrine 走 fs 读取）。
 
-## 路由规则的三种类型
+## 路由规则：命中来源 × 命中后的行为
 
-| 类型 | 行为 | 用于 |
+一条规则命中 = **文本命中 且 信号命中**：
+
+- **文本命中**：`rule.match` 为空 或 任一正则命中本轮 `text`。
+- **信号命中**：`rule.when` 为空 或 任一条件满足（`equals` 给定时比较
+  `signals[key] === equals`，否则按 truthy 判断）。
+
+一条 RouteRule 可以只用文本（`match`）、只用信号（`when`），或两者都要。
+
+| 命中后的行为 | 语义 | 用于 |
 |---|---|---|
 | 普通 | 命中即加入候选，受 `maxSituational` 上限（默认 2）约束 | 常规情境 |
-| `force: true` | 无条件加载，**不占额度** | 安全信号、歧视/报复/非法驱逐——漏加载的代价远高于多占上下文 |
+| `force: true` | 无条件加载，**不占额度** | 安全信号、以及结构信号——漏加载的代价远高于多占上下文 |
 | `exclusive: true` | 命中即只加载本规则模块，短路其余普通规则（force 仍叠加） | 简单事实询问，避免为「垃圾周几倒」拉进整份调解准则 |
+
+**什么时候用信号（`when`），不用文本（`match`）**：关键词永远有漏网——真实
+投诉说的是"做饭""挨饿""不公平"，不是"厨房""室友""吵"。凡调用方能以结构化
+方式拿到信号（名册里提到别的住户、存在未结冲突的 case），就比词表可靠。
+调用方算好信号后经 `assembleSystemPrompt({ signals })` 传入，路由引擎在
+`route(brain, text, signals)` 里把文本与信号放在同一层判断。**不给 `signals` 时，
+`when` 非空的规则不命中**（等价于 `signals = {}`）——纯文本调用方（如
+`brain:inspect`、cron）不受信号规则影响。
+
+## 新增一个情境 / 特殊场景模块
+
+1. 在对应层目录加 `.md`：常规调解场景放 `domain/`，金钱这类单点例外放
+   `special-cases/`，工具使用规则放 `tool/`。
+2. 在 `coliving/index.ts` 的 `situational` 里注册：`id` / `title` / `file` /
+   `layer` / `purpose`（一句话说明，供 `brain:inspect` 展示）。
+3. 按需在 `routes` 加一条规则：文本关键词能用 `match`；有结构信号就用 `when`；
+   两者都不少就都写。安全类记得 `force: true`。
+4. 跑 `pnpm brain:inspect --probes`，确认命中的模块与理由符合预期。
+
+**工具 schema（第 7 层）不在 doctrine 里**：`doctrine` 只放"工具使用规则"
+（记录、转交、拒绝不当指令该怎么做），工具本身的 schema 仍在
+`lib/chat/coliving/turn.ts` 的 `tool({...})` 里按需摘取。
 
 ## 检查工具
 
 ```bash
-pnpm brain:inspect                    # 跑路由探针（11 条）
+pnpm brain:inspect                    # 跑路由探针（11 条文本 + 2 条信号）
 pnpm brain:inspect "房租要晚几天"       # 看单句命中哪些模块、为什么
 pnpm brain:inspect --full "..."       # additionally 打印完整 system prompt
 pnpm brain:inspect --brains           # 列出已注册的大脑

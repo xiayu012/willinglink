@@ -15,11 +15,16 @@ export const colivingBrain: Brain = {
   doctrineDir: join(process.cwd(), "lib/ai/brains/coliving/doctrine"),
 
   /**
-   * 顺序即优先级。三层，从抽象到具体：
+   * 顺序即优先级。四份常驻，从抽象到具体：
    *
-   *   constitution  十四条，正面表述、描述行为。**新情况从这里推**
-   *   core          目标与仲裁：决定权归属、三道闸、禁区
-   *   craft         手法：措辞、格式
+   *   identity       你是谁、能力面、住户处境、真实价值——先把身份立住
+   *   constitution   十四条，正面表述、描述行为。**新情况从这里推**
+   *   arbitration    目标与仲裁：三道闸、协调员定位、立场、禁区
+   *   craft          手法：措辞、格式
+   *
+   * 为什么 identity 在最前：模型要先知道自己是谁、住户是什么处境，再读规则。
+   * arbitration 属于 domain 层（想加情境仲裁模块时按同一层处理），但这份必须
+   * 常驻——三道闸/禁区/决定权是每条消息的门槛，不能赌路由命中。
    *
    * 为什么要最上面那层：一个 bug 加一条规则，规则会越堆越多、互相抵消，
    * 而且没覆盖到的新情况照样出错。宪法是让它**能自己推**的那一层。
@@ -27,9 +32,36 @@ export const colivingBrain: Brain = {
    * 的实证结论定的，不是我拍的。
    */
   always: [
-    { id: "constitution", title: "宪法十四条", file: "constitution.md" },
-    { id: "core", title: "目标与仲裁", file: "core.md" },
-    { id: "craft", title: "手法", file: "craft.md" },
+    {
+      id: "identity",
+      title: "身份与处境",
+      file: "always/identity.md",
+      layer: "identity",
+      purpose: "你是谁、能力面、住户处境、真实价值——先立身份再谈规则",
+    },
+    {
+      id: "constitution",
+      title: "宪法十四条",
+      file: "always/constitution.md",
+      layer: "invariant",
+      purpose: "不变的行为底线，没覆盖到的新情况回到这里推",
+    },
+    {
+      id: "arbitration",
+      title: "目标与仲裁",
+      file: "always/arbitration.md",
+      layer: "domain",
+      // 它属于 domain 层，但必须常驻——三道闸/禁区/决定权是每条消息的门槛，
+      // 不能像 conflict 那样等路由命中才加载。
+      purpose: "三道闸、协调员定位、立场、禁区——任何话发出前的门槛",
+    },
+    {
+      id: "craft",
+      title: "手法",
+      file: "always/craft.md",
+      layer: "communication",
+      purpose: "怎么说、怎么落地：格式与措辞",
+    },
   ],
 
   /**
@@ -42,16 +74,42 @@ export const colivingBrain: Brain = {
    * 检查那一侧就会形同虚设（真出过：批判器放行了一条读起来像指控的消息）。
    */
   situational: [
-    { id: "rubric", title: "审稿清单（仅批判器用）", file: "rubric.md" },
-    { id: "conflict", title: "室友冲突调解", file: "conflict.md" },
+    {
+      id: "rubric",
+      title: "审稿清单（仅批判器用）",
+      file: "rubric/rubric.md",
+      layer: "rubric",
+    },
+    {
+      id: "conflict",
+      title: "室友冲突调解",
+      file: "domain/conflict.md",
+      layer: "domain",
+    },
     {
       id: "complaint-risk",
       title: "主动询问 / 投诉受理 / 风险升级",
-      file: "complaint-risk.md",
+      file: "domain/complaint-risk.md",
+      layer: "domain",
     },
-    { id: "tenancy", title: "入住 / 规则 / 退租", file: "tenancy.md" },
-    { id: "money", title: "金钱边界", file: "money.md" },
-    { id: "records", title: "记录 / 转交 / 拒绝不当指令", file: "records.md" },
+    {
+      id: "tenancy",
+      title: "入住 / 规则 / 退租",
+      file: "domain/tenancy.md",
+      layer: "domain",
+    },
+    {
+      id: "money",
+      title: "金钱边界",
+      file: "special-cases/money.md",
+      layer: "special-case",
+    },
+    {
+      id: "records",
+      title: "记录 / 转交 / 拒绝不当指令",
+      file: "tool/records.md",
+      layer: "tool",
+    },
   ],
 
   routes: [
@@ -80,6 +138,16 @@ export const colivingBrain: Brain = {
       modules: ["records"],
       force: true,
       reason: "涉嫌歧视/报复/非法驱逐，无条件加载拒绝链条",
+    },
+
+    // ── 结构信号：提到其他住户 / 存在未结冲突 ──────────────────────
+    // 名册匹配比关键词可靠（真实投诉说的是"做饭""挨饿"，不一定带"室友"字眼）；
+    // 未结冲突本身就是比本轮关键词更可靠的结构信号。命中即无条件加载。
+    {
+      when: [{ key: "mentionsOther" }, { key: "hasOpenConflictCase" }],
+      modules: ["conflict"],
+      force: true,
+      reason: "结构信号：提到其他住户，或存在未结冲突",
     },
 
     // ── 简单事实询问：短路，避免为一句话查询拉进整份准则 ──────────────

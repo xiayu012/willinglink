@@ -32,7 +32,9 @@ export { route } from "./router";
 export type {
   AssembledPrompt,
   Brain,
+  DoctrineLayer,
   DoctrineModule,
   RouteRule,
   RoutingDecision,
+  SignalCondition,
 } from "./types";

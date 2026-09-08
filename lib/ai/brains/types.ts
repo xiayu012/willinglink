@@ -7,18 +7,49 @@
 
 export type DoctrineModuleId = string;
 
+/**
+ * 分层。**声明顺序即默认优先级**（identity 最高、rubric 最低）。
+ * 模块自己的 `layer` 字段决定它属于哪一层；同一层内仍按数组声明顺序。
+ */
+export type DoctrineLayer =
+  | "identity"
+  | "invariant"
+  | "domain"
+  | "communication"
+  | "memory"
+  | "tool"
+  | "special-case"
+  | "rubric";
+
 export type DoctrineModule = {
   id: DoctrineModuleId;
   /** 人类可读的名字，出现在日志和调试输出里 */
   title: string;
   /** 相对该大脑 doctrine/ 目录的文件名 */
   file: string;
+  /** 所属分层，见 DoctrineLayer 的默认优先级 */
+  layer: DoctrineLayer;
+  /** 人类可读的一句话说明，用于 brain:inspect 展示 */
+  purpose?: string;
+};
+
+export type SignalCondition = {
+  key: string;
+  /** 期望相等值；省略时按 truthy 判断 */
+  equals?: boolean | string;
 };
 
 export type RouteRule = {
-  /** 命中任一正则即加载 modules */
-  match: RegExp[];
+  /**
+   * 命中任一正则即视为「文本命中」；为空时这条规则只凭结构信号（when）路由。
+   */
+  match?: RegExp[];
   modules: DoctrineModuleId[];
+  /**
+   * 结构信号条件。为空时视为恒信号命中；给出时任一条件满足即视为信号命中。
+   * 结构信号比文本关键词可靠（"他" 不一定提名字，名册匹配是确凿的人际信号）。
+   */
+  when?: SignalCondition[];
   /**
    * force = 无条件加载，不受 maxSituational 上限约束。
    * 只用于安全类与法律风险类——这些内容漏加载的代价远高于多占的上下文。

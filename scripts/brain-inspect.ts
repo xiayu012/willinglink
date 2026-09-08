@@ -38,6 +38,29 @@ const PROBES: Array<{
   { text: "你到底是房东那边的还是我们租客这边的？", expect: [] },
 ];
 
+/**
+ * 结构信号探针：路由规则里 `when` 条件在外部传入 signals 时才生效。
+ * 既有的文本探针不带 signals，正好用来确认信号规则不误伤纯文本路由。
+ */
+const SIGNAL_PROBES: Array<{
+  text: string;
+  signals: Record<string, unknown>;
+  expect: string[];
+  expectNot?: string[];
+}> = [
+  {
+    text: "你好",
+    signals: { mentionsOther: true },
+    expect: ["conflict"],
+  },
+  {
+    text: "垃圾是周几倒？",
+    signals: {},
+    expect: ["tenancy"],
+    expectNot: ["conflict"],
+  },
+];
+
 function inspect(text: string, full: boolean) {
   const result = assembleSystemPrompt({ brainId: BRAIN_ID, routeOn: text });
 
@@ -56,36 +79,56 @@ function inspect(text: string, full: boolean) {
 
 function runProbes() {
   const brain = getBrain(BRAIN_ID);
+  const fmt = (m: { id: string; layer: string }) => `${m.id}[${m.layer}]`;
   console.log(`大脑：${brain.title}（${brain.id}）`);
   console.log(
-    `常驻 ${brain.always.length} 份（${brain.always.map((m) => m.id).join(" → ")}，顺序即优先级） + ` +
-      `情境 ${brain.situational.length} 份，单轮上限 ${brain.maxSituational ?? 2} 份\n`
+    `常驻 ${brain.always.length} 份（${brain.always.map(fmt).join(" → ")}，顺序即优先级）`
+  );
+  console.log(
+    `情境 ${brain.situational.length} 份（${brain.situational.map(fmt).join("、")}），单轮上限 ${brain.maxSituational ?? 2} 份\n`
   );
 
-  let pass = 0;
-  for (const probe of PROBES) {
+  const run = (probe: {
+    text: string;
+    expect: string[];
+    signals?: Record<string, unknown>;
+    forbidExclusive?: boolean;
+    expectNot?: string[];
+  }): boolean => {
     const { loadedModuleIds, chars, routing } = assembleSystemPrompt({
       brainId: BRAIN_ID,
       routeOn: probe.text,
+      ...(probe.signals ? { signals: probe.signals } : {}),
     });
     const wentExclusive = routing.trace.some((t) => t.reason.includes("独占"));
     const ok =
       probe.expect.every((id) => loadedModuleIds.includes(id)) &&
-      !(probe.forbidExclusive && wentExclusive);
-    if (ok) {
-      pass++;
-    }
+      !(probe.forbidExclusive && wentExclusive) &&
+      !(probe.expectNot ?? []).some((id) => loadedModuleIds.includes(id));
     const mark = ok ? "✓" : "✗";
     const want = probe.forbidExclusive
       ? "（不得短路）"
       : probe.expect.length
         ? probe.expect.join("+")
         : "（任意）";
+    const forbid = probe.expectNot?.length ? ` 且不含${probe.expectNot.join("+")}` : "";
     console.log(
-      `${mark} ${want.padEnd(16)} 实得 ${loadedModuleIds.join("+").padEnd(28)} ${chars} 字符  ${probe.text.slice(0, 24)}`
+      `${mark} ${(want + forbid).padEnd(22)} 实得 ${loadedModuleIds.join("+").padEnd(28)} ${chars} 字符  ${probe.text.slice(0, 24)}`
     );
+    return ok;
+  };
+
+  let pass = 0;
+  let total = 0;
+  for (const probe of PROBES) {
+    if (run(probe)) pass++;
+    total++;
   }
-  console.log(`\n${pass}/${PROBES.length} 通过`);
+  for (const probe of SIGNAL_PROBES) {
+    if (run(probe)) pass++;
+    total++;
+  }
+  console.log(`\n${pass}/${total} 通过`);
 }
 
 const args = process.argv.slice(2);

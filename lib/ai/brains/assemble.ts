@@ -12,8 +12,16 @@ export type AssembleOptions = {
    * 这一层目前由调用方自己拼，等状态库落地后改为从数据库取。
    */
   runtimeContext?: string;
-  /** 强制加载的模块，绕过路由。用于外部已判定情境的场景 */
+  /**
+   * 强制加载的模块，绕过路由。用于外部已判定情境的场景。
+   * 保留兼容旧调用；新代码优先用 `signals` 交给路由引擎判断。
+   */
   forceModules?: string[];
+  /**
+   * 结构信号，喂给路由规则的 `when` 条件（如 mentionsOther / hasOpenConflictCase）。
+   * 与 `forceModules` 正交：signals 只参与路由命中判断，不做强制加载。
+   */
+  signals?: Record<string, unknown>;
 };
 
 function findModule(
@@ -31,7 +39,7 @@ function findModule(
  */
 export function assembleSystemPrompt(opts: AssembleOptions): AssembledPrompt {
   const brain = getBrain(opts.brainId);
-  const routing = route(brain, opts.routeOn);
+  const routing = route(brain, opts.routeOn, opts.signals);
 
   const moduleIds = opts.forceModules?.length
     ? [...new Set([...routing.moduleIds, ...opts.forceModules])]
