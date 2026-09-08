@@ -37,6 +37,12 @@ export interface CoordinationSessionOptions {
   participants: readonly PersonId[];
   /** 事件日志/checkpoint 落盘目录（够用即可；缺省落到本地临时目录）。 */
   dir?: string;
+  /**
+   * 最近几条对话原文（含 AI 出站），仅供 LLM 意图解析消歧用——「AI 刚建议 17:30、
+   * 住户回“可以”」这类接受时间建议 ≠ confirm 要靠它分辨。原样透传给
+   * `runCoordinationTurn` 进投影快照，本文件不维护它；缺省表示没提供。
+   */
+  recentDialogue?: readonly string[];
 }
 
 /** householdId → 文件名里只留安全字符（防路径穿越 / Windows 非法字符；同一 id 两侧换算一致）。 */
@@ -85,7 +91,13 @@ export async function advanceCoordinationSession(
   return runCoordinationTurn(
     text,
     sender,
-    { eventsFile, checkpointFile, participants: opts.participants, window: opts.window },
+    {
+      eventsFile,
+      checkpointFile,
+      participants: opts.participants,
+      window: opts.window,
+      ...(opts.recentDialogue ? { recentDialogue: opts.recentDialogue } : {}),
+    },
     resolveIntent
   );
 }
