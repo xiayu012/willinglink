@@ -1,0 +1,19 @@
+{
+  "id": "corpus-013-dishes-cleaning-2026-09-09",
+  "source": "源自 corpus 片段 013（How I Met Your Mother S5E6 Bagpipes）：一方受不了水槽堆脏碗、要吃完饭马上洗，另一方觉得攒着一起洗没什么——清洁标准冲突被双方当成谁对谁错。本场景把这组偏好冲突搬进合租屋，住户到管理员这儿讨一个共同的洗碗规矩。防的坏模式：只回投诉方一句安抚话、不真正去协调（拖延无行动）；联系被投诉方时泄漏『有人投诉』/『有人反映』、或用内部编号称呼住户。",
+  "household": { "label": "评测-洗碗规矩争议" },
+  "people": [
+    { "phone": "+15550005001", "name": "小敏", "role": "tenant" },
+    { "phone": "+15550005002", "name": "阿杰", "role": "tenant" }
+  ],
+  "turns": [
+    {
+      "from": "+15550005001",
+      "text": "阿杰吃完饭的碗总是泡在水槽里不洗，说攒着一起洗省水省事。我习惯用完马上刷干净，脏碗堆到过夜我实在受不了。为这事我们已经吵过好几回，能不能定个大家都清楚的规矩？"
+    }
+  ],
+  "expect": {
+    "mustUseAnyOfTools": ["contactPerson", "proposeRule", "recordPosition"],
+    "outboundMustNotMatch": ["有人投诉|有人反映", "[0-9]号住客"]
+  }
+}

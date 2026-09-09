@@ -21,12 +21,13 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 
 ## 当前工作线（倒序）
 
-### A. 室友矛盾对白语料库（最近活跃，线程因 payload 过大中断）
+### A. 室友矛盾对白语料库 + 转化
 
-- 进度：已提交 fragment 001–031，另有 `corpus-index.json` 与 `README.md`；工作树干净。
-- 目标：老板原话「奔着无限多去，直到网上爬取不到更多」。
-- 产物：`data/roommate-dialogue-corpus/`；素材缓存 `.claude/transcripts-cache/`（gitignore）。
-- 下一步：继续采集更多冲突片段，补未覆盖类别（噪音、访客/对象过夜、食物、作息、温度等仍偏薄）。
+- 进度：已提交 fragment 001–030（去重后），另有 `corpus-index.json` 与 `README.md`。
+- 转化：5 条已转成 `lib/chat/coliving/evals/scenarios/corpus-013/024/026/028/030-*.json`（Claude Code 实现、Codex 验收）。
+- 目标：把采集到的真实矛盾对白持续转成可跑评测场景，替代/扩充旧合成用例。
+- 产物：`data/roommate-dialogue-corpus/`；场景在 `lib/chat/coliving/evals/scenarios/`。
+- 下一步：继续转化其余 A 档片段，并按成本纪律对新增场景做定向 `--judge-off` 冒烟。
 
 ### B. 合租大脑「回复唯一作者」重构（已验收推送）
 
