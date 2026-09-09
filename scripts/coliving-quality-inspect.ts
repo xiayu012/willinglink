@@ -13,6 +13,7 @@ import {
 } from "../lib/chat/coliving/evals/schema";
 import {
   claimsContactCompletion,
+  checkProcessNarration,
   extractExplicitFixedStart,
   extractPreferredStart,
   extractSlotFromInquiry,
@@ -279,6 +280,49 @@ async function main() {
     assert.equal(isPrematureCapacityEscape(capacityEscape, false, false), false);
     assert.equal(isPrematureCapacityEscape("我先把三个人的独占时段排出来。", true, false), false);
     assert.equal(isPrematureCapacityEscape("房东说电磁炉不提供，我继续排时段。", true, false), false);
+  });
+  check("process narration is caught deterministically before delivery", () => {
+    // 真实事故回放（manual-02 厨余装袋规则屡违）：大脑把内部流程/保密思路念给投诉人。
+    assert(
+      checkProcessNarration(
+        "收到。我马上再提醒一遍全屋：厨余装袋、口扎紧再扔。按全屋提醒来说，不会提到是你说的。" +
+          "倒垃圾这块我也记下了，去了解下怎么分，回头跟你说。"
+      ),
+      "真实坏输出必须被打回"
+    );
+    // 三类高信号句式各自独立命中。
+    assert(checkProcessNarration("不会提到是你说的。"), "来源保密说出口必须命中");
+    assert(checkProcessNarration("不会说是你。"), "来源保密说出口必须命中");
+    assert(checkProcessNarration("不透露是谁反映的。"), "来源保密说出口必须命中");
+    assert(checkProcessNarration("我不提是谁说的。"), "来源保密说出口必须命中");
+    assert(checkProcessNarration("回头再跟你说。"), "延后汇报记账必须命中");
+    assert(checkProcessNarration("之后告诉你结果。"), "延后汇报记账必须命中");
+    assert(checkProcessNarration("回头把改好的时间发给你。"), "延后汇报记账必须命中");
+    assert(checkProcessNarration("我马上再提醒一遍全屋。"), "将来时念马上要做的动作必须命中");
+    assert(checkProcessNarration("我这就去核实一下。"), "将来时念马上要做的动作必须命中");
+    assert(checkProcessNarration("我这就去问小吴。"), "将来时念马上要做的动作必须命中");
+  });
+  check("legitimate whole-house / completed-tense / resident-target wording is not process narration", () => {
+    assert.equal(checkProcessNarration("这条我跟全屋说一遍。"), null, "全屋口径必要下一步不算内部流程");
+    assert.equal(checkProcessNarration("我会跟大家讲。"), null, "全屋口径必要下一步不算内部流程");
+    assert.equal(checkProcessNarration("已经提醒过全屋了。"), null, "完成时陈述已发生的事实不算");
+    assert.equal(checkProcessNarration("已经跟小吴说过装袋的事了。"), null, "完成时陈述已发生的事实不算");
+    assert.equal(checkProcessNarration("你之后把厨余装袋、口扎紧再扔。"), null, "直接对当前住户的必要指令不算");
+    assert.equal(checkProcessNarration("收到，我记下了。"), null, "纯确认不算");
+    assert.equal(checkProcessNarration("不是说是你的错，公共区域大家都要注意。"), null, "“不是怪你”的澄清不能误伤");
+    assert.equal(checkProcessNarration("我这就提醒你：厨余要装袋。"), null, "冲着当前住户的指令不算念流程");
+  });
+  check("process-narration gate is wired into checkFactFidelity", () => {
+    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(src.includes("export function checkProcessNarration("), "turn.ts 必须导出 checkProcessNarration");
+    const ffIdx = src.indexOf("function checkFactFidelity(");
+    assert(ffIdx > 0, "checkFactFidelity 必须存在");
+    const ffBody = src.slice(ffIdx, src.indexOf("const factFidelityHit", ffIdx));
+    assert(ffBody.includes("checkProcessNarration(text)"), "checkFactFidelity 必须调用 checkProcessNarration");
+    assert(
+      ffBody.indexOf("checkProcessNarration(text)") > ffBody.indexOf("checkIncompleteConflictTurn(text)"),
+      "checkProcessNarration 必须作为 checkFactFidelity 末尾的最后一道检查"
+    );
   });
 
   for (const label of ["厨房", "洗衣机"]) {

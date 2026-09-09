@@ -103,6 +103,56 @@ export function isPrematureCapacityEscape(
   return hasOpenConflict && !scheduleProvenInfeasible && CAPACITY_ESCAPE_PATTERN.test(text);
 }
 
+/**
+ * **禁止大脑把"内部流程/处理思路"念给住户的确定性闸。** 住户要的是结果和
+ * 跟他有关的下一步，不是你的工作流旁白。与 `claimsContactCompletion` 一样，
+ * 只做**高精度、纯代码可判**的措辞匹配，不碰语义：命中就返回打回理由，
+ * 不命中返回 `null`。宁可漏掉靠 doctrine（craft.md「住户要的是结果…」段）
+ * 拦的模糊表述，也不误伤「这条我跟全屋说一遍」「已经提醒过全屋了」
+ * 「你之后把厨余装袋」这类合法说法。
+ *
+ * 要拦的是三组"几乎必然是内部流程"的句式：
+ *  1. 来源保密思路说出口——「不会提到是你说的」「不会说是你」「不透露是谁」；
+ *  2. 延后汇报记账——「回头/之后/稍后再跟你说（结果）」「之后告诉你」；
+ *  3. 将来时念"马上要做的动作"——「我马上再提醒一遍全屋」「这就去核实一下」。
+ */
+const PROCESS_NARRATION_SOURCE_SECRECY =
+  /(?:绝不会|不会|不用|不必|不要|别|不想|不愿|不)(?:再|去|直接|再去)?(?:提到|说是|说|透露|说出去|供出|指出|告诉|提)(?:是)?(?:你|谁)/;
+
+const PROCESS_NARRATION_DEFERRED_REPORT =
+  /(?:回头|稍后|之后|过后|晚点|等会|待会|过会|改天|过两天|过几天)(?:我|这边)?(?:会|再|就|尽快|有空|找时间)?[^。！？!?\n]{0,12}?(?:告诉你|告诉您|跟你说|跟你说一声|发给你|通知你|跟你讲|给你说|讲给你)/;
+
+const PROCESS_NARRATION_IMMEDIATE_ACTION =
+  /(?:我|这边)?(?:马上|这就|这就去|现在就去|马上去|立刻|立马)(?:再|去|先|会|就|赶紧)?(?:去|跟|和|向|给)?(?:提醒|联系|通知|了解|核实|确认|问|查|打听|追|催|跟进)(?:一下|一遍|一次|大家|全屋|他|她|他们|她们|房东|住户们|各位|小[^。！？!?\n]{0,2})?(?!你|您)/;
+
+export function checkProcessNarration(
+  text: string
+): { broke: "0"; why: string } | null {
+  const reasons: string[] = [];
+  if (PROCESS_NARRATION_SOURCE_SECRECY.test(text)) {
+    reasons.push(
+      "「不会说是你 / 不透露是谁 / 不会提到是你说的」——来源保密是大脑内部的处理，" +
+        "永远不要说出口；说了反而让住户意识到自己的身份会被带进消息里。"
+    );
+  }
+  if (PROCESS_NARRATION_DEFERRED_REPORT.test(text)) {
+    reasons.push(
+      "「回头/之后/稍后再跟你说」这类延后汇报是给自己记账，不是给住户的信息——" +
+        "住户要的是现在的结果或跟他有关的下一步；该这轮做的现在就做完，" +
+        "别预告「之后再告诉你」。"
+    );
+  }
+  if (PROCESS_NARRATION_IMMEDIATE_ACTION.test(text)) {
+    reasons.push(
+      "「我马上/这就再提醒一遍」「这就去核实」这类将来时把自己马上要做的动作念了出来——" +
+        "已经做了的就用完成时自然说（“已经提醒过了”）；还没做、但这轮该做的，" +
+        "现在就用工具做完再回话；只在自己脑内安排的步骤不要写给住户。"
+    );
+  }
+  if (reasons.length === 0) return null;
+  return { broke: "0", why: reasons.join("\n") };
+}
+
 function isGeneratedResidentName(name: string): boolean {
   return /^\d+号住客$/.test(name.trim());
 }
@@ -3678,7 +3728,11 @@ export async function runColivingTurn(args: {
           "提前当成唯一出路，也不能把设备调查派回给收信人。",
       };
     }
-    return checkFalseContactClaim(text) ?? checkIncompleteConflictTurn(text);
+    return (
+      checkFalseContactClaim(text) ??
+      checkIncompleteConflictTurn(text) ??
+      checkProcessNarration(text)
+    );
   }
 
   const factFidelityHit = checkFactFidelity(reply);
