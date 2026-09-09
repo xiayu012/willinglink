@@ -311,11 +311,42 @@ async function main() {
     assert(checkProcessNarration("这个我会找她谈，不会只听一面。"), "“会”将来时自述动作必须命中");
     assert(checkProcessNarration("她提的事，我会单独听。"), "“我会单独听”将来时自述动作必须命中");
     assert(checkProcessNarration("有进展我跟你说。"), "有条件拖延汇报必须命中");
+    // Codex 三轮重放抓到（corpus-026 隐私、corpus-025 不请自来的整理）：大脑把
+    // “对方会猜到是你”的身份推断、以及“要不要我换成不提是谁”的隐私处理选项念给了投诉人。
+    assert(checkProcessNarration("他一想就知道是你提的。"), "“猜到是你提的”身份推断必须命中");
+    assert(checkProcessNarration("可能一下就能猜到是你提的。"), "“猜到是你提的”身份推断必须命中");
+    assert(checkProcessNarration("看得出是你说的。"), "“看得出是你说的”身份推断必须命中");
+    assert(checkProcessNarration("你要是担心，说一声我换个接法。"), "“我换个接法”隐私处理选项必须命中");
+    assert(
+      checkProcessNarration("我改成对全屋统一提醒、不提具体是谁。"),
+      "“改成…不提具体是谁”隐私处理选项必须命中"
+    );
+    assert(checkProcessNarration("不提具体是谁。"), "“不提具体是谁”隐私处理选项必须命中");
+    // Codex 四轮重放抓到（corpus-025）仍漏两种变体：「他大概想得到是你说的」是「想到」的
+    // 「X 得到」变体；「我换个更笼统的说法」是「换个接法」放宽后的「说法/方式/口径」变体。
+    assert(checkProcessNarration("他大概想得到是你说的。"), "“想得到是你说的”身份推断必须命中");
+    assert(checkProcessNarration("对方猜得到是你反映的。"), "“猜得到是你反映的”身份推断必须命中");
+    assert(checkProcessNarration("看得到是你说的。"), "“看得到是你说的”身份推断必须命中");
+    assert(checkProcessNarration("我换个更笼统的说法。"), "“换个更笼统的说法”隐私处理选项必须命中");
+    assert(checkProcessNarration("我换一个更模糊的说法。"), "“换一个更模糊的说法”隐私处理选项必须命中");
+    assert(checkProcessNarration("换成不点名的口径跟全屋统一说。"), "“换成不点名的口径”隐私处理选项必须命中");
+    // “不会提到是你说的 / 我不提是谁说的”仍只由 source-secrecy 单组抓：身份推断组不得
+    // 重复命中（不重复也不互斥），所以命中的理由必须恰好一条。
+    const secrecyOnly = checkProcessNarration("不会提到是你说的。");
+    assert(secrecyOnly, "来源保密说出口必须命中");
+    assert.equal(secrecyOnly.why.split("\n").length, 1, "来源保密句不得被身份推断组重复命中");
+    const secrecyOnly2 = checkProcessNarration("我不提是谁说的。");
+    assert(secrecyOnly2, "来源保密说出口必须命中");
+    assert.equal(secrecyOnly2.why.split("\n").length, 1, "来源保密句不得被身份推断组重复命中");
   });
   check("legitimate whole-house / completed-tense / resident-target wording is not process narration", () => {
+    // 全屋口径必要下一步、完成时已发生事实、冲当前住户的指令都不得被第 4 组身份推断
+    // 或 source-secrecy 误伤；其中「这条我跟全屋说一遍」「你之后把厨余装袋、口扎紧再扔」
+    // 「两边的话我都会听」由下方既有断言覆盖。
     assert.equal(checkProcessNarration("这条我跟全屋说一遍。"), null, "全屋口径必要下一步不算内部流程");
     assert.equal(checkProcessNarration("我会跟大家讲。"), null, "全屋口径必要下一步不算内部流程");
     assert.equal(checkProcessNarration("已经提醒过全屋了。"), null, "完成时陈述已发生的事实不算");
+    assert.equal(checkProcessNarration("已经跟全屋说过了。"), null, "完成时陈述已发生的事实不算");
     assert.equal(checkProcessNarration("已经跟小吴说过装袋的事了。"), null, "完成时陈述已发生的事实不算");
     assert.equal(checkProcessNarration("你之后把厨余装袋、口扎紧再扔。"), null, "直接对当前住户的必要指令不算");
     assert.equal(checkProcessNarration("收到，我记下了。"), null, "纯确认不算");
