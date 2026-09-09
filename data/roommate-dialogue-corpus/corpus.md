@@ -6,8 +6,8 @@
 
 档位：A=最像现实且弧线完整；B=相关但略短或剧情化稍强。优先级：P0=核心必跑；P1=常规抽跑；P2=按需/几乎不跑。
 
-- **P0 核心必跑（13）**：002、003、004、005、006、008、010、013、015、016、017、018、024
-- **P1 常规抽跑（10）**：001、007、009、011、012、014、019、021、022、023
+- **P0 核心必跑（15）**：002、003、004、005、006、008、010、013、015、016、017、018、024、026、029
+- **P1 常规抽跑（13）**：001、007、009、011、012、014、019、021、022、023、025、027、028
 - **P2 按需（1）**：020
 
 完整机器可读清单见 `corpus-index.json`。
@@ -901,3 +901,166 @@ Leonard: Fine, I'll take it.
 【这个片段为什么有价值】把“搬进前立规矩”极端化却又不失真：看房时被盘问、公共座位被长期占用、卫生间要排时间表，都是合租里真实存在、只是通常更含蓄的权力博弈；适合“新室友入住/房屋规则/卫生间安排”类情景。
 
 【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=big-bang-theory&episode=s03e22
+
+---
+
+### 025
+
+【编号】025
+【档位】A
+【优先级】P1
+
+【来源作品】New Girl（杰茜驾到）
+
+【季/集】Season 2 Episode 5 — Models
+
+【来源类型】电视剧
+
+【冲突类别】清洁 / 隐私
+
+【参与人物】Jess、Nick
+
+【冲突背景】Schmidt 习惯不请自来地替 Nick 收拾房间：每周进去打扫、把东西摆回原位，还洗掉 Nick 故意留下的脏旧 T 恤。Nick 不领情，反而觉得自己连“生活在自己的脏乱里”的自由都没有。Jess 在一旁试图让他理解这是 Schmidt 的付出方式。
+
+【对白片段】
+
+Jess: Do you know, once a week he goes into your room and cleans it, and then returns everything the way he found it? The dirty old T-shirts, which he washes.
+Nick: And I'm weird in this situation? I didn't ask for that. I like living in my filthy messes.
+Jess: That's the point, man. You didn't have to ask.
+
+【这个片段为什么有价值】“我为你好”式的越界照顾：一方觉得自己在付出，另一方觉得个人空间被侵犯、连脏乱都被擅自清理。它抓的是合租里“边界感”的高频摩擦，而非谁懒谁勤快；适合“清洁/隐私/边界”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=new-girl&episode=s02e05
+
+---
+
+### 026
+
+【编号】026
+【档位】A
+【优先级】P0
+
+【来源作品】New Girl（杰茜驾到）
+
+【季/集】Season 1 Episode 16 — Control
+
+【来源类型】电视剧
+
+【冲突类别】公共空间 / 物品使用 / 规则制定
+
+【参与人物】Schmidt、Jess
+
+【冲突背景】Jess 想把一件从街上捡来的柜子放进客厅，Schmidt 以“loft 里不能出现松木”为由一票否决；Jess 强调自己也交房租、有权利给公共空间添点东西，两人直接顶起来。
+
+【对白片段】
+
+Schmidt: Get rid of it, Jess. Pine has no place in this loft. The wood of poor people and outhouses.
+Jess: I pay rent. I think that gives me the right to add a few things.
+Schmidt: Jess, you are wrong. My answer is no.
+Jess: Well, my answer is yes. I'm keeping the hutch.
+
+【这个片段为什么有价值】公共空间“谁能往里面放东西”的权力之争，叠加了“我交房租所以我有权”这个很现实的论据；一方拿审美/规则压人，一方拿交钱说事，双方立场都很典型。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=new-girl&episode=s01e16
+
+---
+
+### 027
+
+【编号】027
+【档位】A
+【优先级】P1
+
+【来源作品】Friends（老友记）
+
+【季/集】Season 1 Episode 13 — The One With the Boobies
+
+【来源类型】电视剧
+
+【冲突类别】隐私
+
+【参与人物】Rachel、Chandler
+
+【冲突背景】Chandler 没敲门就闯进浴室，撞见 Rachel 没穿好衣服；Rachel 恼的不是尴尬，而是对方不敲门、不尊重隐私，Chandler 却还在嘴硬找补。
+
+【对白片段】
+
+Rachel: That is it! You barge in here and you don't knock? You have no respect for privacy. No, you wait!
+Chandler: Can I just say one thing?
+Rachel: What?!
+Chandler: That's a relatively open weave. I can still see your nippular areas.
+
+【这个片段为什么有价值】合租里最典型的“不敲门闯进来”隐私冲突：被冒犯的人把矛头直接指向“尊重”，冒犯者却用玩笑岔开，冲突点清晰、对白自然，适合“隐私/敲门/边界”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=friends&episode=s01e13
+
+---
+
+### 028
+
+【编号】028
+【档位】A
+【优先级】P1
+
+【来源作品】How I Met Your Mother（老爸老妈浪漫史）
+
+【季/集】Season 1 Episode 8 — The Duel
+
+【来源类型】电视剧
+
+【冲突类别】搬走 / 房间分配
+
+【参与人物】Ted、Marshall、Barney
+
+【冲突背景】Ted 和 Marshall 是室友，Marshall 和 Lily 刚订婚。Barney 抛出两人一直刻意回避的问题：结婚后到底谁搬出去、公寓归谁。Ted 和 Marshall 先是想推给“未来的自己”，随后又被 Barney 点破“现在这里已经变了、你正在被慢慢挤出去”。
+
+【对白片段】
+
+Barney: You and Marshall are roommates. You have an amazing apartment. Marshall and Lily just got engaged.
+Ted: So?
+Barney: So, you're not still gonna be his roommate when he gets married, are you? Someone's going to move out. So, who's it going to be?
+Ted: Come on, Barney, I'm sure they've talked about who gets the apartment.
+Barney: You've talked about who gets the apartment, right?
+Marshall: Yeah, we've talked about it.
+Marshall: So, when Lily and I get married, who's gonna get the apartment?
+Ted: That's a tough one. You know who I think could handle a problem like that? Future Ted and Future Marshall.
+Marshall: Totally. Let's let those guys handle it.
+Barney: Now that Lily's there, it's a whole new dynamic. They're edging you out.
+Ted: That's crazy. They're not edging me out. Marshall's my best friend. He wouldn't do that to me.
+
+【这个片段为什么有价值】室友关系因一方结婚/伴侣搬入而变质的典型转折：谁搬走、谁留公寓成为被回避却绕不开的问题，还叠了一层“被排挤”的不安。贴近合租里“生活阶段变化导致居住安排重谈”的高频矛盾。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=how-i-met-your-mother&episode=s01e08
+
+---
+
+### 029
+
+【编号】029
+【档位】A
+【优先级】P0
+
+【来源作品】Girls（都市女孩）
+
+【季/集】Season 1 Episode 5 — Hard Being Easy
+
+【来源类型】电视剧
+
+【冲突类别】隐私 / 房租
+
+【参与人物】Marnie、Hannah
+
+【冲突背景】Hannah 把 Marnie 的感情生活写进自己的笔记本（准备出书），Marnie 发现后非常生气，认为这不是她可以拿来写的东西；争吵中 Hannah 以“公寓共同体的一员”自居，Marnie 直接点破她连房租都不交，Hannah 又反过来指责对方男友乱翻自己东西。
+
+【对白片段】
+
+Marnie: It's not yours to write about, Hannah. It's my life.
+Hannah: Okay, I deserve honesty and respect because I am an important part of this community.
+Marnie: What community?
+Hannah: The community of this apartment.
+Marnie: You don't pay rent.
+Hannah: Oh, shut up. He was snooping through all my stuff. That's like a crime.
+
+【这个片段为什么有价值】把“隐私被当作素材”和“白住不交房租”两个真实痛点叠在一起：一方拿共同体身份要求尊重，另一方拿金钱贡献反驳，越吵越暴露居住关系里的不对等；适合“隐私/房租/白住”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=girls&episode=s01e05
