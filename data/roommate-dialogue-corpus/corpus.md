@@ -6,7 +6,7 @@
 
 档位：A=最像现实且弧线完整；B=相关但略短或剧情化稍强。优先级：P0=核心必跑；P1=常规抽跑；P2=按需/几乎不跑。
 
-- **P0 核心必跑（12）**：002、003、004、005、006、008、010、013、015、016、017、018
+- **P0 核心必跑（13）**：002、003、004、005、006、008、010、013、015、016、017、018、024
 - **P1 常规抽跑（10）**：001、007、009、011、012、014、019、021、022、023
 - **P2 按需（1）**：020
 
@@ -460,6 +460,42 @@ Heckles: Thank you.
 【这个片段为什么有价值】上下楼邻居之间“你太吵/我没吵/你根本没养鸟”的经典噪音投诉，一方理直气壮、另一方被迫妥协；虽然关系是邻居而非同住室友，但噪音冲突的对话结构完全通用。
 
 【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=friends&episode=s02e03
+
+---
+
+### 024
+
+【编号】024
+【档位】A
+【优先级】P0
+
+【来源作品】The Big Bang Theory（生活大爆炸）
+
+【季/集】Season 12 Episode 22 — The Maternal Conclusion
+
+【来源类型】电视剧
+
+【冲突类别】访客 / 情侣过夜
+
+【参与人物】Howard、Raj
+
+【冲突背景】Raj 租住在 Howard 和 Bernadette 家，最近总把女友 Denise 往家里带。Howard 提醒他“这是我家、你是不是该先问问我”，并直言 Denise 基本算住进来了，建议他们分一半时间去她家。Raj 却翻出“我搬进来时你们说可以带女生回家”当挡箭牌。
+
+【对白片段】
+
+Howard: So she's coming over again, huh?
+Raj: Yeah, we're gonna do a movie night.
+Howard: It's my house. Don't you think you should ask me?
+Raj: You're right, I'm sorry. Howard, would you like to come to movie night?
+Howard: Doesn't she have her own place? Why don't you guys hang out there?
+Raj: Oh, she has a roommate, and he's kind of creepy. And that's coming from me.
+Howard: It just feels like Denise is basically living with us. You know, maybe you can spend half the time at her place.
+Raj: Hey, when I moved in, you and Bernadette said it was okay if I brought girls over.
+Howard: Oh. We were making fun of you.
+
+【这个片段为什么有价值】直击合租里“室友的对象几乎天天来、变成半个室友”的高频矛盾：一方抱怨公共空间被长期占用，另一方拿早前的口头许可当理由；两人立场清晰，非常适合“访客/对象过夜/边界”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=big-bang-theory&episode=s12e22
 
 ---
 
