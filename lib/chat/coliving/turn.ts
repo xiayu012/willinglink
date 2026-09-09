@@ -3488,30 +3488,9 @@ export async function runColivingTurn(args: {
           `${publicNames.get(assignment.name) ?? "一位住户"} ${formatMinutes(assignment.startMinutes)}-${formatMinutes(assignment.endMinutes)}`
       )
       .join("，");
-    const participantNames = new Set(selection.plan.assignments.map((a) => a.name));
-    const acceptedOriginalNames = outbound
-      .filter((message) => !message.blocked)
-      .map((message) => outboundNames.get(message.personId) ?? "")
-      .filter((name) => name && name !== sender.name && participantNames.has(name));
-    const acceptedNames = acceptedOriginalNames.map(
-      (name) => publicNames.get(name) ?? "另一位住户"
-    );
-    const alreadyAskedNames = [...recentlyCovered.values()]
-      .map((covered) => covered.name)
-      .filter((name) => name !== sender.name && participantNames.has(name))
-      .map((name) => publicNames.get(name) ?? "另一位住户");
     return (
-      `我先按你们已确认的可用时间、偏好和使用时长，为${windowLabel}排出一版待确认方案：` +
-      `${assignments}。这不是定案。` +
-      (acceptedNames.length
-        ? `这轮我也在向${acceptedNames.join("、")}征求意见；` +
-          (alreadyAskedNames.length
-            ? `${alreadyAskedNames.join("、")}前面已问过，正在等回复；`
-            : "") +
-          "收到回复后我继续协调并告诉你。"
-        : alreadyAskedNames.length
-          ? `${alreadyAskedNames.join("、")}前面已问过，正在等回复；这版仍不能说成大家已经同意。`
-        : "这轮没有新增征询；这版仍不能说成大家已经同意。")
+      `我先按目前收到的可用时间，为${windowLabel}排一版：` +
+      `${assignments}。先这么排，不合适跟我说，我再调。`
     );
   };
   const buildContactProgressReply = (): string | null => {
