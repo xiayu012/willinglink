@@ -94,7 +94,7 @@ export const colivingBrain: Brain = {
     },
     {
       id: "tenancy",
-      title: "入住 / 规则 / 退租",
+      title: "入住 / 退租 / 违规与执行",
       file: "domain/tenancy.md",
       layer: "domain",
     },
@@ -138,6 +138,13 @@ export const colivingBrain: Brain = {
       file: "special-cases/guests.md",
       layer: "special-case",
       purpose: "访客/过夜规则",
+    },
+    {
+      id: "house-rules",
+      title: "房屋规则",
+      file: "special-cases/house-rules.md",
+      layer: "special-case",
+      purpose: "安静时段/访客/垃圾等共同约定的定义与正当性",
     },
     {
       id: "records",
@@ -188,13 +195,23 @@ export const colivingBrain: Brain = {
     // ── 简单事实询问：短路，避免为一句话查询拉进整份准则 ──────────────
     // 三个条件同时满足才算：够短(≤30字) + 含疑问词 + 不涉及具体某个人。
     // 涉及人的短问句（"他几点回来的?"）不走这条——那可能是冲突或隐私问题。
+    // 短句金钱询问排在通用事实询问之前：一句"房租多少钱？"直接短路到金钱边界，
+    // 不再被下面的通用规则询问吞进房屋规则模块。
+    {
+      match: [
+        /^(?=[\s\S]{0,30}$)(?![\s\S]*(他|她|室友|房友|楼上|楼下|隔壁|那个人|roommate|housemate))[\s\S]*(房租|租金|押金|水电|账单|多少钱|欠|分摊)/,
+      ],
+      modules: ["money"],
+      exclusive: true,
+      reason: "短句金钱询问，短路到金钱边界",
+    },
     {
       match: [
         /^(?=[\s\S]{0,30}$)(?![\s\S]*(他|她|室友|房友|楼上|楼下|隔壁|那个人|roommate|housemate))[\s\S]*(周几|礼拜几|星期几|哪天|几点|什么时候|多久|多少钱|在哪|怎么走|规定|可以吗|行吗|能不能)/,
       ],
-      modules: ["tenancy"],
+      modules: ["house-rules"],
       exclusive: true,
-      reason: "简单事实询问（短句+疑问词+不涉及具体某人）",
+      reason: "短句事实/规则询问（垃圾周几倒、安静时段几点等）",
     },
 
     // ── 常规情境 ────────────────────────────────────────────────
@@ -265,10 +282,15 @@ export const colivingBrain: Brain = {
       match: [
         /搬进|入住|新来|move in|新室友|刚到/,
         /搬走|退租|move out|不住了|退房|通知期/,
-        /规矩|规则|rule|policy|几点|安静时段|quiet hours|能不能.*养|可以.*抽烟/,
+        /违规|违约|违反|警告|处罚|处分|驱逐|evict|kick.*out/,
       ],
       modules: ["tenancy"],
-      reason: "入住 / 规则 / 退租",
+      reason: "入住 / 退租 / 违规与执行",
+    },
+    {
+      match: [/规矩|规则|rule|policy|安静时段|quiet hours|能不能.*养|可以.*抽烟/],
+      modules: ["house-rules"],
+      reason: "房屋规则的询问/制定与正当性",
     },
     {
       match: [

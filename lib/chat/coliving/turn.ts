@@ -2958,6 +2958,7 @@ export async function runColivingTurn(args: {
    */
   const hasUnconfirmedName = ctx.members.some((m) => !m.nameConfirmed);
   const topicHitsTenancy = loadedModuleIds.includes("tenancy");
+  const topicHitsHouseRules = loadedModuleIds.includes("house-rules");
   const topicHitsConflict = loadedModuleIds.includes("conflict");
   const environmentSignal =
     /外面|楼下|隔壁|邻居|街上|马路|街道|施工|装修|工地|天气|下雨|下雪|刮风|很臭|臭味|气味|烟味|油烟|噪音|噪声|吵|太响/i.test(
@@ -2985,7 +2986,7 @@ export async function runColivingTurn(args: {
   if (hasUnconfirmedName) {
     activeTools.renamePerson = tools.renamePerson;
   }
-  if (topicHitsTenancy || topicHitsConflict) {
+  if (topicHitsTenancy || topicHitsHouseRules || topicHitsConflict) {
     activeTools.proposeRule = tools.proposeRule;
     activeTools.recordStance = tools.recordStance;
     activeTools.scheduleReminder = tools.scheduleReminder;
