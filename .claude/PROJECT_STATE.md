@@ -23,10 +23,10 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 
 ### A. 室友矛盾对白语料库（最近活跃，线程因 payload 过大中断）
 
-- 进度：已提交 fragment 001–024，另有 `corpus-index.json` 与 `README.md`；工作树干净。
+- 进度：已提交 fragment 001–031，另有 `corpus-index.json` 与 `README.md`；工作树干净。
 - 目标：老板原话「奔着无限多去，直到网上爬取不到更多」。
 - 产物：`data/roommate-dialogue-corpus/`；素材缓存 `.claude/transcripts-cache/`（gitignore）。
-- 下一步（待确认）：继续采集更多冲突片段，补未覆盖类别。
+- 下一步：继续采集更多冲突片段，补未覆盖类别（噪音、访客/对象过夜、食物、作息、温度等仍偏薄）。
 
 ### B. 合租大脑「回复唯一作者」重构（已验收推送）
 
