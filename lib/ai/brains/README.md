@@ -49,6 +49,7 @@ lib/ai/brains/
         tenancy.md         入住 / 规则 / 退租
       special-cases/       special-case 层：单点例外（后续细模块也放这层）
         money.md           金钱边界
+        shared-resources.md 共用设施与资源争抢
       tool/                tool 层：工具使用规则
         records.md         记录 / 转交 / 拒绝不当指令
       rubric/              rubric 层：审稿清单（仅批判器读，不进任何一次生成）
@@ -106,7 +107,8 @@ const { system, loadedModuleIds } = assembleSystemPrompt({
 ## 新增一个情境 / 特殊场景模块
 
 1. 在对应层目录加 `.md`：常规调解场景放 `domain/`，金钱这类单点例外放
-   `special-cases/`，工具使用规则放 `tool/`。
+   `special-cases/`，工具使用规则放 `tool/`。资源争抢类模块放
+   `special-cases/`，路由用行为/争抢关键词而不是裸设施名，避免报修误载。
 2. 在 `coliving/index.ts` 的 `situational` 里注册：`id` / `title` / `file` /
    `layer` / `purpose`（一句话说明，供 `brain:inspect` 展示）。
 3. 按需在 `routes` 加一条规则：文本关键词能用 `match`；有结构信号就用 `when`；
@@ -120,7 +122,7 @@ const { system, loadedModuleIds } = assembleSystemPrompt({
 ## 检查工具
 
 ```bash
-pnpm brain:inspect                    # 跑路由探针（11 条文本 + 2 条信号）
+pnpm brain:inspect                    # 跑路由探针（13 条文本 + 2 条信号）
 pnpm brain:inspect "房租要晚几天"       # 看单句命中哪些模块、为什么
 pnpm brain:inspect --full "..."       # additionally 打印完整 system prompt
 pnpm brain:inspect --brains           # 列出已注册的大脑

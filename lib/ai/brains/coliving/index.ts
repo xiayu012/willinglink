@@ -105,6 +105,13 @@ export const colivingBrain: Brain = {
       layer: "special-case",
     },
     {
+      id: "shared-resources",
+      title: "共用设施与资源争抢",
+      file: "special-cases/shared-resources.md",
+      layer: "special-case",
+      purpose: "厨房/卫浴/洗衣/清洁/噪音/访客等共用资源的具体处置库",
+    },
+    {
       id: "records",
       title: "记录 / 转交 / 拒绝不当指令",
       file: "tool/records.md",
@@ -180,6 +187,21 @@ export const colivingBrain: Brain = {
       reason: "同住人之间的摩擦",
     },
     {
+      // 资源争抢的处置库：只匹配「争抢/行为」信号，不匹配裸设施名
+      // （避免「厨房漏水」这种报修也拉进资源处置库——报修走 records）
+      match: [
+        /做饭|做菜|煮饭|用餐|吃饭|挨饿|排班|时段|错开|先来后到|轮流/,
+        /脏|不洗|卫生|垃圾|trash|臭|味|smell|油烟|清洁|打扫/,
+        /吵|噪音|noise|loud|太响|睡不着|动静|外放/,
+        /带人|客人|guest|过夜|留宿/,
+        /占|抢|不公平|凭什么|一直占|老是占|总是占|太久|时间太长|每次都/,
+        /冰箱|储物|纸巾|洗洁精|我的东西/,
+        /kitchen|bathroom|shower|laundry|fridge|parking/i,
+      ],
+      modules: ["shared-resources"],
+      reason: "共用设施/资源争抢的具体处置库",
+    },
+    {
       match: [
         /投诉|反映|受不了|忍不了|complain|不舒服|不顺手/,
         /丢了|被偷|不见了|steal|stolen|missing/,
@@ -217,5 +239,7 @@ export const colivingBrain: Brain = {
   // 判断不了时给风险与升级判据——它包含定级标准，是最安全的兜底
   fallback: ["complaint-risk"],
 
-  maxSituational: 2,
+  // 资源争抢消息会同时命中 conflict + shared-resources，且可能叠加 complaint-risk，
+  // 2 会挤掉安全/风险模块。
+  maxSituational: 3,
 };
