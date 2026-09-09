@@ -6,8 +6,8 @@
 
 档位：A=最像现实且弧线完整；B=相关但略短或剧情化稍强。优先级：P0=核心必跑；P1=常规抽跑；P2=按需/几乎不跑。
 
-- **P0 核心必跑（15）**：002、003、004、005、006、008、010、013、015、016、017、018、024、026、029
-- **P1 常规抽跑（13）**：001、007、009、011、012、014、019、021、022、023、025、027、028
+- **P0 核心必跑（16）**：002、003、004、005、006、008、010、013、015、016、017、018、024、026、029、031
+- **P1 常规抽跑（14）**：001、007、009、011、012、014、019、021、022、023、025、027、028、030
 - **P2 按需（1）**：020
 
 完整机器可读清单见 `corpus-index.json`。
@@ -1064,3 +1064,68 @@ Hannah: Oh, shut up. He was snooping through all my stuff. That's like a crime.
 【这个片段为什么有价值】把“隐私被当作素材”和“白住不交房租”两个真实痛点叠在一起：一方拿共同体身份要求尊重，另一方拿金钱贡献反驳，越吵越暴露居住关系里的不对等；适合“隐私/房租/白住”类情景。
 
 【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=girls&episode=s01e05
+
+---
+
+### 030
+
+【编号】030
+【档位】A
+【优先级】P1
+
+【来源作品】New Girl（杰茜驾到）
+
+【季/集】Season 2 Episode 4 — Neighbors
+
+【来源类型】电视剧
+
+【冲突类别】噪音
+
+【参与人物】Nick、Schmidt
+
+【冲突背景】Schmidt 在客厅把电视音量开得很大，Nick 过去让他调小，因为 Jess 已经连续 48 小时没睡、正在补觉；Schmidt 却装作没听见、还想抵赖。
+
+【对白片段】
+
+Nick: Turn it down, man! Turn it down!
+Schmidt: Turn it what?
+Nick: It's too loud! Schmidt, you're blasting the TV, you maniac! You can hear that? It's blasting, Schmidt! Jess is trying to sleep!
+Schmidt: You can hear this?
+Nick: Uh, yes.
+
+【这个片段为什么有价值】“有人要睡觉、有人把电视开太响”是合租最日常的噪音摩擦；被抱怨的一方第一反应是装傻抵赖，冲突结构简单但完整，适合“噪音/作息”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=new-girl&episode=s02e04
+
+---
+
+### 031
+
+【编号】031
+【档位】A
+【优先级】P0
+
+【来源作品】Community（废柴联盟）
+
+【季/集】Season 5 Episode 9 — VCR Maintenance and Educational Publishing
+
+【来源类型】电视剧
+
+【冲突类别】搬进 / 房租 / 换室友
+
+【参与人物】Annie、Abed
+
+【冲突背景】Annie 和 Abed 合租，房租已经快摊不起了。Annie 提出让自己哥哥 Anthony 搬进来一起分摊，Abed 却想让他女朋友 Rachel 搬进来；两人都否决对方的候选人，谁也不肯让步。
+
+【对白片段】
+
+Annie: What would you think about my brother moving in with us?
+Abed: I guess my knee-jerk concern would be that he's a Viking and might only use our home as a temporary base before moving inland where lumber is more plentiful.
+Annie: He's a good guy. We can't afford to keep splitting the rent two ways. You have a better idea?
+Abed: How about Rachel?
+Annie: Is that a joke? You've been dating Rachel for a month. I ain't living with your month-long girlfriend, brah.
+Abed: Well, I ain't living with your wack-ass, don't-know-whether-to-keep-cutting-carrots-or-ask-if-he-can-take-a-poop brother.
+
+【这个片段为什么有价值】房租压力逼出来的“该让谁搬进来”之争：一方想拉家人分担，另一方想拉对象，两边都嫌对方人选不靠谱；是合租里“换室友/招室友”决策矛盾的典型样本。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=community&episode=s05e09
