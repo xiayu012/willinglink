@@ -6,8 +6,8 @@
 
 档位：A=最像现实且弧线完整；B=相关但略短或剧情化稍强。优先级：P0=核心必跑；P1=常规抽跑；P2=按需/几乎不跑。
 
-- **P0 核心必跑（16）**：002、003、004、005、006、008、010、013、015、016、017、018、024、026、029、031
-- **P1 常规抽跑（14）**：001、007、009、011、012、014、019、021、022、023、025、027、028、030
+- **P0 核心必跑（15）**：002、003、004、005、006、008、010、013、015、016、017、018、024、028、030
+- **P1 常规抽跑（14）**：001、007、009、011、012、014、019、021、022、023、025、026、027、029
 - **P2 按需（1）**：020
 
 完整机器可读清单见 `corpus-index.json`。
@@ -938,37 +938,6 @@ Jess: That's the point, man. You didn't have to ask.
 
 【编号】026
 【档位】A
-【优先级】P0
-
-【来源作品】New Girl（杰茜驾到）
-
-【季/集】Season 1 Episode 16 — Control
-
-【来源类型】电视剧
-
-【冲突类别】公共空间 / 物品使用 / 规则制定
-
-【参与人物】Schmidt、Jess
-
-【冲突背景】Jess 想把一件从街上捡来的柜子放进客厅，Schmidt 以“loft 里不能出现松木”为由一票否决；Jess 强调自己也交房租、有权利给公共空间添点东西，两人直接顶起来。
-
-【对白片段】
-
-Schmidt: Get rid of it, Jess. Pine has no place in this loft. The wood of poor people and outhouses.
-Jess: I pay rent. I think that gives me the right to add a few things.
-Schmidt: Jess, you are wrong. My answer is no.
-Jess: Well, my answer is yes. I'm keeping the hutch.
-
-【这个片段为什么有价值】公共空间“谁能往里面放东西”的权力之争，叠加了“我交房租所以我有权”这个很现实的论据；一方拿审美/规则压人，一方拿交钱说事，双方立场都很典型。
-
-【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=new-girl&episode=s01e16
-
----
-
-### 027
-
-【编号】027
-【档位】A
 【优先级】P1
 
 【来源作品】Friends（老友记）
@@ -996,9 +965,9 @@ Chandler: That's a relatively open weave. I can still see your nippular areas.
 
 ---
 
-### 028
+### 027
 
-【编号】028
+【编号】027
 【档位】A
 【优先级】P1
 
@@ -1034,9 +1003,9 @@ Ted: That's crazy. They're not edging me out. Marshall's my best friend. He woul
 
 ---
 
-### 029
+### 028
 
-【编号】029
+【编号】028
 【档位】A
 【优先级】P0
 
@@ -1067,9 +1036,9 @@ Hannah: Oh, shut up. He was snooping through all my stuff. That's like a crime.
 
 ---
 
-### 030
+### 029
 
-【编号】030
+【编号】029
 【档位】A
 【优先级】P1
 
@@ -1099,9 +1068,9 @@ Nick: Uh, yes.
 
 ---
 
-### 031
+### 030
 
-【编号】031
+【编号】030
 【档位】A
 【优先级】P0
 
