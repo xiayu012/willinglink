@@ -7,7 +7,7 @@
 档位：A=最像现实且弧线完整；B=相关但略短或剧情化稍强。优先级：P0=核心必跑；P1=常规抽跑；P2=按需/几乎不跑。
 
 - **P0 核心必跑（12）**：002、003、004、005、006、008、010、013、015、016、017、018
-- **P1 常规抽跑（8）**：001、007、009、011、012、014、019、021
+- **P1 常规抽跑（10）**：001、007、009、011、012、014、019、021、022、023
 - **P2 按需（1）**：020
 
 完整机器可读清单见 `corpus-index.json`。
@@ -393,6 +393,73 @@ Sheldon: That didn't work out, did it?
 【这个片段为什么有价值】把“室友不分时间闯进房间、把睡觉当成可以随时打断的事”的隐私冲突浓缩得很到位；被吵醒方抗议、闯门方理直气壮，适合“隐私/作息打扰”类情景。
 
 【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=big-bang-theory&episode=s03e14
+
+---
+
+### 022
+
+【编号】022
+【档位】A
+【优先级】P1
+
+【来源作品】Community（废柴联盟）
+
+【季/集】Season 1 Episode 25 — Pascal's Triangle Revisited
+
+【来源类型】电视剧
+
+【冲突类别】搬进 / 房间分配
+
+【参与人物】Troy、Abed
+
+【冲突背景】Troy 说 Pierce 邀请他搬进豪宅，Abed 竟然赞成。Troy 觉得“我们不是朋友吗”，Abed 却认真解释：正因为是好朋友，才更不该当室友，否则天天被鸡毛蒜皮消磨，迟早要在地板中间贴一条胶带分界。
+
+【对白片段】
+
+Troy: Pierce asked me to move in with him, in his mansion.
+Abed: More of a spin-off vibe, but you should do it.
+Troy: I thought we were friends.
+Abed: We are. Best friends, that's why we shouldn't be roommates. We'll end up fighting and putting a masking tape line down the middle of our room.
+Troy: We just won't get masking tape.
+Abed: Troy. You should live with someone who you like but whose friendship wouldn't be altered because of constant irritation. If you and I move in, we jump the shark.
+
+【这个片段为什么有价值】把“关系越好反而越不该同居”这个真实顾虑讲得很清楚，也带出合租常见的“胶带分界”意象；两人立场不同但都认真，适合“搬进/该不该跟熟人合租”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=community&episode=s01e25
+
+---
+
+### 023
+
+【编号】023
+【档位】A
+【优先级】P1
+
+【来源作品】Friends（老友记）
+
+【季/集】Season 2 Episode 3 — The One Where Heckles Dies
+
+【来源类型】电视剧
+
+【冲突类别】噪音
+
+【参与人物】Heckles、Monica
+
+【冲突背景】住在楼下的 Heckles 上楼敲门，说 Monica 他们“又在跺脚”，吵到他的鸟了。Monica 说他们什么也没做、而且他根本没养鸟，Heckles 嘴硬“我可能养鸟”。最后 Monica 妥协说会小声点。
+
+【对白片段】
+
+Heckles: You're doing it again.
+Monica: We're not doing anything.
+Heckles: You're stomping. It's disturbing my birds.
+Monica: You don't have birds.
+Heckles: I could have birds.
+Monica: We'll try to keep it down.
+Heckles: Thank you.
+
+【这个片段为什么有价值】上下楼邻居之间“你太吵/我没吵/你根本没养鸟”的经典噪音投诉，一方理直气壮、另一方被迫妥协；虽然关系是邻居而非同住室友，但噪音冲突的对话结构完全通用。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=friends&episode=s02e03
 
 ---
 
