@@ -53,7 +53,7 @@ const PROBES: Array<{
   // 短句金钱询问：独占短路到金钱边界，不把房屋规则整份拉进来
   { text: "房租多少钱？", expect: ["money"], expectNot: ["house-rules"] },
   // 违反房屋规则：入住/退租/违规与执行（tenancy）+ 房屋规则（house-rules）同时加载
-  { text: "他违反了安静时段", expect: ["tenancy", "house-rules"] },
+  { text: "他违反了安静时段", expect: ["tenancy", "house-rules"], expectNot: ["scheduling"] },
   // 短问句但涉及具体某人：不该走独占短路（隐私/冲突信号，常驻层的不披露规则要生效）
   { text: "他昨天半夜几点回来的？", expect: [], forbidExclusive: true },
   { text: "你到底是房东那边的还是我们租客这边的？", expect: [] },
