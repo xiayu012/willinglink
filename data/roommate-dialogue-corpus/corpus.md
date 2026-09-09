@@ -2,11 +2,23 @@
 
 > 采集口径：真实像室友会发生的矛盾 > 可重复发生的生活摩擦 > 多方协调 > 极端戏剧冲突。
 
+## 分级索引（快速选样）
+
+档位：A=最像现实且弧线完整；B=相关但略短或剧情化稍强。优先级：P0=核心必跑；P1=常规抽跑；P2=按需/几乎不跑。
+
+- **P0 核心必跑（12）**：002、003、004、005、006、008、010、013、015、016、017、018
+- **P1 常规抽跑（8）**：001、007、009、011、012、014、019、021
+- **P2 按需（1）**：020
+
+完整机器可读清单见 `corpus-index.json`。
+
 ---
 
 ### 001
 
 【编号】001
+【档位】A
+【优先级】P1
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -40,6 +52,8 @@ Sheldon: I don't have to go to hell. At 73 degrees, I'm there already.
 ### 012
 
 【编号】012
+【档位】A
+【优先级】P1
 
 【来源作品】Friends（老友记）
 
@@ -71,6 +85,8 @@ Eddie: Relax! Take it easy, buddy! You don't have to tell me twice.
 ### 013
 
 【编号】013
+【档位】A
+【优先级】P0
 
 【来源作品】How I Met Your Mother（老爸老妈浪漫史）
 
@@ -106,6 +122,8 @@ Lily: You're right. I'll do the dishes.
 ### 014
 
 【编号】014
+【档位】A
+【优先级】P1
 
 【来源作品】New Girl（杰茜驾到）
 
@@ -141,6 +159,8 @@ Schmidt: The kind with the big room.
 ### 015
 
 【编号】015
+【档位】A
+【优先级】P0
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -173,6 +193,8 @@ Sheldon: And then you put it back.
 ### 016
 
 【编号】016
+【档位】A
+【优先级】P0
 
 【来源作品】Girls（都市女孩）
 
@@ -204,6 +226,8 @@ Hannah: I'm making it work.
 ### 017
 
 【编号】017
+【档位】A
+【优先级】P0
 
 【来源作品】Girls（都市女孩）
 
@@ -235,6 +259,8 @@ Marnie: I think maybe that's a good thing for me.
 ### 018
 
 【编号】018
+【档位】A
+【优先级】P0
 
 【来源作品】New Girl（杰茜驾到）
 
@@ -271,6 +297,8 @@ Nick: Sometimes. Who cares?
 ### 019
 
 【编号】019
+【档位】A
+【优先级】P1
 
 【来源作品】Friends（老友记）
 
@@ -301,6 +329,8 @@ Joey: I'm really happy for you guys. Congratulations. See you later.
 ### 020
 
 【编号】020
+【档位】B
+【优先级】P2
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -335,6 +365,8 @@ Sheldon: Of course you will. It's impossible to pay me back sooner than you can.
 ### 021
 
 【编号】021
+【档位】A
+【优先级】P1
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -367,6 +399,8 @@ Sheldon: That didn't work out, did it?
 ### 002
 
 【编号】002
+【档位】A
+【优先级】P0
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -407,6 +441,8 @@ Priya: The point is, Sheldon, the legal principle is ambiguity in a contract ben
 ### 003
 
 【编号】003
+【档位】A
+【优先级】P0
 
 【来源作品】New Girl（杰茜驾到）
 
@@ -449,6 +485,8 @@ Jess: It's a coffee grinder, Schmidt. I think it'll be okay.
 ### 004
 
 【编号】004
+【档位】A
+【优先级】P0
 
 【来源作品】New Girl（杰茜驾到）
 
@@ -493,6 +531,8 @@ Schmidt: Deserves-the-spot card.
 ### 005
 
 【编号】005
+【档位】A
+【优先级】P0
 
 【来源作品】Girls（都市女孩）
 
@@ -523,6 +563,8 @@ Marnie: I didn't say that.
 ### 006
 
 【编号】006
+【档位】A
+【优先级】P0
 
 【来源作品】New Girl（杰茜驾到）
 
@@ -561,6 +603,8 @@ Schmidt: Doy. It's a scissor. Yeah, that's exactly right. A scissor that you jus
 ### 007
 
 【编号】007
+【档位】B
+【优先级】P1
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -597,6 +641,8 @@ Leonard: Sheldon, I am really, really sorry, but it's only for a week. Can't you
 ### 008
 
 【编号】008
+【档位】A
+【优先级】P0
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -639,6 +685,8 @@ Leonard: Come on, that is ridiculous.
 ### 009
 
 【编号】009
+【档位】B
+【优先级】P1
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
@@ -675,6 +723,8 @@ Sheldon: Please note, it is now past 10 p.m. Per our roommate agreement, kindly 
 ### 010
 
 【编号】010
+【档位】A
+【优先级】P0
 
 【来源作品】How I Met Your Mother（老爸老妈浪漫史）
 
@@ -706,6 +756,8 @@ Robin: Okay, why don't you leave a full carton to remind us we don't have to buy
 ### 011
 
 【编号】011
+【档位】B
+【优先级】P1
 
 【来源作品】The Big Bang Theory（生活大爆炸）
 
