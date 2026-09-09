@@ -60,11 +60,11 @@ export function hasDeferredCoordination(text: string): boolean {
 
 /**
  * `还在`（"我还在问另外两位"）跟 `正在/已经` 一样，字面上是在声称一件
- * 正在发生的联系动作，容易让人以为这轮确实发出去了——同样要按"声称
- * 联系完成/进行中"处理，才能被下面的 accepted-outbound 分支替换成
- * 精确点名的 `buildContactProgressReply`。跟 `会/稍后/回头` 这类真正
- * 面向未来、还没开始的措辞区分开——那些不在这个标记列表里，
- * 保留原样，不算这里要拦的"误导性在途声称"。
+ * 正在发生的联系动作，容易被当成"这轮确实发出去了"——同样按"声称
+ * 联系完成/进行中"处理，交给 `checkFalseContactClaim` 核对：这一轮发给
+ * 对方的联系若被审稿拦下、实际没发出去，就不能用任何时态说成已联系/
+ * 正在联系。跟 `会/稍后/回头` 这类真正面向未来、还没开始的措辞区分开——
+ * 那些不在这个标记列表里，保留原样，不算这里要拦的"误导性在途声称"。
  */
 const CLAIMED_CONTACT_COMPLETION_PATTERN =
   /(?:(?:我|这边|马上|现在)?(?:正|正在|已经|这就|刚刚?|刚才|还在)(?:跟|和|给|去跟|去和|去给)?.{0,6}(?:发|说|商量|联系|问|通知|沟通|确认|谈|提|讲|劝|催|提醒|追)|(?:我|这边)[^。！？!?\n]{0,12}(?:问|联系|找|催|追|跟[^。！？!?\n]{0,6}(?:说|确认|核实|商量))[^。！？!?\n]{0,6}了)/;
@@ -124,7 +124,8 @@ export function isSimpleAffirmation(text: string): boolean {
  * 说话人正在**反对这次排班，而且质疑的是公平性**（"凭什么我让着别人"、
  * "最早提的就优先"这类）。真实事故（2026-09）：住户刚说不合适、不公平，
  * 确定性回复路径仍把同一版方案原样复述一遍还加一句"不合适跟我说"——等于没听。
- * 命中这类消息时 buildSelectedScheduleReply 改口提议轮换，不再把旧方案丢回。
+ * 命中这类消息时，`renderBaseFacts` 注入"先接住反对、提议轮换/重新协商"
+ * 的信号，doctrine 也有对应小节，让大脑别再原样丢回旧方案。
  */
 export function isScheduleFairnessObjection(text: string): boolean {
   return /不合适|不公平|凭什么|凭啥|不同意|不接受|让着|最早提/.test(text);
@@ -3125,15 +3126,17 @@ export async function runColivingTurn(args: {
   let reply = stripMarkdown(raw.trim());
 
   /**
-   * **落锤短回复：简单肯定 + 排班征询 → 代码直接覆盖，不让模型复述全屋方案。**
+   * **落锤短回复：简单肯定 + 排班征询 → 代码直接给短确认，不让模型复述全屋方案。**
    *
    * 真实事故（生产日志，2026-09-06）：住户回"愿意"，系统给完整排班表 +
-   * "还在问别人"——doctrine 已有条款但模型这条没有执行。这里用代码钉死：
-   * 只要检测到用户在回答一个排班征询且是简单肯定，就用短确认代替模型输出。
+   * "还在问别人"——doctrine 已有条款但模型这条没有执行。真正的短路在
+   * buildContext/主生成之前的"短路闸"（上方）：模型不跑、代码直接落短句；
+   * 这里是模型路径走完后的幂等防线——同一条件命中时再收口一次，防止任何
+   * 审稿/重写把短句替换成整张方案。它只发生在"模型本不该跑"的简单肯定回合，
+   * 不是替大脑写当前说话人的正文。
    *
-   * simpleScheduleAffirmation 状态让后续的 buildSelectedScheduleReply() 跳过覆盖——
-   * 三处调用（initialScheduleReply / finalScheduleReply / settledScheduleReply）
-   * 都检查这个标志，防止整张排班表重新覆盖这里设好的短回复。
+   * simpleScheduleAffirmation 标记这个回合是"代码短路落锤"，终稿（见收尾
+   * "最终落锤：简单肯定覆盖"）用它把短句最后再钉一次。
    */
   let simpleScheduleAffirmation = false;
   let simpleScheduleConfirmationText = "";
@@ -3280,6 +3283,10 @@ export async function runColivingTurn(args: {
           .join("；")}\n`
       : "") +
     `本轮调用的工具：${toolsUsed.join("、") || "无"}` +
+    (isScheduleFairnessObjection(args.text)
+      ? "\n⚠️ 说话人这轮在反对排班并质疑公平性。先回应他的反对，不要原样重复旧方案；" +
+        "应提议轮换或重新协商，别用谁先提出/谁先回复当排先后顺序的理由。"
+      : "") +
     (scheduleResults.length ? `\n${scheduleResults.join("\n")}` : "");
 
   /**
@@ -3469,77 +3476,6 @@ export async function runColivingTurn(args: {
   }
 
   await critiqueAndMarkOutbound(outbound);
-
-  // 排班回复从选定方案和真实出站状态生成，不让模型再把正确候选转述错。
-  // 理解需求与选方案仍由模型完成；这一步只负责可靠地交付已确定的事实。
-  // 做成函数是因为审稿重写阶段也可能才真正完成排班；那条路径同样必须
-  // 使用代码里的选定方案，不能重新让模型自由转述数字。
-  const buildSelectedScheduleReply = (): string | null => {
-    const selectedSchedule = [...selectedSchedules.entries()].at(-1);
-    if (!selectedSchedule) return null;
-    const [windowLabel, selection] = selectedSchedule;
-    let anonymousIndex = 0;
-    const publicNames = new Map<string, string>();
-    for (const assignment of selection.plan.assignments) {
-      if (assignment.name === sender.name) {
-        publicNames.set(assignment.name, "你");
-      } else if (isGeneratedResidentName(assignment.name)) {
-        publicNames.set(
-          assignment.name,
-          anonymousIndex++ === 0 ? "一位住户" : "另一位住户"
-        );
-      } else {
-        publicNames.set(assignment.name, assignment.name);
-      }
-    }
-    const assignments = selection.plan.assignments
-      .map(
-        (assignment) =>
-          `${publicNames.get(assignment.name) ?? "一位住户"} ${formatMinutes(assignment.startMinutes)}-${formatMinutes(assignment.endMinutes)}`
-      )
-      .join("，");
-    if (isScheduleFairnessObjection(args.text)) {
-      const count = selection.plan.assignments.length;
-      return (
-        `${count} 个人都想在这个时段用，固定排会让同一个人总靠后。` +
-        `为公平我改成轮换：这次先按 ${assignments} 排；` +
-        `下次把这次排最后的人提到最前，轮流来。这样行吗？`
-      );
-    }
-    return (
-      `我先按目前收到的可用时间，为${windowLabel}排一版：` +
-      `${assignments}。先这么排，不合适跟我说，我再调。`
-    );
-  };
-  const buildContactProgressReply = (): string | null => {
-    const acceptedOriginalNames = [
-      ...new Set(
-        outbound
-          .filter((message) => !message.blocked)
-          .map((message) => outboundNames.get(message.personId) ?? "")
-          .filter((name) => name && name !== sender.name)
-      ),
-    ];
-    const acceptedNames = acceptedOriginalNames.map((name, index) =>
-      isGeneratedResidentName(name)
-        ? index === 0
-          ? "一位住户"
-          : "另一位住户"
-        : name
-    );
-    if (acceptedNames.length === 0) return null;
-    return (
-      `这轮我也在联系${acceptedNames.join("、")}。` +
-      `收到${acceptedNames.length === 1 ? "对方" : "他们"}回复后，` +
-      "我会根据实际情况继续协调。"
-    );
-  };
-  let scheduleReplyGenerated = false;
-  const initialScheduleReply = buildSelectedScheduleReply();
-  if (initialScheduleReply && !simpleScheduleAffirmation) {
-    scheduleReplyGenerated = true;
-    reply = initialScheduleReply;
-  }
 
   /**
    * 回复的审稿放在出站之后（不能并发）：**回复如果说"我去联系他了"，
@@ -3745,16 +3681,6 @@ export async function runColivingTurn(args: {
     return checkFalseContactClaim(text) ?? checkIncompleteConflictTurn(text);
   }
 
-  // contactPerson 在这里只完成“通过审稿并进入本轮发送队列”；真正的渠道
-  // 投递与回复本人由路由并发执行。即使批判器放过“已经问了/刚联系过”，
-  // 也不能把尚未拿到渠道结果的动作写成完成态。
-  if (
-    outbound.some((message) => !message.blocked) &&
-    claimsContactCompletion(reply)
-  ) {
-    reply = buildContactProgressReply() ?? reply;
-  }
-
   const factFidelityHit = checkFactFidelity(reply);
 
   /**
@@ -3776,13 +3702,13 @@ export async function runColivingTurn(args: {
       !toolsUsed.some((toolName) => TURN_ACTION_TOOLS.has(toolName)));
 
   // 老板定的闸：日常审稿只靠代码。`checkFactFidelity` 命中 → 打回重写（确定性，
-  // 保留）；未命中且不是排班生成的回复，只有命中安全敏感主题（非法驱逐/自杀
-  // 自伤/歧视/性骚扰/住房公平，由 hasSafetySensitiveTopic 判，**入站与回复正文
-  // 都覆盖**）才升级 sonnet 批判器复核；其余一律直接 pass，不再调 LLM 批判器。
+  // 保留）；未命中且不落在上面的确定性低风险闸时，只有命中安全敏感主题（非法
+  // 驱逐/自杀自伤/歧视/性骚扰/住房公平，由 hasSafetySensitiveTopic 判，**入站与
+  // 回复正文都覆盖**）才升级 sonnet 批判器复核；其余一律直接 pass，不再调 LLM 批判器。
   const safetySensitiveReply = hasSafetySensitiveTopic(reply, args.text);
   const verdict = factFidelityHit
     ? { verified: true, pass: false as const, ...factFidelityHit }
-    : scheduleReplyGenerated || deterministicallySafeReply
+    : deterministicallySafeReply
       ? { verified: true, pass: true as const, broke: "", why: "" }
     : safetySensitiveReply
       ? await critique({
@@ -3803,12 +3729,7 @@ export async function runColivingTurn(args: {
     ? { verified: verdict.verified, pass: true, broke: "", why: verdict.why }
     : { verified: verdict.verified, pass: false, broke: verdict.broke, why: verdict.why };
 
-  const deterministicContactReply =
-    !verdict.pass ? buildContactProgressReply() : null;
-  if (deterministicContactReply) {
-    reply = deterministicContactReply;
-    replyReview = { verified: true, pass: true, broke: "", why: "" };
-  } else if (!verdict.pass) {
+  if (!verdict.pass) {
     console.log("[critic] 打回：", verdict.broke, verdict.why);
     try {
       /**
@@ -4165,8 +4086,6 @@ export async function runColivingTurn(args: {
               draft: reply,
             })
           : { verified: true, pass: true as const, broke: "", why: "" };
-      const redoContactReply =
-        !redoVerdict.pass ? buildContactProgressReply() : null;
       if (redoVerdict.pass) {
         replyReview = {
           verified: redoVerdict.verified,
@@ -4174,9 +4093,6 @@ export async function runColivingTurn(args: {
           broke: "",
           why: redoVerdict.why,
         };
-      } else if (redoContactReply) {
-        reply = redoContactReply;
-        replyReview = { verified: true, pass: true, broke: "", why: "" };
       } else {
         console.log(
           "[critic] 重写后复核仍不合格，做最后一次聚焦修正：",
@@ -4253,10 +4169,6 @@ export async function runColivingTurn(args: {
           if (finalNewOutbound.length > 0) {
             await critiqueAndMarkOutbound(finalNewOutbound);
           }
-          const finalScheduleReply = buildSelectedScheduleReply();
-          if (finalScheduleReply && !simpleScheduleAffirmation) {
-            reply = finalScheduleReply;
-          }
         } catch (finalError) {
           console.log(
             "[critic] 最后一次聚焦修正失败，沿用上一版重写稿：",
@@ -4276,21 +4188,12 @@ export async function runColivingTurn(args: {
                 draft: reply,
               })
             : { verified: true, pass: true as const, broke: "", why: "" };
-        const finalContactReply =
-          !finalVerdict.pass &&
-          selectedSchedules.size === 0 &&
-          buildContactProgressReply();
-        if (finalContactReply) {
-          reply = finalContactReply;
-          replyReview = { verified: true, pass: true, broke: "", why: "" };
-        } else {
-          replyReview = {
-            verified: finalVerdict.verified,
-            pass: finalVerdict.pass,
-            broke: finalVerdict.broke,
-            why: finalVerdict.why,
-          };
-        }
+        replyReview = {
+          verified: finalVerdict.verified,
+          pass: finalVerdict.pass,
+          broke: finalVerdict.broke,
+          why: finalVerdict.why,
+        };
         if (!replyReview.pass) {
           console.log(
             "[critic] 最终修正后仍不合格——保留可交付消息，但 replyReview 标红：",
@@ -4312,14 +4215,14 @@ export async function runColivingTurn(args: {
   // ── 选定方案后的确定性收口：漏掉的参与者由代码补发，不再靠模型记得 ────
   // 审稿/重写全部走完，仍可能有人漏掉——模型单轮里既要 pickSchedule →
   // chooseSchedule → 逐个 contactPerson → sendReply，常常漏掉一个或几个
-  // 参与者，打回后重写也仍漏（Codex 全量回归实测）。这里在收口回复之前，
-  // 对 missingSelectedScheduleParticipants() 返回的每个名字，按其在该方案里
-  // 的 assignment 调 enqueueScheduleContact（与 contactPerson 排班分支共用
-  // 同一入队函数）。这样 buildSelectedScheduleReply() 看到的是真实出站，
-  // 回复能如实说"在向谁征求意见"；只有补发也到不了的人（无地址/竞态/名册外）
-  // 才在下方保持红灯并如实标注，不谎称已联系。
-  // 简单肯定回合不触发收口（跟 settledScheduleReply 的 !simpleScheduleAffirmation
-  // 守护一致）：那种回合不会新选方案，即使有也不该由代码替它联系人。
+  // 参与者，打回后重写也仍漏（Codex 全量回归实测）。这里对所有仍缺征询的
+  // 参与者，按其在该方案里的 assignment 调 enqueueScheduleContact（与
+  // contactPerson 排班分支共用同一入队函数）。这是能力/事实补全——联系人
+  // 真的会收到消息，不是替大脑写当前说话人的回复正文；回复正文只由大脑在
+  // sendReply/审稿重写里交付。只有补发也到不了的人（无地址/竞态/名册外）
+  // 才会被 checkUnconsultedSelectedSchedule 标成红灯。
+  // 简单肯定回合不触发收口（代码短路落锤的回合不会新选方案，即使有也不该
+  // 由代码替它联系人）。
   const selectedEntry = [...selectedSchedules.entries()].at(-1);
   if (!simpleScheduleAffirmation && selectedEntry) {
     const [selectedWindowLabel, selection] = selectedEntry;
@@ -4344,20 +4247,6 @@ export async function runColivingTurn(args: {
           : `[schedule-funnel] ${name} 无需补发：${funnelResult.reason}`
       );
     }
-  }
-
-  // 最后一次模型修正可能在已经调用 chooseSchedule 后超时。工具动作此时
-  // 已经生效、selectedSchedules 里也有真实方案，但异常会跳过 try 内的
-  // buildSelectedScheduleReply；若不在所有改写路径之后再收口一次，就会
-  // 把超时前的“以后再排”旧稿发出去。只要方案已经选定，最终交付一律以
-  // 代码生成的方案事实为准，模型是否顺利结束不能改变这个结果。
-  const settledScheduleReply = buildSelectedScheduleReply();
-  if (settledScheduleReply && !simpleScheduleAffirmation) {
-    reply = settledScheduleReply;
-    const unconsultedSchedule = checkUnconsultedSelectedSchedule();
-    replyReview = unconsultedSchedule
-      ? { verified: true, pass: false, ...unconsultedSchedule }
-      : { verified: true, pass: true, broke: "", why: "" };
   }
 
   // **最终落锤：简单肯定覆盖，所有审稿/重写路径之后、入库之前最后执行一次。**

@@ -313,23 +313,16 @@ async function main() {
     assert(src.includes("bestSchedulePlans(windowStartMinutes, constraints, 5)"));
     assert(src.includes("const finalNeedsAction ="));
     assert(src.includes("await critiqueAndMarkOutbound(finalNewOutbound)"));
-    assert(src.includes("const finalScheduleReply = buildSelectedScheduleReply()"));
-    assert(src.includes("const settledScheduleReply = buildSelectedScheduleReply()"));
     assert(src.includes('position.kind !== "commitment"'));
     assert(src.includes("ctx.openCases.some(isOpenConflictCase)"));
     assert(!src.includes("!topicHitsConflict ||\n      !toolsUsed.includes(\"recordPosition\")"));
     assert(src.includes("const needsBlockedOutboundRecovery ="));
     assert(src.includes("isGeneratedResidentName(target.name)"));
-    assert(src.includes("publicNames.get(assignment.name)"));
-    assert(src.includes("const deterministicContactReply ="));
-    assert(src.includes("const redoContactReply ="));
     assert(src.includes("const redoFactFidelityHit = checkFactFidelity(reply)"));
     assert(src.includes("const finalFactFidelityHit = checkFactFidelity(reply)"));
     assert(src.includes("function checkUnconsultedSelectedSchedule()"));
     assert(src.includes("const unconsultedSchedule = checkUnconsultedSelectedSchedule()"));
     assert(src.includes("if (o.scheduleVerified)"));
-    assert(src.includes("reply = buildContactProgressReply() ?? reply"));
-    assert(src.includes("!verdict.pass ? buildContactProgressReply() : null"));
   });
   check("6.5/6.6/6.7 schedule brkes enter the full-toolset rewrite", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -453,11 +446,23 @@ async function main() {
     assert.equal(isSimpleAffirmation("你好"), false);
     assert.equal(isSimpleAffirmation("我有问题"), false);
   });
-  check("排班公平性反对被识别，且回复走轮换而非旧方案", () => {
+  check("排班公平性反对被识别；大脑回复不再被代码模板覆盖", () => {
     assert.equal(isScheduleFairnessObjection("不合适。凭什么我让着别人？"), true);
     assert.equal(isScheduleFairnessObjection("可以"), false);
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(src.includes("下次把这次排最后的人提到最前"), "反对路径必须提议轮换");
+    // 覆盖模板已整体删除：当前说话人的回复正文只由大脑 sendReply / 审稿重写交付。
+    assert(!src.includes("buildSelectedScheduleReply"), "buildSelectedScheduleReply 必须已删除");
+    assert(!src.includes("buildContactProgressReply"), "buildContactProgressReply 必须已删除");
+    // renderBaseFacts 的"本轮调用的工具"之后必须注入公平质疑信号（提示轮换/重议）——
+    // 代码只给信号、不给成品句，措辞由大脑看着办。
+    const renderStart = src.indexOf("const renderBaseFacts = () =>");
+    const renderEnd = src.indexOf("const outboundNames = new Map(", renderStart);
+    assert(renderStart > 0 && renderEnd > renderStart, "renderBaseFacts 必须可定位");
+    const renderFactsRegion = src.slice(renderStart, renderEnd);
+    assert(renderFactsRegion.includes("isScheduleFairnessObjection(args.text)"),
+      "renderBaseFacts 必须用 isScheduleFairnessObjection(args.text) 注入公平质疑信号");
+    assert(renderFactsRegion.includes("应提议轮换或重新协商"),
+      "公平质疑信号必须提示提议轮换/重新协商，别用谁先提出/谁先回复排先后");
   });
   check("isScheduleSlotInquiry recognises slot inquiry by act and body template", () => {
     const slotInquiry = {
@@ -532,20 +537,6 @@ async function main() {
       `预同意 return（@${returnPreconsentedIdx}）必须早于 queueCommunication（@${queueIdx}）`
     );
   });
-  check("simpleScheduleAffirmation guards all buildSelectedScheduleReply overrides", () => {
-    // 结构断言：确认三处 buildSelectedScheduleReply 覆盖都加了 !simpleScheduleAffirmation 守护。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const scheduleReplyCalls = [...turnSrc.matchAll(/buildSelectedScheduleReply\(\)/g)];
-    // 至少 3 处调用（initial / final / settled）
-    assert(scheduleReplyCalls.length >= 3, `期望至少 3 处 buildSelectedScheduleReply() 调用，实际 ${scheduleReplyCalls.length}`);
-    // 每个调用点后紧跟的 if 条件都应含 simpleScheduleAffirmation
-    const overridePattern = /buildSelectedScheduleReply\(\)[\s\S]{0,120}simpleScheduleAffirmation/g;
-    const guarded = [...turnSrc.matchAll(overridePattern)];
-    assert(
-      guarded.length >= 3,
-      `期望至少 3 处 override 被 simpleScheduleAffirmation 守护，实际 ${guarded.length}`
-    );
-  });
   check("productionContactPerson calls scheduleSlotMatchesSelfStatement (not inline logic)", () => {
     // Fix 1: 生产 contactPerson 必须调用纯函数，不能复制一份内联判断。
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -562,7 +553,7 @@ async function main() {
     // 使用唯一注释定位最终 override 块，以及最后一条回复 queueCommunication（文件前面
     // 还有短路分支的"回复本人"——那条路径提前 return，与这里的顺序无关，用 lastIndexOf
     // 锚定收尾那一条）。
-    const finalOverrideIdx = turnSrc.indexOf("最终落锤：简单肯定覆盖");
+    const finalOverrideIdx = turnSrc.lastIndexOf("最终落锤：简单肯定覆盖");
     const replyQueueIdx = turnSrc.lastIndexOf('"回复本人"');
     assert(finalOverrideIdx > 0, "最终落锤注释必须存在");
     assert(replyQueueIdx > 0, "回复本人 queueCommunication 必须存在");
@@ -737,12 +728,13 @@ async function main() {
       "征询正文必须由固定模板 scheduleContactTextForAct 生成（不按模型 act 分支）");
     // 2) 最终收口循环真实存在：遍历 missingSelectedScheduleParticipants() 返回值，
     //    逐个按其在选定方案里的 assignment 调 enqueueScheduleContact。
-    const settledIdx = src.indexOf("const settledScheduleReply = buildSelectedScheduleReply()");
+    const finalOverrideIdx = src.lastIndexOf("最终落锤：简单肯定覆盖");
     const loopStart = src.indexOf("for (const name of missingSelectedScheduleParticipants())");
     assert(loopStart > 0, "必须存在遍历 missingSelectedScheduleParticipants 的确定性循环");
-    assert(loopStart < settledIdx,
-      `补发循环（@${loopStart}）必须早于 settled reply（@${settledIdx}），回复才能看到真实出站`);
-    const funnelBlock = src.slice(loopStart, settledIdx);
+    assert(finalOverrideIdx > 0, "最终落锤注释必须存在");
+    assert(loopStart < finalOverrideIdx,
+      `补发循环（@${loopStart}）必须早于最终落锤收口（@${finalOverrideIdx}）`);
+    const funnelBlock = src.slice(loopStart, finalOverrideIdx);
     assert(funnelBlock.includes("await enqueueScheduleContact("),
       "循环必须逐个调 enqueueScheduleContact");
     assert(funnelBlock.includes("selectedWindowLabel"),
