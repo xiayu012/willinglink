@@ -37,6 +37,267 @@ Sheldon: I don't have to go to hell. At 73 degrees, I'm there already.
 
 ---
 
+### 012
+
+【编号】012
+
+【来源作品】Friends（老友记）
+
+【季/集】Season 2 Episode 19 — The One Where Eddie Won't Go
+
+【来源类型】电视剧
+
+【冲突类别】搬走 / 赶人
+
+【参与人物】Chandler、Eddie
+
+【冲突背景】钱德勒受够了新室友 Eddie 的种种怪癖（半夜看他睡觉、在屋里脱水水果、用水气球做实验），终于爆发让他搬走。Eddie 却装傻，说这个要求“来得太突然”，把一场蓄谋已久的摊牌演成惊讶。
+
+【对白片段】
+
+Chandler: Get out. Get out, get out, get out!
+Eddie: What?
+Chandler: You! Move out! Take your fruit! Your stupid small fruit and get out!
+Eddie: You want me to move out? I gotta tell you, that's kind of out of the blue, don't you think?
+Chandler: This is not out of the blue! This is smack-dab in the middle of the blue!
+Eddie: Relax! Take it easy, buddy! You don't have to tell me twice.
+
+【这个片段为什么有价值】把“室友行为长期让人受不了、最后忍无可忍摊牌赶人”这一真实场景浓缩得很到位：一方积怨爆发、另一方假装无辜，冲突一触即发又带点荒诞；适合“要求室友搬走/赶人”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=friends&episode=s02e19
+
+---
+
+### 013
+
+【编号】013
+
+【来源作品】How I Met Your Mother（老爸老妈浪漫史）
+
+【季/集】Season 5 Episode 6 — Bagpipes
+
+【来源类型】电视剧
+
+【冲突类别】洗碗 / 清洁 / 作息
+
+【参与人物】Marshall、Barney
+
+【冲突背景】Barney 说 Lily 让 Marshall 吃完饭马上洗碗，是婚姻亮红灯的信号；Marshall 解释自己其实不介意水槽里堆着脏碗，只是说出来会吵架，所以一直乖乖洗。两人就“脏碗到底是谁的问题、要不要为了息事宁人立刻洗”争论起来。
+
+【对白片段】
+
+Barney: Lily asking you to wash your dishes right away is a sign your marriage is crumbling.
+Marshall: What? Why? Lily likes a clean sink, so I do the dishes right away, what's the big deal?
+Barney: Do you mind if there is a sink full of dirty dishes?
+Marshall: Not really.
+Barney: Then it's Lily's problem, not yours.
+Marshall: Yeah, but if I said that to her, it would only lead to a fight, so—
+Barney: Oh! You fight.
+
+Marshall: Look, I love you. But, baby, with the little energy I have left after work, I want to shower you with love, not wash some silly dishes.
+Lily: You're right. I'll do the dishes.
+
+【这个片段为什么有价值】直击“谁该洗碗、脏碗能不能留到明天”这个共居家庭最高频的清洁冲突，还点出“为了避免吵架才勉强洗碗”的常见心理；对白自然、立场清晰，适合“洗碗/清洁/家务分工”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=how-i-met-your-mother&episode=s05e06
+
+---
+
+### 014
+
+【编号】014
+
+【来源作品】New Girl（杰茜驾到）
+
+【季/集】Season 1 Episode 2 — Kryptonite
+
+【来源类型】电视剧
+
+【冲突类别】房间分配
+
+【参与人物】Jess、Nick、Schmidt、Winston
+
+【冲突背景】Winston 外出打球回来，发现他原来的大房间已经被 Schmidt 占了。Nick 提醒 Jess，Schmidt 是那种“住进大房间就不肯搬回去”的人，但 Jess 觉得以 Schmidt 的脾气，Winston 完全能要回房间。
+
+【对白片段】
+
+Jess: Winston seems nice.
+Nick: He say anything to you about the room?
+Jess: What room?
+Nick: The big room.
+Schmidt: I kind of took it from him when he left. I used to be in the small room. Never going back there again, Jess.
+Nick: He's never gonna give you that room back.
+Jess: Psh. Come on, it's Schmidt.
+
+Winston: Hey, Schmidt, what kind of top dog are you?
+Schmidt: The kind with the big room.
+
+【这个片段为什么有价值】围绕“室友搬走后、空出来的大房间被谁长期占据”展开，是合租里非常常见的房间分配争议：先占者不肯让、第三方评估谁更强势；人物立场清楚，适合“房间分配/换房间”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=new-girl&episode=s01e02
+
+---
+
+### 015
+
+【编号】015
+
+【来源作品】The Big Bang Theory（生活大爆炸）
+
+【季/集】Season 2 Episode 7 — The Panty Piñata Polarization
+
+【来源类型】电视剧
+
+【冲突类别】食物 / 规则制定
+
+【参与人物】Sheldon、Penny
+
+【冲突背景】谢尔顿对共用的食物有一套严格界限，谁碰了他的东西就记一次“违规”。佩妮只是拿了他一个洋葱圈又放回去，就被谢尔顿当成“碰我食物”记成第二次违规，两人就这算不算越界争执起来。
+
+【对白片段】
+
+Penny: What was my first strike?
+Sheldon: March 18th. You violated my rule about forwarding e-mail humor.
+Penny: I did? The photo of the cat who wants to "Has Cheezburger?"
+Penny: Oh, come on, everybody loves Lolcats. They're cute and they can't spell because they're cats.
+Sheldon: I trusted you with my e-mail address and you betrayed that trust by sending me Internet banality. Strike one. Touching my food, strike two.
+Penny: Oh, come on, I touched one onion ring.
+Sheldon: And then you put it back.
+
+【这个片段为什么有价值】把“共居时能不能碰别人食物、碰一下又放回去算不算越界”这个边界争议直接演出来；一方把规则量化成“违规记录”，另一方觉得小题大做，很适合“食物边界/个人物品规则”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=big-bang-theory&episode=s02e07
+
+---
+
+### 016
+
+【编号】016
+
+【来源作品】Girls（都市女孩）
+
+【季/集】Season 1 Episode 7 — Welcome to Bushwick a.k.a. The Crackcident
+
+【来源类型】电视剧
+
+【冲突类别】房租 / 金钱账单
+
+【参与人物】Marnie、Hannah
+
+【冲突背景】房租下星期到期，室友玛妮提醒汉娜该告诉父母自己丢了工作，并反复确认她“钱方面真的没问题吗”。汉娜嘴上说“我能搞定”，其实并没有底。
+
+【对白片段】
+
+Marnie: Rent is due next week.
+Hannah: Yeah, and I got it covered.
+Marnie: You're gonna tell your parents you lost your job, right?
+
+Marnie: Is everything okay with you money wise? I mean really okay?
+Hannah: I'm making it work.
+
+【这个片段为什么有价值】把合租里“房租快到期 + 室友有没有钱”的试探和回避表现得很真实：一方反复确认、另一方用“我能搞定”搪塞；简短但直击房租焦虑和室友间的金钱边界。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=girls&episode=s01e07
+
+---
+
+### 017
+
+【编号】017
+
+【来源作品】Girls（都市女孩）
+
+【季/集】Season 1 Episode 10 — She Did
+
+【来源类型】电视剧
+
+【冲突类别】搬走 / 房租 / 换室友
+
+【参与人物】Hannah、Marnie
+
+【冲突背景】汉娜和室友玛妮关系破裂，双方都说出“不想再和你住在一起”。玛妮搬走时，两人一边搬东西一边谈房租和“你还有一个月时间找新室友”这类善后问题，语气已经从争吵变成疲惫和受伤。
+
+【对白片段】
+
+Hannah: I do not want to live here anymore.
+Marnie: I don't want to live with you anymore either.
+Hannah: Stay until the end of the month.
+Marnie: I've already paid rent. And this way, you've got, like, a month to find a new roommate.
+Hannah: Yeah, but you don't have a plan.
+Marnie: I think maybe that's a good thing for me.
+
+【这个片段为什么有价值】完整呈现室友关系破裂后“搬走 + 房租结算 + 找新室友”的收尾对话，语气从冲突过渡到疲惫的体面；对白克制但信息量足，很适合“搬走/换室友/退租”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=girls&episode=s01e10
+
+---
+
+### 018
+
+【编号】018
+
+【来源作品】New Girl（杰茜驾到）
+
+【季/集】Season 1 Episode 11 — Jess and Julia
+
+【来源类型】电视剧
+
+【冲突类别】卫生间 / 清洁 / 物品使用
+
+【参与人物】Winston、Schmidt、Nick
+
+【冲突背景】Winston 发现自己的毛巾总是湿的，一查才知 Nick 和 Schmidt 一直在共用他这条毛巾。争论从“这是谁的毛巾”一路升级到“毛巾到底要不要洗”，Nick 抛出一句“毛巾自己会洗我”，把 Winston 彻底激怒。
+
+【对白片段】
+
+Winston: Honestly, why is my towel still damp?
+Schmidt: Because it's not your towel. It's not your towel. Your towel's red.
+Nick: I'll tell you this, I've never used that. I do use that one every single day.
+Schmidt: This means you two have been drying your junk with the same towel.
+Winston: Do you wash it?
+Nick: No, I don't wash the towel. The towel washes me. Who washes a towel?
+Winston: You wash your towel? You never wash the towel?
+Nick: What am I gonna do? Wash the shower next? Wash a bar of soap? You gotta think, pal.
+Winston: I'm furious right now. I get out of the shower, I'm clean as a damn baby, and I use the towel.
+Schmidt: Have you been wearing my underpants?
+Nick: Sometimes. Who cares?
+
+【这个片段为什么有价值】把合租卫生间里最真实的“共用毛巾/物品边界”和“个人清洁习惯不同”直接演出来，还有“毛巾到底要不要洗”的经典争论；三人立场鲜明、对白自然，很适合“卫生间/个人物品/清洁习惯”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=new-girl&episode=s01e11
+
+---
+
+### 019
+
+【编号】019
+
+【来源作品】Friends（老友记）
+
+【季/集】Season 6 Episode 2 — The One Where Ross Hugs Rachel
+
+【来源类型】电视剧
+
+【冲突类别】搬走
+
+【参与人物】Chandler、Monica、Joey
+
+【冲突背景】钱德勒决定搬出去和莫妮卡同居，却一直不敢告诉现任室友乔伊。莫妮卡催他赶紧摊牌，钱德勒支支吾吾说不出口；最后终于开口，乔伊嘴上说恭喜、转身就找借口离开。
+
+【对白片段】
+
+Monica: Did you tell him you're moving out?
+Chandler: No, I keep trying. And I can get out "Joey, I have to—" Then I lose my nerve and I finish with "—go to the bathroom."
+
+Chandler: Look, Joe, here's the thing. Monica and I have decided to live together, here. I'm gonna be moving out, man.
+Joey: I'm really happy for you guys. Congratulations. See you later.
+
+【这个片段为什么有价值】真实呈现“要搬走却不敢跟室友开口”的为难：一方反复铺垫又临阵退缩，另一方表面祝福、实际失落；情绪克制，很适合“搬走/退租/关系变化”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=friends&episode=s06e02
+
+---
+
 ### 002
 
 【编号】002
