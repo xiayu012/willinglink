@@ -105,11 +105,39 @@ export const colivingBrain: Brain = {
       layer: "special-case",
     },
     {
-      id: "shared-resources",
-      title: "共用设施与资源争抢",
-      file: "special-cases/shared-resources.md",
+      id: "scheduling",
+      title: "共用设施排程",
+      file: "special-cases/scheduling.md",
       layer: "special-case",
-      purpose: "厨房/卫浴/洗衣/清洁/噪音/访客等共用资源的具体处置库",
+      purpose: "厨房/卫浴/洗衣等单人独占资源的排程与容量",
+    },
+    {
+      id: "noise",
+      title: "噪音与作息错配",
+      file: "special-cases/noise.md",
+      layer: "special-case",
+      purpose: "噪音/作息错配的处置",
+    },
+    {
+      id: "cleanliness",
+      title: "清洁与垃圾",
+      file: "special-cases/cleanliness.md",
+      layer: "special-case",
+      purpose: "清洁责任与垃圾的处置",
+    },
+    {
+      id: "storage",
+      title: "冰箱、储物与共用消耗品",
+      file: "special-cases/storage.md",
+      layer: "special-case",
+      purpose: "冰箱分区/私人物品/共用消耗品",
+    },
+    {
+      id: "guests",
+      title: "访客",
+      file: "special-cases/guests.md",
+      layer: "special-case",
+      purpose: "访客/过夜规则",
     },
     {
       id: "records",
@@ -186,20 +214,36 @@ export const colivingBrain: Brain = {
       modules: ["conflict"],
       reason: "同住人之间的摩擦",
     },
+    // ── 资源争抢的细模块：各按资源装载，只匹配「争抢/行为」信号 ────────
+    // 不匹配裸设施名（避免「厨房漏水」这种报修也拉进资源处置库——报修走 records）
     {
-      // 资源争抢的处置库：只匹配「争抢/行为」信号，不匹配裸设施名
-      // （避免「厨房漏水」这种报修也拉进资源处置库——报修走 records）
       match: [
-        /做饭|做菜|煮饭|用餐|吃饭|挨饿|排班|时段|错开|先来后到|轮流/,
-        /脏|不洗|卫生|垃圾|trash|臭|味|smell|油烟|清洁|打扫/,
-        /吵|噪音|noise|loud|太响|睡不着|动静|外放/,
-        /带人|客人|guest|过夜|留宿/,
+        /做饭|做菜|煮饭|用餐|吃饭|挨饿|等不到|轮不到|排不上/,
+        /排班|时段|错开|先来后到|轮流/,
         /占|抢|不公平|凭什么|一直占|老是占|总是占|太久|时间太长|每次都/,
-        /冰箱|储物|纸巾|洗洁精|我的东西/,
-        /kitchen|bathroom|shower|laundry|fridge|parking/i,
       ],
-      modules: ["shared-resources"],
-      reason: "共用设施/资源争抢的具体处置库",
+      modules: ["scheduling"],
+      reason: "共用设施排程",
+    },
+    {
+      match: [/吵|噪音|noise|loud|太响|睡不着|动静|外放/],
+      modules: ["noise"],
+      reason: "噪音与作息错配",
+    },
+    {
+      match: [/脏|不洗|卫生|垃圾|trash|臭|味|smell|油烟|清洁|打扫|clean|dirty/],
+      modules: ["cleanliness"],
+      reason: "清洁与垃圾",
+    },
+    {
+      match: [/冰箱|储物|纸巾|洗洁精|我的东西|fridge/],
+      modules: ["storage"],
+      reason: "冰箱、储物与共用消耗品",
+    },
+    {
+      match: [/带人|客人|guest|过夜|留宿|女朋友|男朋友.{0,4}住/],
+      modules: ["guests"],
+      reason: "访客",
     },
     {
       match: [
@@ -239,7 +283,7 @@ export const colivingBrain: Brain = {
   // 判断不了时给风险与升级判据——它包含定级标准，是最安全的兜底
   fallback: ["complaint-risk"],
 
-  // 资源争抢消息会同时命中 conflict + shared-resources，且可能叠加 complaint-risk，
-  // 2 会挤掉安全/风险模块。
-  maxSituational: 3,
+  // 资源争抢可能同时命中 conflict + 多个细资源模块 + complaint-risk，
+  // 3 会挤掉其中一个；4 是给罕见多资源混合留余量，单资源仍是 2。
+  maxSituational: 4,
 };

@@ -49,7 +49,11 @@ lib/ai/brains/
         tenancy.md         入住 / 规则 / 退租
       special-cases/       special-case 层：单点例外（后续细模块也放这层）
         money.md           金钱边界
-        shared-resources.md 共用设施与资源争抢
+        scheduling.md      共用设施排程（厨房/卫浴/洗衣等单人独占资源）
+        noise.md           噪音与作息错配
+        cleanliness.md     清洁与垃圾
+        storage.md         冰箱、储物与共用消耗品
+        guests.md          访客
       tool/                tool 层：工具使用规则
         records.md         记录 / 转交 / 拒绝不当指令
       rubric/              rubric 层：审稿清单（仅批判器读，不进任何一次生成）
@@ -122,7 +126,7 @@ const { system, loadedModuleIds } = assembleSystemPrompt({
 ## 检查工具
 
 ```bash
-pnpm brain:inspect                    # 跑路由探针（13 条文本 + 2 条信号）
+pnpm brain:inspect                    # 跑路由探针（17 条文本 + 2 条信号）
 pnpm brain:inspect "房租要晚几天"       # 看单句命中哪些模块、为什么
 pnpm brain:inspect --full "..."       # additionally 打印完整 system prompt
 pnpm brain:inspect --brains           # 列出已注册的大脑

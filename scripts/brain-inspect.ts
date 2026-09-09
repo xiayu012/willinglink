@@ -31,13 +31,21 @@ const PROBES: Array<{
   },
   { text: "3号房那个欠了两个月了，明天把他门锁换了", expect: ["records"] },
   { text: "厨房水槽下面在漏水，越来越大了", expect: ["records"] },
-  // 资源争抢：conflict（通用调解）+ shared-resources（资源处置库）同时加载
+  // 资源争抢：conflict（通用调解）+ 对应细资源模块（scheduling/cleanliness）同时加载
   {
     text: "厨房太脏了，他一直占着灶台不让人用",
-    expect: ["conflict", "shared-resources"],
+    expect: ["conflict", "scheduling", "cleanliness"],
   },
-  // 报修：只进 records，不把资源争抢处置库拉进来
-  { text: "厨房水槽下面在漏水", expect: ["records"], expectNot: ["shared-resources"] },
+  // 报修：只进 records，不把资源处置细模块拉进来
+  {
+    text: "厨房水槽下面在漏水",
+    expect: ["records"],
+    expectNot: ["scheduling", "noise", "cleanliness", "storage", "guests"],
+  },
+  { text: "楼上半夜还在外放看视频", expect: ["conflict", "noise"] },
+  { text: "厨房垃圾都臭了也没人倒", expect: ["conflict", "cleanliness"] },
+  { text: "冰箱里的东西被人吃了", expect: ["conflict", "storage"] },
+  { text: "他女朋友三天两头来住", expect: ["conflict", "guests"] },
   { text: "我最近老想干脆一了百了", expect: ["complaint-risk"] },
   { text: "他上次还说要收拾我，我看他厨房那把刀", expect: ["complaint-risk"] },
   { text: "垃圾是周几倒？", expect: ["tenancy"] },
