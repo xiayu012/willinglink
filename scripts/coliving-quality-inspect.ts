@@ -301,6 +301,16 @@ async function main() {
     assert(checkProcessNarration("我马上再提醒一遍全屋。"), "将来时念马上要做的动作必须命中");
     assert(checkProcessNarration("我这就去核实一下。"), "将来时念马上要做的动作必须命中");
     assert(checkProcessNarration("我这就去问小吴。"), "将来时念马上要做的动作必须命中");
+    // Codex 二轮重放抓到：不带“马上/这就”的将来时自述动作，以及有条件拖延汇报。
+    assert(
+      checkProcessNarration(
+        "我先把实际情况跟小俊对清楚——那位朋友是临时来住还是长期住、住了多久，问清楚再定怎么安排。"
+      ),
+      "“先”将来时自述动作必须命中"
+    );
+    assert(checkProcessNarration("这个我会找她谈，不会只听一面。"), "“会”将来时自述动作必须命中");
+    assert(checkProcessNarration("她提的事，我会单独听。"), "“我会单独听”将来时自述动作必须命中");
+    assert(checkProcessNarration("有进展我跟你说。"), "有条件拖延汇报必须命中");
   });
   check("legitimate whole-house / completed-tense / resident-target wording is not process narration", () => {
     assert.equal(checkProcessNarration("这条我跟全屋说一遍。"), null, "全屋口径必要下一步不算内部流程");
@@ -311,6 +321,7 @@ async function main() {
     assert.equal(checkProcessNarration("收到，我记下了。"), null, "纯确认不算");
     assert.equal(checkProcessNarration("不是说是你的错，公共区域大家都要注意。"), null, "“不是怪你”的澄清不能误伤");
     assert.equal(checkProcessNarration("我这就提醒你：厨余要装袋。"), null, "冲着当前住户的指令不算念流程");
+    assert.equal(checkProcessNarration("两边的话我都会听。"), null, "“我…都会听”的听取口径不能误伤");
   });
   check("process-narration gate is wired into checkFactFidelity", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
