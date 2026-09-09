@@ -121,6 +121,16 @@ export function isSimpleAffirmation(text: string): boolean {
 }
 
 /**
+ * 说话人正在**反对这次排班，而且质疑的是公平性**（"凭什么我让着别人"、
+ * "最早提的就优先"这类）。真实事故（2026-09）：住户刚说不合适、不公平，
+ * 确定性回复路径仍把同一版方案原样复述一遍还加一句"不合适跟我说"——等于没听。
+ * 命中这类消息时 buildSelectedScheduleReply 改口提议轮换，不再把旧方案丢回。
+ */
+export function isScheduleFairnessObjection(text: string): boolean {
+  return /不合适|不公平|凭什么|凭啥|不同意|不接受|让着|最早提/.test(text);
+}
+
+/**
  * 纯确认/知会的短句白名单。代码能确定"这句只是收个话头"，没有下指令、
  * 没有点名、没有承诺动作、没有宣称已经做了什么——这类低风险回复不值得再
  * 花一次模型调用过语言批判器（措辞风险低）。
@@ -3488,6 +3498,14 @@ export async function runColivingTurn(args: {
           `${publicNames.get(assignment.name) ?? "一位住户"} ${formatMinutes(assignment.startMinutes)}-${formatMinutes(assignment.endMinutes)}`
       )
       .join("，");
+    if (isScheduleFairnessObjection(args.text)) {
+      const count = selection.plan.assignments.length;
+      return (
+        `${count} 个人都想在这个时段用，固定排会让同一个人总靠后。` +
+        `为公平我改成轮换：这次先按 ${assignments} 排；` +
+        `下次把这次排最后的人提到最前，轮流来。这样行吗？`
+      );
+    }
     return (
       `我先按目前收到的可用时间，为${windowLabel}排一版：` +
       `${assignments}。先这么排，不合适跟我说，我再调。`

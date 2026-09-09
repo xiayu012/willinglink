@@ -21,6 +21,7 @@ import {
   isOpenConflictCase,
   isPrematureCapacityEscape,
   isPureNoticeReply,
+  isScheduleFairnessObjection,
   isScheduleSlotInquiry,
   isSimpleAffirmation,
   scheduleContactTextForAct,
@@ -451,6 +452,12 @@ async function main() {
     assert.equal(isSimpleAffirmation("可以，你什么时候确认？"), false);
     assert.equal(isSimpleAffirmation("你好"), false);
     assert.equal(isSimpleAffirmation("我有问题"), false);
+  });
+  check("排班公平性反对被识别，且回复走轮换而非旧方案", () => {
+    assert.equal(isScheduleFairnessObjection("不合适。凭什么我让着别人？"), true);
+    assert.equal(isScheduleFairnessObjection("可以"), false);
+    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(src.includes("下次把这次排最后的人提到最前"), "反对路径必须提议轮换");
   });
   check("isScheduleSlotInquiry recognises slot inquiry by act and body template", () => {
     const slotInquiry = {
