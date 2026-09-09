@@ -298,6 +298,72 @@ Joey: I'm really happy for you guys. Congratulations. See you later.
 
 ---
 
+### 020
+
+【编号】020
+
+【来源作品】The Big Bang Theory（生活大爆炸）
+
+【季/集】Season 2 Episode 14 — The Financial Permeability
+
+【来源类型】电视剧
+
+【冲突类别】金钱账单 / 房租
+
+【参与人物】Sheldon、Penny
+
+【冲突背景】佩妮为修车和房租焦头烂额，谢尔顿直接拿出自己的钱让她先拿去用、慢慢还。佩妮因为“怕以后两人之间会尴尬”反复推辞，谢尔顿用“你沦落到睡纸箱、用雨水洗头”反劝她收下。
+
+【对白片段】
+
+Sheldon: Here. Take some. Pay me back when you can.
+Penny: No, I can't.
+Sheldon: Don't you need money?
+Penny: Well, yeah, but—
+Sheldon: This is money I'm not using.
+Penny: Look, Sheldon, honey, I don't want things to be weird between us.
+Sheldon: Won't it also be weird if I have to say hello to you on my way to work and you're living in a refrigerator box and washing your hair with rain water?
+Penny: I'll pay you back as soon as I can.
+Sheldon: Of course you will. It's impossible to pay me back sooner than you can.
+
+【这个片段为什么有价值】把合租/同住圈里“借钱周转、又怕钱让关系变尴尬”的真实心理演得很到位：一方坚持借、一方怕欠人情反复推辞；适合“金钱往来/房租周转”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=big-bang-theory&episode=s02e14
+
+---
+
+### 021
+
+【编号】021
+
+【来源作品】The Big Bang Theory（生活大爆炸）
+
+【季/集】Season 3 Episode 14 — The Einstein Approximation
+
+【来源类型】电视剧
+
+【冲突类别】隐私 / 作息
+
+【参与人物】Sheldon、Leonard、Penny
+
+【冲突背景】谢尔顿半夜闯进莱纳德的房间，把正在睡觉的莱纳德和佩妮叫醒，说有“好消息”。莱纳德质问他为什么不能等天亮，谢尔顿用“你们手机没开”当理由，完全不觉得自己半夜闯门有问题。
+
+【对白片段】
+
+Sheldon: Leonard and Penny.
+Leonard: What? What, what, what?
+Sheldon: I have good news.
+Leonard: And you had to barge in and wake us up in the middle of the night?
+Sheldon: Your cell phone was off.
+Penny: Because we didn't wanna be disturbed.
+Sheldon: That didn't work out, did it?
+
+【这个片段为什么有价值】把“室友不分时间闯进房间、把睡觉当成可以随时打断的事”的隐私冲突浓缩得很到位；被吵醒方抗议、闯门方理直气壮，适合“隐私/作息打扰”类情景。
+
+【原始网页】https://www.springfieldspringfield.co.uk/view_episode_scripts.php?tv-show=big-bang-theory&episode=s03e14
+
+---
+
 ### 002
 
 【编号】002
