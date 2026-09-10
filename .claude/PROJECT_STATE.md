@@ -25,6 +25,8 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 
 - 进度：已提交 fragment 001–030（去重后），另有 `corpus-index.json` 与 `README.md`。
 - 转化：5 条已转成 `lib/chat/coliving/evals/scenarios/corpus-013/024/026/028/030-*.json`（Claude Code 实现、Codex 验收）。
+- 多人场景 002/003/004/013/018 已补齐；2026-09-09 修正了把室友间“你/你的/你俩”
+  错当成对协调 AI 说的角色错位。往后纯对白转化与文字修订由 Codex 直接完成。
 - 目标：把采集到的真实矛盾对白持续转成可跑评测场景，替代/扩充旧合成用例。
 - 产物：`data/roommate-dialogue-corpus/`；场景在 `lib/chat/coliving/evals/scenarios/`。
 - 下一步：继续转化其余 A 档片段，并按成本纪律对新增场景做定向 `--judge-off` 冒烟。
