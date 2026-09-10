@@ -12,6 +12,7 @@ import {
   evaluateTurnReplyReviews,
 } from "../lib/chat/coliving/evals/schema";
 import {
+  buildGeneratorSystemMessages,
   claimsContactCompletion,
   checkProcessNarration,
   extractExplicitFixedStart,
@@ -33,6 +34,14 @@ import {
   criticModelId,
   hasSafetySensitiveTopic,
 } from "../lib/chat/coliving/critic";
+import {
+  COLIVING_GUIDANCE_TEXTS,
+  isKnownGuidanceId,
+  isMissingGuidanceArg,
+  knownGuidanceIds,
+  resolveGuidance,
+  resolveGuidanceArg,
+} from "../lib/chat/coliving/evals/guidance";
 
 const TOOL_DECL_NAMES = [
   "sendReply", "decide", "logEvent", "contactPerson", "proposeRule",
@@ -353,6 +362,13 @@ async function main() {
     assert.equal(checkProcessNarration("不是说是你的错，公共区域大家都要注意。"), null, "“不是怪你”的澄清不能误伤");
     assert.equal(checkProcessNarration("我这就提醒你：厨余要装袋。"), null, "冲着当前住户的指令不算念流程");
     assert.equal(checkProcessNarration("两边的话我都会听。"), null, "“我…都会听”的听取口径不能误伤");
+    // 老板批准的隐私问句必须原样通过：共享范围可能被反推来源时先问信息所有者是否仍发送。
+    // 它和上面「他一想就知道是你提的」只差在把「是你」当作要确认的事实说出来，不是身份推断。
+    assert.equal(
+      checkProcessNarration("这个柜子只有你们两个人用，他可能会猜到是你。还要发吗？"),
+      null,
+      "批准的隐私问句（先问信息所有者）不得被过程播报组误伤"
+    );
   });
   check("process-narration gate is wired into checkFactFidelity", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -988,6 +1004,125 @@ async function main() {
     // 4) 升级在 critic 内部：安全敏感命中 → forceSensitive → criticModelId(true)=sonnet
     assert(criticSrc.includes("criticModelId(forceSensitive)"), "critic 内仍按 forceSensitive 升级模型");
     assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.5"'), "升级常量必须在");
+  });
+
+  /**
+   * ── 评测实验 guidance（Golden Trace A/B）──
+   *
+   * 只证明四条核心安全边界，不靠扫生产源码里的单词：
+   * ①空值 = 不启用、已知 id 可解析、未知 id 抛错；
+   * ②guidance 是纯正向三条轨迹、内外分栏、不含被删掉的坏句原文；
+   * ③生成 system 顺序固定 doctrine → guidance(可选) → runtime，六处生成路径共用 turn.ts 的构造器；
+   * ④报告正常/异常两条返回路径都记录 guidance id；CLI 缺值闸真的调用
+   *    isMissingGuidanceArg（仅此两处源码断言）。
+   * 分层靠结构保证：构造器在生产 turn.ts、登记表在 evals，生产不反向 import；
+   * 不再逐句扫 doctrine 目录是否出现实验 id。全免费、确定性，不调模型。
+   */
+  const evalGuidanceSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
+  const turnGuidanceSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+
+  check("guidance：空值不启用、已知 id 可解析、未知 id 抛错", () => {
+    assert.equal(resolveGuidanceArg(undefined), undefined, "空值 = 不启用");
+    assert.equal(resolveGuidanceArg(null), undefined);
+    assert.equal(resolveGuidanceArg(""), undefined);
+    const text = resolveGuidance("concise-coordination-v1");
+    assert.equal(
+      resolveGuidanceArg("concise-coordination-v1"),
+      text,
+      "CLI 解析路径与直接解析必须一致"
+    );
+    assert.equal(isKnownGuidanceId("concise-coordination-v1"), true);
+    assert.equal(isKnownGuidanceId("does-not-exist"), false);
+    assert.throws(() => resolveGuidance("does-not-exist"), /未知的 guidance id/);
+    assert.throws(() => resolveGuidanceArg("does-not-exist"), /未知的 guidance id/);
+    assert.deepEqual(Object.keys(COLIVING_GUIDANCE_TEXTS), knownGuidanceIds());
+  });
+
+  check("guidance：--guidance 后紧跟另一个 flag 视为缺值，不当成未知 id", () => {
+    // 回归：`--guidance --judge-off` 里 argValue 取到的是 "--judge-off"。
+    // 必须判定为缺值（走统一的缺值报错），而不是当未知 id 报错。
+    assert.equal(isMissingGuidanceArg("--judge-off"), true, "下一个参数是 flag → 缺值");
+    assert.equal(isMissingGuidanceArg("--judge-advisory"), true);
+    assert.equal(isMissingGuidanceArg(null), true, "参数缺席 → 缺值");
+    assert.equal(isMissingGuidanceArg(""), true, "空串 → 缺值");
+    assert.equal(
+      isMissingGuidanceArg("concise-coordination-v1"),
+      false,
+      "已登记 id 不是缺值"
+    );
+    // CLI 必须真的用这个判定，否则函数正确也拦不住 bug。
+    assert(
+      evalGuidanceSrc.includes("isMissingGuidanceArg(GUIDANCE_ID)"),
+      "coliving-eval.ts 的缺值闸必须调用 isMissingGuidanceArg"
+    );
+  });
+
+  check("guidance 是三条正向轨迹、内外分栏，且不含被删掉的坏句原文", () => {
+    const text = resolveGuidance("concise-coordination-v1");
+    for (const trace of ["轨迹一", "轨迹二", "轨迹三"]) {
+      assert(text.includes(trace), `缺少 ${trace}（目标询问/劝退过度规则/隐私询问）`);
+    }
+    assert(
+      text.includes("内部状态") && text.includes("对住户说"),
+      "必须分栏「内部状态」与「对住户说」"
+    );
+    assert(/不要照抄|不是模板/.test(text), "必须声明示范不要求逐字照搬、不得固定句式");
+    // 第一版把「不说：某某坏句子」逐字喂回生成器，已被退回——坏句原文不得复现。
+    for (const removed of [
+      "我先记录成你的陈述",
+      "还没有查实",
+      "你希望我怎么处理",
+      "这不合规",
+      "我先去核实作息",
+      "他绝对不会知道",
+    ]) {
+      assert(!text.includes(removed), `被删掉的坏句原文不得复现：${removed}`);
+    }
+  });
+
+  check("生成 system 顺序 doctrine → guidance(可选) → runtime；无 guidance 时 doctrine → runtime", () => {
+    const noGuidance = buildGeneratorSystemMessages({ doctrine: "D", runtime: "R" });
+    assert.deepEqual(
+      noGuidance.map((m) => m.content),
+      ["D", "R"],
+      "无 guidance 时严格是 doctrine → runtime"
+    );
+    assert.deepEqual(
+      buildGeneratorSystemMessages({ doctrine: "D" }).map((m) => m.content),
+      ["D"],
+      "runtime 为空时不产生空 system 消息"
+    );
+    const withGuidance = buildGeneratorSystemMessages({ doctrine: "D", guidance: "G", runtime: "R" });
+    assert.deepEqual(
+      withGuidance.map((m) => m.content),
+      ["D", "G", "R"],
+      "当前事实 runtime 必须排在实验 guidance 之后"
+    );
+    assert.deepEqual(
+      withGuidance[0].providerOptions,
+      { anthropic: { cacheControl: { type: "ephemeral" } } },
+      "doctrine 段必须带 prompt cache 断点"
+    );
+    assert(!noGuidance.some((m) => m.content === "G"), "无 guidance 时数组里没有实验附件");
+    // 六处生成器调用共用 turn.ts 里的同一个构造器（`({` 只命中调用点，不含定义行）；
+    // 不再各复制条件展开。批判器不走这里。
+    assert.equal(
+      turnGuidanceSrc.split("buildGeneratorSystemMessages({").length - 1,
+      6,
+      "六处生成器 system 都必须走共享构造器"
+    );
+    assert(
+      !turnGuidanceSrc.includes("content: args.guidance },"),
+      "不得保留逐处复制的 guidance 条件展开"
+    );
+  });
+
+  check("评测报告在正常/异常两条返回路径都记录 guidance id", () => {
+    assert.equal(
+      evalGuidanceSrc.split("guidance: GUIDANCE_LABEL,").length - 1,
+      2,
+      "正常结果与异常结果两条返回路径都要写 guidance id"
+    );
   });
 
   const previous = process.env.COLIVING_JUDGE_OFF;

@@ -8,8 +8,12 @@
  *   pnpm coliving-eval -- --limit 3
  *   pnpm coliving-eval -- --judge-off        # 跳过语义验收，只跑结构性
  *   pnpm coliving-eval -- --judge-advisory   # 语义验收照跑，但 high 不计入门禁
+ *   pnpm coliving-eval -- --guidance concise-coordination-v1   # 实验组：加成功轨迹
  *
-
+ * `--guidance` 默认不启用；只接受 `lib/chat/coliving/evals/guidance.ts` 里
+ * 已登记的 id，未知 id 立即报错。报告会记录本次用的是哪个 guidance id
+ * （没启用记 null），基线和实验结果不会混淆。
+ *
  * 设计对照 docs/coliving-parallel-testing-plan.md 阶段一 + 阶段二：
  * - 每个场景一个独立测试屋，household_id 天然隔离，不需要
  *   `pnpm coliving:db --purge` 这个串行点，场景之间可以并发跑。
@@ -40,6 +44,11 @@ import {
   validateScenario,
 } from "../lib/chat/coliving/evals/schema";
 import type { ReplyReview } from "../lib/chat/coliving/turn";
+import {
+  isMissingGuidanceArg,
+  knownGuidanceIds,
+  resolveGuidanceArg,
+} from "../lib/chat/coliving/evals/guidance";
 
 // ── CLI args ─────────────────────────────────────────────────────────────
 function argValue(name: string): string | null {
@@ -60,6 +69,33 @@ const JUDGE_OFF = process.argv.includes("--judge-off");
  * 否则又会退回"judge 说了不算、报告却好像判过"的老样子。
  */
 const JUDGE_ADVISORY = process.argv.includes("--judge-advisory");
+/**
+ * 实验 guidance（Golden Trace A/B）。**默认不启用**：不传这个 flag 时
+ * `GUIDANCE_TEXT` 是 undefined，`runColivingTurn` 收到的 system 内容与
+ * 模块跟生产逐字一致，跑出来就是基线。
+ *
+ * 只接受已登记的 id（`evals/guidance.ts`）。未知 id、或 `--guidance`
+ * 只给 flag 不给值（包括后面紧跟另一个 flag，如 `--guidance --judge-off`，
+ * 后者会被当成缺值而非未知 id），都在跑任何场景之前立即报错——不静默退回基线，
+ * 否则报告会把"跑错了实验"记成"基线结果"，基线和实验组就混了。
+ */
+const GUIDANCE_FLAG_PRESENT = process.argv.includes("--guidance");
+const GUIDANCE_ID = argValue("guidance");
+if (GUIDANCE_FLAG_PRESENT && isMissingGuidanceArg(GUIDANCE_ID)) {
+  console.error(
+    `--guidance 需要一个已登记的 id；已登记：${knownGuidanceIds().join("、")}`
+  );
+  process.exit(2);
+}
+let GUIDANCE_TEXT: string | undefined;
+try {
+  GUIDANCE_TEXT = resolveGuidanceArg(GUIDANCE_ID);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(2);
+}
+/** 写进报告的实验版本标识：没启用是 null（基线）。 */
+const GUIDANCE_LABEL = GUIDANCE_ID && GUIDANCE_TEXT ? GUIDANCE_ID.trim() : null;
 
 // ── 加载 + 校验语料 ──────────────────────────────────────────────────────
 const SCENARIOS_DIR = path.join(
@@ -123,6 +159,11 @@ type TurnRecord = {
 type ScenarioResult = {
   id: string;
   source: string;
+  /**
+   * 本次跑批用的实验 guidance id（`--guidance <id>`），没启用记 null。
+   * **基线和实验组靠这个字段区分**——否则两份报告长得一样，无法归因。
+   */
+  guidance: string | null;
   pass: boolean;
   failures: string[];
   /** 完整文字稿，给报告页和语义验收用 */
@@ -274,7 +315,14 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
   for (const t of scenario.turns) {
     const livePhone = phoneRewrite[t.from] ?? t.from;
     const said = rewritePhonesInText(t.text, phoneRewrite);
-    last = await turn.runColivingTurn({ from: livePhone, text: said });
+    // guidance 只有显式 `--guidance <id>` 时才有值；不传就是基线，
+    // 生成器看到的 system 与生产逐字一致（见 turn.ts 里共用的
+    // buildGeneratorSystemMessages：无 guidance 时严格 doctrine → runtime）。
+    last = await turn.runColivingTurn({
+      from: livePhone,
+      text: said,
+      guidance: GUIDANCE_TEXT,
+    });
     transcript.push({
       fromName:
         members.find((m) => m.address === livePhone)?.name ?? livePhone,
@@ -430,6 +478,7 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
   return {
     id: scenario.id,
     source: scenario.source,
+    guidance: GUIDANCE_LABEL,
     pass: failures.length === 0,
     failures,
     turns: transcript,
@@ -486,6 +535,7 @@ async function runScenarioSafely(scenario: EvalScenario): Promise<ScenarioResult
     return {
       id: scenario.id,
       source: scenario.source,
+      guidance: GUIDANCE_LABEL,
       pass: false,
       failures: [`场景执行异常：${reason}`],
       turns: [],
@@ -511,7 +561,10 @@ async function main() {
     process.exit(1);
   }
   console.log(
-    `跑 ${scenarios.length} 个场景，并发 ${CONCURRENCY}…\n`
+    `跑 ${scenarios.length} 个场景，并发 ${CONCURRENCY}；` +
+      `guidance=${GUIDANCE_LABEL ?? "无（基线）"}${
+        GUIDANCE_LABEL ? "（实验组）" : ""
+      }…\n`
   );
 
   const start = Date.now();

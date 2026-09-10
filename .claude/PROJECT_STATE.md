@@ -45,6 +45,22 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
   信息所有者是否仍发送，不自动升级。GT03/GT05/GT06 已按此缩短修正。
 - Doctrine 不再只是参考索引：`.claude/DOCTRINE_DEVELOPMENT_MAP.md` 已规定每项行为改动
   必须先提炼适用业务规格，再决定放入提示词、案例、现场卡、代码、工具、边界或验收。
+- `.claude/CURRENT_TURN_CARD_V0.md` 已完成：核对现有 context 后设计三张桌面卡，聚焦
+  speaker/addressee/subject、信息来源与披露、关键缺项、决定状态和简洁回复契约。
+- 当前第一项实现候选：离线生成现场卡并人工核对，不直接替换生产 context；确认不丢事实后
+  才做少量定向对照。
+- `.claude/TOOL_CHAIN_INVENTORY.md` 已盘点 22 个工具与五条业务链；第一组合候选是
+  `publishSchedulePlan`，但尚未决定先做它。下一步将 Golden Trace、现场卡、组合工具
+  按收益/风险/成本统一选择第一项实现。
+- 三方案已对照，第一项实现选择“仅评测显式启用的 Golden Trace A/B”，详见
+  `.claude/FIRST_EXPERIMENT_DECISION.md`；默认关闭、不改生产 doctrine。Claude Code 已完成
+  隔离 A/B 能力，Codex 已通过 70 项离线闸、类型检查基线和 CLI 参数边界验收。
+- 第一组隐私 A/B 已停止：实验组没有先征求信息所有者同意，反而在 outbound 直接写出
+  阿哲姓名和私人房间细节；两组结构检查仍判通过，说明验收也有缺口。没有继续另两个场景，
+  没有调用语义 judge，不再追加 Golden Trace，也不接生产。
+- 根因转为 D05/C13：旧 critic/硬闸会驳回正确的来源推断风险询问，现场状态又缺少明确的
+  `source_owner / proposed_recipient / inference_risk / owner_consent`。治本设计见
+  `.claude/PRIVACY_DECISION_V0.md`；下一步先做离线隐私现场卡并人工核对，再决定最小动作阻塞。
 
 ### A. 室友矛盾对白语料库 + 转化
 

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { generateText, hasToolCall, stepCountIs, tool } from "ai";
+import { generateText, hasToolCall, stepCountIs, tool, type SystemModelMessage } from "ai";
 import { z } from "zod";
 import { assembleSystemPrompt } from "@/lib/ai/brains";
 import { getLanguageModel } from "@/lib/ai/providers";
@@ -950,6 +950,46 @@ function coordinationReplyForSender(
   return state === "gathering" ? `收到，我记下了。` : `收到。`;
 }
 
+/**
+ * 生成器 system 数组的**唯一构造入口**，六个生成路径（主生成、强制交付、
+ * 强制补发联系人、批判器打回重写、事实核对重试、最后聚焦修正）共用，
+ * 不各复制一份条件展开。批判器不在这个数组里构造 system。
+ *
+ * 顺序（有意为之）：
+ *
+ *     doctrine（逐字不变，开 prompt cache） → guidance（可选实验附件） → runtime（当前事实，最后）
+ *
+ * 成功轨迹属于背景示范，不能比眼前这栋房子的事实更靠近用户消息；runtime
+ * 放在最后，示例压不过当前事实。不传 guidance 时严格退回 `doctrine → runtime`，
+ * 与生产旧路径逐字一致（runtime 为空串时省略 `content: ""` 的空 system 消息）。
+ *
+ * 放在 turn.ts（生产路径）而不是 evals：实验提示正文不许被生产模块反向依赖，
+ * `evals/guidance.ts` 只保留登记与解析。
+ */
+export function buildGeneratorSystemMessages(input: {
+  doctrine: string;
+  /** 已登记的 guidance 正文；不传 = 基线，数组里不出现实验附件。 */
+  guidance?: string;
+  /** 本轮运行时状态（当前事实）。 */
+  runtime?: string;
+}): SystemModelMessage[] {
+  return [
+    {
+      role: "system",
+      content: input.doctrine,
+      providerOptions: {
+        anthropic: { cacheControl: { type: "ephemeral" } },
+      },
+    },
+    ...(input.guidance
+      ? [{ role: "system" as const, content: input.guidance }]
+      : []),
+    ...(input.runtime
+      ? [{ role: "system" as const, content: input.runtime }]
+      : []),
+  ];
+}
+
 export async function runColivingTurn(args: {
   /** 从哪个渠道来：sms / wecom / xhs。决定认人用哪种地址、回信走哪条路 */
   channel?: string;
@@ -958,6 +998,21 @@ export async function runColivingTurn(args: {
   text: string;
   /** 仅测试用：临时覆盖模型，便于 A/B */
   modelId?: string;
+  /**
+   * **仅评测显式启用的成功轨迹 guidance，生产调用方一律不传。**
+   *
+   * 传的是已经过 `evals/guidance.ts` 登记的 guidance 正文（不是 id、
+   * 也不是任意外部文本）；不传时生成器看到的 system 内容与模块逐字不变，
+   * 生产行为不受影响（统一的 `buildGeneratorSystemMessages` 在无 guidance
+   * 时严格退回 doctrine → runtime）。
+   *
+   * 这一轮里**所有属于生成器的调用**（主生成、强制交付、强制补发联系人、
+   * 批判器打回重写、事实核对重试、最后聚焦修正）都带上同一份 guidance，
+   * 且都经同一个构造器，顺序固定为 doctrine → guidance（可选）→ runtime
+   * （当前事实最后）——示例不会比眼前这栋房子的事实更靠近用户消息。
+   * 批判器的 rubric 不注入它，也不走这个构造器。
+   */
+  guidance?: string;
 }): Promise<TurnOutcome> {
   const channel = args.channel ?? "sms";
   /**
@@ -3113,14 +3168,12 @@ export async function runColivingTurn(args: {
   const result = await generateText({
     abortSignal: turnAbortSignal(),
     model: getLanguageModel(modelId),
-    system: [
-      {
-        role: "system" as const,
-        content: doctrine,
-        providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
-      },
-      ...(runtime ? [{ role: "system" as const, content: runtime }] : []),
-    ],
+    // 顺序：doctrine（缓存）→ 实验 guidance（有才放）→ runtime（当前事实，最后）
+    system: buildGeneratorSystemMessages({
+      doctrine,
+      runtime,
+      guidance: args.guidance,
+    }),
     messages: [...history, { role: "user" as const, content: args.text }],
     tools: activeTools,
     // 交付了正文就收工；没交付则最多跑到步数上限
@@ -3158,16 +3211,11 @@ export async function runColivingTurn(args: {
       const forced = await generateText({
         abortSignal: turnAbortSignal(),
         model: getLanguageModel(modelId),
-        system: [
-          {
-            role: "system" as const,
-            content: doctrine,
-            providerOptions: {
-              anthropic: { cacheControl: { type: "ephemeral" } },
-            },
-          },
-          ...(runtime ? [{ role: "system" as const, content: runtime }] : []),
-        ],
+        system: buildGeneratorSystemMessages({
+          doctrine,
+          runtime,
+          guidance: args.guidance,
+        }),
         messages: [
           ...history,
           { role: "user" as const, content: args.text },
@@ -3270,16 +3318,13 @@ export async function runColivingTurn(args: {
         const forcedContact = await generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
-          system: [
-            {
-              role: "system" as const,
-              content: doctrine,
-              // 跟主生成调用、下面的force-sendReply同一个道理：
-              // 这段一轮里可能被重发好几次，逐字不变，该开缓存
-              providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
-            },
-            { role: "system" as const, content: runtime },
-          ],
+          // 跟主生成调用、下面的force-sendReply同一个道理：这段一轮里可能被
+          // 重发好几次，doctrine 逐字不变，由构造器统一开缓存
+          system: buildGeneratorSystemMessages({
+            doctrine,
+            runtime,
+            guidance: args.guidance,
+          }),
           messages: [
             ...history,
             { role: "user" as const, content: args.text },
@@ -3917,16 +3962,13 @@ export async function runColivingTurn(args: {
       const redoResult = await generateText({
         abortSignal: turnAbortSignal(),
         model: getLanguageModel(modelId),
-        system: [
-          {
-            role: "system" as const,
-            content: doctrine,
-            // 同上：这一轮如果批判器打回，这段会跟主生成调用共享
-            // 同一份 doctrine 内容，开缓存能命中主调用已经写入的那份
-            providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
-          },
-          { role: "system" as const, content: runtime },
-        ],
+        // 同上：这一轮如果批判器打回，这段会跟主生成调用共享同一份
+        // doctrine 内容，缓存能命中主调用已经写入的那份
+        system: buildGeneratorSystemMessages({
+          doctrine,
+          runtime,
+          guidance: args.guidance,
+        }),
         messages: [
           ...history,
           { role: "user" as const, content: args.text },
@@ -4064,16 +4106,11 @@ export async function runColivingTurn(args: {
         const retryResult = await generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
-          system: [
-            {
-              role: "system" as const,
-              content: doctrine,
-              providerOptions: {
-                anthropic: { cacheControl: { type: "ephemeral" } },
-              },
-            },
-            { role: "system" as const, content: runtime },
-          ],
+          system: buildGeneratorSystemMessages({
+            doctrine,
+            runtime,
+            guidance: args.guidance,
+          }),
           messages: [
             ...history,
             { role: "user" as const, content: args.text },
@@ -4209,16 +4246,11 @@ export async function runColivingTurn(args: {
           const finalFix = await generateText({
             abortSignal: turnAbortSignal(),
             model: getLanguageModel(modelId),
-            system: [
-              {
-                role: "system" as const,
-                content: doctrine,
-                providerOptions: {
-                  anthropic: { cacheControl: { type: "ephemeral" } },
-                },
-              },
-              { role: "system" as const, content: runtime },
-            ],
+            system: buildGeneratorSystemMessages({
+              doctrine,
+              runtime,
+              guidance: args.guidance,
+            }),
             messages: [
               ...history,
               { role: "user" as const, content: args.text },
