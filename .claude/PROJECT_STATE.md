@@ -64,11 +64,17 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 - 离线模型卡首轮也已证伪：`deepseek/deepseek-v4-flash` 经两种 SDK 结构化输出方式都不能
   生成符合 schema 的对象，均明确报未验证，没有落假报告。停止继续调用；下一步改为在场景中
   保存人工核准的标准卡并生成 HTML，先建立可比较真值，再谈模型提取。
-- 第一张人工标准隐私卡已落在 `corpus-025-cleaning-privacy-2026-09-09`：完全离线命令成功
-  生成 JSON/HTML，确定性确认 `阿哲 → 大凯 / likely / unknown / ask_owner`。免费闸已增至
-  80 项全过；HTML 明示“人工核准、非模型生成”，包含风险依据和判断摘要，不展示隐藏思维链。
-- 下一步不是接生产：先补覆盖 `possible / declined / approved / none` 的少量标准卡，确认状态模型
-  足以表达现实差异；再设计生产动作阻塞的最小接口。
+- 老板复审第一张卡后发现更前置的根因：`corpus-025` 只问边界判断，旧卡却把“提到大凯”
+  自动扩大成“准备联系大凯”。V1 已增加 `userGoal / requestedAction / actionBasis /
+  disclosurePlan`，只有确有对外数据动作才进入收件人、反推风险和许可判断。
+- 卡片业务来源已写入 `.claude/CARD_SOURCE_MAP.md`：以现有 doctrine 为主，辅以 NIST
+  Privacy/AI RMF、W3C PROV、ICO purpose limitation/data minimisation；项目胶水只负责枚举、
+  HTML 和校验表示，不得单独创造权限或 SOP。每个关键字段必须有非胶水来源。
+- 三张人工金标准卡已离线通过：025 只回答越界判断；026 因明确请协调且来源可反推而先问
+  是否仍联系；024 只给访客规则处理原则、不擅自联系。91 项免费闸通过；类型检查仍只有
+  `speech-input.tsx:55-56` 两条既有 TS2717。尚未接生产、未调用模型、未写数据库或发消息。
+- 下一步先由老板查看三份 HTML 是否符合真实使用，再决定是否补 `approved/declined/none`
+  等动作状态；未经审阅不设计生产动作阻塞接口。
 
 ### A. 室友矛盾对白语料库 + 转化
 

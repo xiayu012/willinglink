@@ -11,6 +11,11 @@
  */
 
 import {
+  COORDINATION_ACTION_BASES,
+  COORDINATION_DISCLOSURE_PLANS,
+  COORDINATION_REQUESTED_ACTIONS,
+  COORDINATION_SOURCE_TYPES,
+  COORDINATION_USER_GOALS,
   PRIVACY_INFERENCE_RISKS,
   PRIVACY_OWNER_CONSENTS,
   PRIVACY_RECOMMENDED_ACTIONS,
@@ -43,7 +48,7 @@ const PRIVACY_CARD_STRING_ARRAY_FIELDS = [
 ] as const;
 
 /**
- * 校验场景里保存的**人工标准隐私卡**（gold card）的静态结构。
+ * 校验场景里保存的**人工金标准「本轮协调动作卡」**（gold card）的静态结构。
  *
  * 只查字段存在、类型与枚举合法——语义/状态一致性由 `privacy-turn-card.ts`
  * 的 `validatePrivacyCard` 负责（那是动作边界的单一事实源，不在这里复制一份
@@ -66,6 +71,26 @@ export function validatePrivacyCardShape(raw: unknown, errors: string[]): void {
       errors.push(`privacyCard.${field} 必须是字符串数组`);
     }
   }
+  if (!isEnumValue(COORDINATION_USER_GOALS, card.userGoal)) {
+    errors.push(
+      `privacyCard.userGoal 必须是 ${COORDINATION_USER_GOALS.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(COORDINATION_REQUESTED_ACTIONS, card.requestedAction)) {
+    errors.push(
+      `privacyCard.requestedAction 必须是 ${COORDINATION_REQUESTED_ACTIONS.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(COORDINATION_ACTION_BASES, card.actionBasis)) {
+    errors.push(
+      `privacyCard.actionBasis 必须是 ${COORDINATION_ACTION_BASES.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(COORDINATION_DISCLOSURE_PLANS, card.disclosurePlan)) {
+    errors.push(
+      `privacyCard.disclosurePlan 必须是 ${COORDINATION_DISCLOSURE_PLANS.join("/")} 之一`
+    );
+  }
   if (!isEnumValue(PRIVACY_INFERENCE_RISKS, card.inferenceRisk)) {
     errors.push(
       `privacyCard.inferenceRisk 必须是 ${PRIVACY_INFERENCE_RISKS.join("/")} 之一`
@@ -80,6 +105,36 @@ export function validatePrivacyCardShape(raw: unknown, errors: string[]): void {
     errors.push(
       `privacyCard.recommendedAction 必须是 ${PRIVACY_RECOMMENDED_ACTIONS.join("/")} 之一`
     );
+  }
+  // 逐字段依据：至少一条，且每条结构完整、来源等级合法。
+  if (!Array.isArray(card.basis) || card.basis.length === 0) {
+    errors.push("privacyCard.basis 必须是非空数组");
+  } else {
+    for (const [i, entry] of card.basis.entries()) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        errors.push(`privacyCard.basis[${i}] 必须是对象`);
+        continue;
+      }
+      const basis = entry as Record<string, unknown>;
+      if (
+        !Array.isArray(basis.fields) ||
+        basis.fields.length === 0 ||
+        basis.fields.some((f) => typeof f !== "string")
+      ) {
+        errors.push(`privacyCard.basis[${i}].fields 必须是非空字符串数组`);
+      }
+      if (!isEnumValue(COORDINATION_SOURCE_TYPES, basis.sourceType)) {
+        errors.push(
+          `privacyCard.basis[${i}].sourceType 必须是 ${COORDINATION_SOURCE_TYPES.join("/")} 之一`
+        );
+      }
+      if (typeof basis.sourceRef !== "string" || !basis.sourceRef) {
+        errors.push(`privacyCard.basis[${i}].sourceRef 必须是非空字符串`);
+      }
+      if (typeof basis.rule !== "string" || !basis.rule) {
+        errors.push(`privacyCard.basis[${i}].rule 必须是非空字符串`);
+      }
+    }
   }
 }
 
@@ -204,7 +259,7 @@ export type EvalScenario = {
   turns: ScenarioTurn[];
   expect?: ScenarioExpectation;
   /**
-   * **人工核准的标准隐私卡**（gold card，评测专用）。随场景一起保存，
+   * **人工核准的「本轮协调动作卡」**（gold card，评测专用）。随场景一起保存，
    * 由老板/Codex 对真实对白逐字段核对后写入；`scripts/coliving-privacy-card.ts`
    * 只读它、跑 `validatePrivacyCard` 并生成 JSON/HTML，**不调用任何模型**。
    * 结构复用 `PrivacyTurnCard`，避免另立一份会漂移的类型。

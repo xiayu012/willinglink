@@ -1,4 +1,8 @@
-# Claude Code 实现任务：评测专用 Golden Trace A/B
+# 当前任务入口
+
+2026-09-10 当前唯一有效任务见 `.claude/CODEX_TASK_CARD_V1.md`。本文件以下内容均为已经完成的历史任务，只保留作实现证据，不得继续执行。
+
+# Claude Code 实现任务：评测专用 Golden Trace A/B（历史）
 
 ## 角色与边界
 

@@ -1,5 +1,5 @@
 /**
- * **人工标准隐私卡检查器（离线、只读、评测专用，不接生产）。**
+ * **人工标准「本轮协调动作卡」检查器（离线、只读、评测专用，不接生产）。**
  *
  * 用法：
  *   pnpm coliving:privacy-card -- --scenario corpus-025-cleaning-privacy-2026-09-09
@@ -7,13 +7,13 @@
  * 它做的是（也只做这些）：
  * - 从 `lib/chat/coliving/evals/scenarios/` 按 id 读一个已有场景，先走
  *   `validateScenario`；
- * - 取出场景里**人工核准的标准卡**（`privacyCard`，由老板/Codex 逐字段核对
+ * - 取出场景里**人工核准的金标准卡**（`privacyCard`，由老板/Codex 逐字段核对
  *   后写进场景文件），用 `validatePrivacyCard` 跑确定性业务校验；
  * - 生成 JSON + HTML 供人工查看，校验失败时醒目报红并非零退出。
  *
  * 边界（写死在代码里，别在这里加东西）：
  * - **完全离线**：不 import AI SDK / provider / model，不加载 `.env`，
- *   不联网，不调用任何模型。标准卡是人写的，不是模型生成的。
+ *   不联网，不调用任何模型。金标准卡是人写的，不是模型生成的。
  * - **不调用 `runColivingTurn`**，不调 critic、contactPerson，不写数据库，
  *   不发 Twilio / 企微 / 小红书。整条链路只是"读场景 → 校验 → 写报告"。
  * - 说话人、名册、原文全部来自场景文件，不让任何外部输入编。
@@ -83,7 +83,7 @@ type PrivacyCardReport = {
   scenarioId: string;
   scenarioSource: string;
   /** 明示卡片来源，避免与已停止的"模型生成卡"混淆。 */
-  cardOrigin: "场景文件人工核准的标准隐私卡（非模型生成）";
+  cardOrigin: "场景文件人工核准的标准本轮协调动作卡（非模型生成）";
   turnIndex: number;
   turnCount: number;
   checkedAt: string;
@@ -107,6 +107,12 @@ function list(items: string[]): string {
     : `<ul>${items.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
 }
 
+const SOURCE_TYPE_LABEL: Record<string, string> = {
+  doctrine: "项目 doctrine",
+  external_standard: "外部权威标准",
+  project_glue: "项目胶水（只解释表示方法，不作业务依据）",
+};
+
 function renderHtml(data: PrivacyCardReport): string {
   const { card: c, validation: v } = data;
   const badge = v.ok
@@ -118,12 +124,28 @@ function renderHtml(data: PrivacyCardReport): string {
         .map((x) => `<li><code>${esc(x.code)}</code>：${esc(x.message)}</li>`)
         .join("")}</ul></div>`;
   const roster = data.context.roster.map((n) => esc(n)).join("、");
+  // `not_applicable` 必须解释成“本轮没有披露动作，因此不适用”，不是“绝对无风险”。
+  const riskNote =
+    c.inferenceRisk === "not_applicable"
+      ? '<div class="note">本轮没有对外披露动作，因此反推风险不适用（不等于绝对无风险）。</div>'
+      : "";
+  const basisRows = c.basis
+    .map((entry) => {
+      const label = SOURCE_TYPE_LABEL[entry.sourceType] ?? esc(entry.sourceType);
+      const kind = entry.sourceType.replace(/[^a-z_]/g, "");
+      return `<tr>
+        <td class="k">${entry.fields.map((f) => `<code>${esc(f)}</code>`).join(" ")}</td>
+        <td><span class="src ${kind}">${esc(label)}</span><br>${esc(entry.sourceRef)}</td>
+        <td>${esc(entry.rule)}</td>
+      </tr>`;
+    })
+    .join("");
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>人工标准隐私卡 · ${esc(data.scenarioId)}</title>
+<title>人工标准本轮协调动作卡（非模型生成）· ${esc(data.scenarioId)}</title>
 <style>
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 24px; color: #1c1c1e; line-height: 1.6; }
   h1 { font-size: 20px; } h2 { font-size: 15px; margin: 18px 0 6px; color: #3a3a3c; }
@@ -139,10 +161,16 @@ function renderHtml(data: PrivacyCardReport): string {
   ul { margin: 4px 0; padding-left: 20px; }
   blockquote { margin: 6px 0; padding: 8px 12px; background: #f4f4f6; border-left: 3px solid #b9b9c0; }
   code { background: #f0f0f3; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .note { margin-top: 6px; padding: 6px 10px; background: #fff8e1; border-left: 3px solid #f0b429; font-size: 13px; }
+  .src { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
+  .src.doctrine { background: #1f6feb; }
+  .src.external_standard { background: #6b4fbb; }
+  .src.project_glue { background: #8a8a90; }
+  .internal { color: #6b6b70; font-size: 13px; }
 </style>
 </head>
 <body>
-<h1>人工标准隐私卡 · ${esc(data.scenarioId)}</h1>
+<h1>人工标准本轮协调动作卡（非模型生成） · ${esc(data.scenarioId)}</h1>
 <p class="meta">卡片来源：${esc(data.cardOrigin)} ｜ 第 ${data.turnIndex}/${data.turnCount} 轮 ｜ 校验时间：${esc(data.checkedAt)} ｜ ${badge}</p>
 
 <h2>场景</h2>
@@ -155,18 +183,48 @@ function renderHtml(data: PrivacyCardReport): string {
   <tr><td class="k">本轮原文</td><td><blockquote>${esc(data.context.rawMessage)}</blockquote></td></tr>
 </table>
 
-<h2>标准隐私卡</h2>
+<h2>一 · 目的与请求动作</h2>
+<div class="card">
+<table>
+  <tr><td class="k">用户目的 userGoal</td><td><b>${esc(c.userGoal)}</b></td></tr>
+  <tr><td class="k">请求动作 requestedAction</td><td><b>${esc(c.requestedAction)}</b></td></tr>
+  <tr><td class="k">动作依据 actionBasis</td><td><b>${esc(c.actionBasis)}</b></td></tr>
+</table>
+</div>
+
+<h2>二 · 对外动作计划</h2>
+<div class="card">
+<table>
+  <tr><td class="k">披露计划 disclosurePlan</td><td><b>${esc(c.disclosurePlan)}</b></td></tr>
+  <tr><td class="k">拟联系对象 proposedRecipients</td><td>${list(c.proposedRecipients)}</td></tr>
+</table>
+</div>
+
+<h2>三 · 隐私字段</h2>
 <div class="card">
 <table>
   <tr><td class="k">信息所有者 sourceOwner</td><td>${esc(c.sourceOwner)}</td></tr>
-  <tr><td class="k">拟联系对象 proposedRecipients</td><td>${list(c.proposedRecipients)}</td></tr>
   <tr><td class="k">敏感事实 sensitiveClaims</td><td>${list(c.sensitiveClaims)}</td></tr>
-  <tr><td class="k">反推风险 inferenceRisk</td><td><b>${esc(c.inferenceRisk)}</b></td></tr>
+  <tr><td class="k">反推风险 inferenceRisk</td><td><b>${esc(c.inferenceRisk)}</b>${riskNote}</td></tr>
   <tr><td class="k">风险依据 riskReasons</td><td>${list(c.riskReasons)}</td></tr>
   <tr><td class="k">所有者同意 ownerConsent</td><td><b>${esc(c.ownerConsent)}</b></td></tr>
+</table>
+</div>
+
+<h2>四 · 结论</h2>
+<div class="card">
+<table>
   <tr><td class="k">建议动作 recommendedAction</td><td><b>${esc(c.recommendedAction)}</b></td></tr>
-  <tr><td class="k">住户回复 residentReply</td><td><blockquote>${esc(c.residentReply)}</blockquote></td></tr>
-  <tr><td class="k">判断摘要 decisionSummary</td><td>${esc(c.decisionSummary)}</td></tr>
+  <tr><td class="k">对外回复 residentReply</td><td><blockquote>${esc(c.residentReply)}</blockquote></td></tr>
+</table>
+<p class="internal">内部判断摘要（不回给住户）：${esc(c.decisionSummary)}</p>
+</div>
+
+<h2>逐字段依据（doctrine / 外部标准 / 项目胶水）</h2>
+<div class="card">
+<table>
+  <tr><td class="k"><b>字段</b></td><td><b>来源</b></td><td><b>规则</b></td></tr>
+  ${basisRows}
 </table>
 </div>
 ${violations}
@@ -187,8 +245,8 @@ function main() {
   }
   if (!scenario.privacyCard) {
     console.error(
-      `场景「${scenario.id}」没有保存人工标准隐私卡（privacyCard）。` +
-        "标准卡由老板/Codex 核对后写进场景文件；本工具不生成卡片。"
+      `场景「${scenario.id}」没有保存人工金标准卡（privacyCard）。` +
+        "金标准卡由老板/Codex 核对后写进场景文件；本工具不生成卡片。"
     );
     process.exit(2);
   }
@@ -220,7 +278,7 @@ function main() {
   const report: PrivacyCardReport = {
     scenarioId: scenario.id,
     scenarioSource: scenario.source,
-    cardOrigin: "场景文件人工核准的标准隐私卡（非模型生成）",
+    cardOrigin: "场景文件人工核准的标准本轮协调动作卡（非模型生成）",
     turnIndex: 1,
     turnCount: scenario.turns.length,
     checkedAt,
@@ -238,8 +296,10 @@ function main() {
   writeFileSync(htmlPath, renderHtml(report), "utf8");
 
   console.log(
-    `人工标准隐私卡已检查：${baseName}\n` +
-      `  说话人「${speaker}」，inferenceRisk=${report.card.inferenceRisk}，` +
+    `人工标准本轮协调动作卡已检查：${baseName}\n` +
+      `  说话人「${speaker}」，userGoal=${report.card.userGoal}，` +
+      `requestedAction=${report.card.requestedAction}，disclosurePlan=${report.card.disclosurePlan}\n` +
+      `  inferenceRisk=${report.card.inferenceRisk}，` +
       `ownerConsent=${report.card.ownerConsent}，recommendedAction=${report.card.recommendedAction}\n` +
       `  确定性校验：${validation.ok ? "通过" : `失败（${validation.violations.length} 项）`}\n` +
       `  JSON：${jsonPath}\n  HTML：${htmlPath}`

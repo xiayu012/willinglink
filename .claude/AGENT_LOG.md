@@ -12,6 +12,42 @@
 
 ---
 
+## 2026-09-10 · 隐私卡改为目的优先，并建立 doctrine/外部标准来源门禁
+
+**老板复审发现的根因**：`corpus-025` 的住户只问“这种情况算不算越界”，V0 却把消息中
+出现的大凯自动填为拟联系对象，再回复“还要联系他吗”。这不是一句话写坏，而是状态模型在
+用户目的之前就假设存在对外动作；同时“你评评理”的语料仍把协调 AI 当成人类室友。
+
+**语料修正（Codex 文字转化例外）**：025 改为“这种情况算不算越界？我是不是反应过度了？”；
+026 的动作要求改为机器场景下明确的“这件事请你协调一下”。
+
+**来源设计**：新增 `.claude/CARD_SOURCE_MAP.md`。卡片流程以项目 doctrine 为主：先分问题类别、
+分离事实与主张、按决定权判断谁决定、只问一个必要问题、对外只给结果；以 NIST Privacy
+Framework 的 data action、NIST AI RMF 的角色/验证、W3C PROV 的来源追踪、ICO 的 purpose
+limitation/data minimisation 作外部交叉依据。项目胶水只允许命名枚举、排版和确定性表示。
+
+**Claude Code 实现证据**：Claude 扩展离线 `PrivacyTurnCard`，加入目的、请求动作、动作依据、
+披露计划、`not_applicable` 风险与逐字段 `basis`；更新 scenario schema、HTML/JSON 和免费检查；
+写入 024/025/026 三张人工金标准。Codex 第一轮审查退回三项：basis 只按组覆盖、无披露回复
+仍可偷塞联系承诺、026 旧 expect 仍允许联系。Claude 二次修改为 12 个业务字段逐一要求
+doctrine/外部标准来源，增加无披露回复的窄联系承诺门禁，并让三个场景本轮均禁止
+`contactPerson`。
+
+**三张离线结果**：
+- 025：`answer_question / answer_only / disclosure none / risk not_applicable`，直接回答越界。
+- 026：`coordinate / consider_contact / likely / consent unknown / ask_owner`，先问是否仍联系。
+- 024：`propose_rule / answer_only / disclosure none / risk not_applicable`，只给访客规则原则。
+
+**Codex 独立验证**：`pnpm.cmd coliving:quality` 91/91；`git diff --check` 通过；三次
+`coliving:privacy-card` 均离线生成 JSON/HTML 且校验通过。`tsc --noEmit` 只有既有
+`components/ai-elements/speech-input.tsx:55-56` 两条 TS2717，本次未新增。没有调用模型评测、
+没有接生产、没有数据库/Twilio 写入。
+
+**边界**：人工金标准证明正确状态可表达与校验，不证明生产模型能自动填对。下一步先让老板
+查看三张报告，再决定补状态覆盖或设计最小生产阻塞；不直接接生产。
+
+---
+
 ## 2026-09-06 · 协调质量与验收去矛盾（Codex 监督、Claude Sonnet medium 实现）
 
 - 用户否决四套“通过”对话，要求治本、合理坚持和公平协商；不是硬编码两小时者永远最后。
