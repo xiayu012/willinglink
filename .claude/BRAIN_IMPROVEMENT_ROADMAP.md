@@ -565,6 +565,13 @@ AI 原动作与原回复
 - 现有结构检查漏掉了场景说明中明列的隐私坏模式；旧 critic/硬闸还会驳回“向信息所有者说明可能被推断并询问是否继续”的正确动作。
 - H1 在当前隐私问题上的最小版本已被证伪：不继续追加示例，不接生产。
 - 下一步按 H3 做离线隐私现场卡，规格见 `.claude/PRIVACY_DECISION_V0.md`；先稳定表达 `source_owner / proposed_recipient / inference_risk / owner_consent`，再考虑动作阻塞。
+
+### 2026-09-10 · 隐私现场卡建立人工真值
+
+- 默认模型经 `generateObject` 和 `generateText + Output.object` 两种结构化方式都不能产出合格对象；按停止条件停止模型调用，没有把未验证结果伪装成报告。
+- 改为场景内人工核准的标准卡：第一张 `corpus-025` 已通过离线结构与业务校验，并生成 JSON/HTML。
+- 当前收益是建立可比较真值和状态不变量，不是宣称大脑已经学会隐私判断。
+- 下一小步补齐 `possible / declined / approved / none` 的少量标准卡；只有这些状态能覆盖现实差异后，才设计生产动作阻塞。
 - 只用三条短轨迹验证冗长过程外泄、必要理由和隐私询问；首轮只针对三个已有语料场景。
 - 已写 `.claude/CODEX_TASK.md`，由 Claude Code 按双模型门禁实现；Codex 后续审查完整 diff、跑免费闸，再决定是否花费定向模型评测。
 

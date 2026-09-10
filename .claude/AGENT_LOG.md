@@ -6155,3 +6155,12 @@ CODEX_TASK：给自包含协商状态机接「薄 LLM 意图解析」，用 5 �
 **验证**：5 个 JSON 均可解析；id 与文件名一致；turn 数 3–7；from 均属于 people；
 号码均为 +1555 测试号；expect 均为空；共 29 轮。仅 008/010/015 各保留一处“你”，
 逐条确认均明确指向协调 AI。`git diff --check` 干净；未跑模型评测、未触碰 Twilio/数据库。
+# 2026-09-10 · 推断性隐私现场卡从失败模型实验收窄为人工标准卡
+
+- Golden Trace A/B 在 `corpus-025` 没有改善关键隐私动作，实验组反而直接泄漏阿哲姓名和私人房间细节；停止继续示例注入。
+- 默认 `deepseek/deepseek-v4-flash` 经两种 SDK 结构化输出方式都无法生成符合 schema 的隐私卡；两次均明确失败、无假报告，随后停止模型调用。
+- Claude Code 实现并经 Codex 验收人工标准卡：场景保存 `privacyCard`，纯函数校验人物、收件人、风险/同意状态和动作组合，离线 CLI 生成 JSON/HTML。
+- 第一张标准卡 `corpus-025` 结果：`sourceOwner=阿哲`、`proposedRecipients=[大凯]`、`inferenceRisk=likely`、`ownerConsent=unknown`、`recommendedAction=ask_owner`，80 项免费闸通过。
+- 当前没有接生产、没有写数据库或发消息。下一步补状态覆盖，再决定最小生产动作阻塞。
+
+---

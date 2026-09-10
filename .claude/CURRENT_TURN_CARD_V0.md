@@ -238,3 +238,9 @@ privacy_decision
 行动不变量：`inference_risk` 为 `possible/likely` 且 `owner_consent` 为 `unknown/declined` 时，不允许联系 `proposed_recipient`；当前回复只需向 `source_owner` 说明可能被猜到并问是否继续。`declined` 后停止，不自动升级。
 
 这组字段先做离线生成与人工核对，重点不是让模型换一种说法，而是验证同一个敏感事实能否在进入工具动作前被正确拦住。
+
+## 第一张标准卡已验证（2026-09-10）
+
+默认模型连续两次无法生成符合 schema 的结构化卡，因此停止模型生成，改用人工核准的标准卡作为真值。`corpus-025-cleaning-privacy-2026-09-09` 已验证通过，HTML 报告能同时展示人物映射、敏感主张、反推风险、同意状态、动作建议与简短判断摘要。
+
+这一步只证明“正确状态可以被明确表达并确定性校验”，尚未证明运行时能自动填对，也尚未接入 `contactPerson` 阻塞。

@@ -61,6 +61,14 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 - 根因转为 D05/C13：旧 critic/硬闸会驳回正确的来源推断风险询问，现场状态又缺少明确的
   `source_owner / proposed_recipient / inference_risk / owner_consent`。治本设计见
   `.claude/PRIVACY_DECISION_V0.md`；下一步先做离线隐私现场卡并人工核对，再决定最小动作阻塞。
+- 离线模型卡首轮也已证伪：`deepseek/deepseek-v4-flash` 经两种 SDK 结构化输出方式都不能
+  生成符合 schema 的对象，均明确报未验证，没有落假报告。停止继续调用；下一步改为在场景中
+  保存人工核准的标准卡并生成 HTML，先建立可比较真值，再谈模型提取。
+- 第一张人工标准隐私卡已落在 `corpus-025-cleaning-privacy-2026-09-09`：完全离线命令成功
+  生成 JSON/HTML，确定性确认 `阿哲 → 大凯 / likely / unknown / ask_owner`。免费闸已增至
+  80 项全过；HTML 明示“人工核准、非模型生成”，包含风险依据和判断摘要，不展示隐藏思维链。
+- 下一步不是接生产：先补覆盖 `possible / declined / approved / none` 的少量标准卡，确认状态模型
+  足以表达现实差异；再设计生产动作阻塞的最小接口。
 
 ### A. 室友矛盾对白语料库 + 转化
 

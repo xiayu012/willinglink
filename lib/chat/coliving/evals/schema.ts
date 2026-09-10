@@ -10,11 +10,78 @@
  *   子代理审查，这里只做代码能确定性判的那部分（阶段二）。
  */
 
+import {
+  PRIVACY_INFERENCE_RISKS,
+  PRIVACY_OWNER_CONSENTS,
+  PRIVACY_RECOMMENDED_ACTIONS,
+  type PrivacyTurnCard,
+} from "./privacy-turn-card";
+
 export type ScenarioPerson = {
   phone: string;
   name: string;
   role: "tenant" | "landlord";
 };
+
+function isEnumValue<T extends string>(
+  allowed: readonly T[],
+  value: unknown
+): value is T {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value);
+}
+
+const PRIVACY_CARD_STRING_FIELDS = [
+  "sourceOwner",
+  "residentReply",
+  "decisionSummary",
+] as const;
+
+const PRIVACY_CARD_STRING_ARRAY_FIELDS = [
+  "proposedRecipients",
+  "sensitiveClaims",
+  "riskReasons",
+] as const;
+
+/**
+ * 校验场景里保存的**人工标准隐私卡**（gold card）的静态结构。
+ *
+ * 只查字段存在、类型与枚举合法——语义/状态一致性由 `privacy-turn-card.ts`
+ * 的 `validatePrivacyCard` 负责（那是动作边界的单一事实源，不在这里复制一份
+ * 会漂移的判断）。
+ */
+export function validatePrivacyCardShape(raw: unknown, errors: string[]): void {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    errors.push("privacyCard 必须是对象");
+    return;
+  }
+  const card = raw as Record<string, unknown>;
+  for (const field of PRIVACY_CARD_STRING_FIELDS) {
+    if (typeof card[field] !== "string") {
+      errors.push(`privacyCard.${field} 必须是字符串`);
+    }
+  }
+  for (const field of PRIVACY_CARD_STRING_ARRAY_FIELDS) {
+    const value = card[field];
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+      errors.push(`privacyCard.${field} 必须是字符串数组`);
+    }
+  }
+  if (!isEnumValue(PRIVACY_INFERENCE_RISKS, card.inferenceRisk)) {
+    errors.push(
+      `privacyCard.inferenceRisk 必须是 ${PRIVACY_INFERENCE_RISKS.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(PRIVACY_OWNER_CONSENTS, card.ownerConsent)) {
+    errors.push(
+      `privacyCard.ownerConsent 必须是 ${PRIVACY_OWNER_CONSENTS.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(PRIVACY_RECOMMENDED_ACTIONS, card.recommendedAction)) {
+    errors.push(
+      `privacyCard.recommendedAction 必须是 ${PRIVACY_RECOMMENDED_ACTIONS.join("/")} 之一`
+    );
+  }
+}
 
 /** 统计通过审稿的草稿；不把工具调用次数或被拦消息当作可投递结果。 */
 export function countAcceptedOutbound(messages: Array<{ blocked?: boolean }>): number {
@@ -136,6 +203,13 @@ export type EvalScenario = {
   };
   turns: ScenarioTurn[];
   expect?: ScenarioExpectation;
+  /**
+   * **人工核准的标准隐私卡**（gold card，评测专用）。随场景一起保存，
+   * 由老板/Codex 对真实对白逐字段核对后写入；`scripts/coliving-privacy-card.ts`
+   * 只读它、跑 `validatePrivacyCard` 并生成 JSON/HTML，**不调用任何模型**。
+   * 结构复用 `PrivacyTurnCard`，避免另立一份会漂移的类型。
+   */
+  privacyCard?: PrivacyTurnCard;
 };
 
 export function validateScenario(s: unknown, filename: string): EvalScenario {
@@ -173,6 +247,9 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
   const setup = obj?.setup as EvalScenario["setup"] | undefined;
   if (setup?.openCases && !Array.isArray(setup.openCases)) {
     errors.push("setup.openCases 必须是数组");
+  }
+  if (obj?.privacyCard !== undefined) {
+    validatePrivacyCardShape(obj.privacyCard, errors);
   }
   if (errors.length > 0) {
     throw new Error(`场景文件 ${filename} 格式不对：${errors.join("；")}`);

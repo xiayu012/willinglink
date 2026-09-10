@@ -10,6 +10,7 @@ import {
   countAcceptedOutbound,
   evaluateReplyReview,
   evaluateTurnReplyReviews,
+  validateScenario,
 } from "../lib/chat/coliving/evals/schema";
 import {
   buildGeneratorSystemMessages,
@@ -42,6 +43,16 @@ import {
   resolveGuidance,
   resolveGuidanceArg,
 } from "../lib/chat/coliving/evals/guidance";
+import { findUnknownPrivacyCardFlags } from "../lib/chat/coliving/evals/privacy-card-args";
+import {
+  claimsContactAlreadyMade,
+  PRIVACY_INFERENCE_RISKS,
+  PRIVACY_OWNER_CONSENTS,
+  PRIVACY_RECOMMENDED_ACTIONS,
+  validatePrivacyCard,
+  type PrivacyCardContext,
+  type PrivacyTurnCard,
+} from "../lib/chat/coliving/evals/privacy-turn-card";
 
 const TOOL_DECL_NAMES = [
   "sendReply", "decide", "logEvent", "contactPerson", "proposeRule",
@@ -1123,6 +1134,320 @@ async function main() {
       2,
       "正常结果与异常结果两条返回路径都要写 guidance id"
     );
+  });
+
+  /**
+   * ── 人工标准隐私卡（只读、离线、评测专用）──
+   *
+   * 免费确定性检查：验场景 schema 对 `privacyCard` 的合法/非法处理、纯函数
+   * 校验器的 green/red cases，以及 CLI/模块**完全没接模型、网关、.env 或生产
+   * 动作**。全程不调模型、不联网。结构边界靠"不得 import 生产 turn / repo、
+   * 不得出现模型/动作调用形式"保证；注释里解释边界时允许出现这些名字
+   * （只查调用/导入形式，不误伤文档）。
+   */
+  const privacyCardSrc = readFileSync(
+    "lib/chat/coliving/evals/privacy-turn-card.ts",
+    "utf8"
+  );
+  const privacyCliSrc = readFileSync(
+    "scripts/coliving-privacy-card.ts",
+    "utf8"
+  );
+  const goodPrivacyCard: PrivacyTurnCard = {
+    sourceOwner: "阿哲",
+    proposedRecipients: ["大凯"],
+    sensitiveClaims: ["大凯每周进阿哲房间打扫、动他的私人物品"],
+    inferenceRisk: "likely",
+    riskReasons: ["屋里只有阿哲和大凯两人", "内容涉及私人房间和物品"],
+    ownerConsent: "unknown",
+    recommendedAction: "ask_owner",
+    residentReply: "屋里就你们两个人，大凯可能会猜到是你提的。还要发给他吗？",
+    decisionSummary: "有明显反推风险且还没问过，只能先问阿哲是否仍要联系",
+  };
+  const privacyCtx: PrivacyCardContext = {
+    speaker: "阿哲",
+    roster: ["阿哲", "大凯"],
+    rawMessage: "大凯每周都趁我不在进我房间打扫……",
+  };
+
+  check("privacy 标准卡：场景 schema 接受合法 privacyCard、拒绝非法卡", () => {
+    const base = {
+      id: "privacy-card-fixture",
+      source: "离线结构测试，不是真实场景",
+      household: { label: "测试屋" },
+      people: [{ phone: "+15550011003", name: "阿哲", role: "tenant" }],
+      turns: [{ from: "+15550011003", text: "原文" }],
+    };
+    assert.doesNotThrow(() =>
+      validateScenario({ ...base, privacyCard: goodPrivacyCard }, "fixture.json")
+    );
+    // 枚举非法
+    assert.throws(
+      () =>
+        validateScenario(
+          { ...base, privacyCard: { ...goodPrivacyCard, inferenceRisk: "high" } },
+          "fixture.json"
+        ),
+      /inferenceRisk/
+    );
+    // 字符串数组字段类型错
+    assert.throws(
+      () =>
+        validateScenario(
+          {
+            ...base,
+            privacyCard: { ...goodPrivacyCard, riskReasons: "不是数组" },
+          },
+          "fixture.json"
+        ),
+      /riskReasons/
+    );
+    // 缺字段
+    const missing: Record<string, unknown> = { ...goodPrivacyCard };
+    delete missing.decisionSummary;
+    assert.throws(
+      () => validateScenario({ ...base, privacyCard: missing }, "fixture.json"),
+      /decisionSummary/
+    );
+  });
+
+  check("privacy-turn-card：合法卡通过，枚举取值与规格一致", () => {
+    assert.deepEqual([...PRIVACY_INFERENCE_RISKS], ["none", "possible", "likely"]);
+    assert.deepEqual(
+      [...PRIVACY_OWNER_CONSENTS],
+      ["not_needed", "unknown", "approved", "declined"]
+    );
+    assert.deepEqual(
+      [...PRIVACY_RECOMMENDED_ACTIONS],
+      ["ask_owner", "safe_to_contact_minimized", "stop", "no_contact_needed"]
+    );
+    assert.deepEqual(validatePrivacyCard(goodPrivacyCard, privacyCtx), {
+      ok: true,
+      violations: [],
+    });
+  });
+
+  check("privacy-turn-card：信息所有者必须是当前说话人", () => {
+    const r = validatePrivacyCard(
+      { ...goodPrivacyCard, sourceOwner: "大凯" },
+      privacyCtx
+    );
+    assert.equal(r.ok, false);
+    assert(r.violations.some((v) => v.code === "source_owner_not_speaker"));
+  });
+
+  check("privacy-turn-card：拟联系对象必须来自名册且不是说话人", () => {
+    const outside = validatePrivacyCard(
+      { ...goodPrivacyCard, proposedRecipients: ["路人"] },
+      privacyCtx
+    );
+    assert(outside.violations.some((v) => v.code === "recipient_not_in_roster"));
+    const self = validatePrivacyCard(
+      { ...goodPrivacyCard, proposedRecipients: ["阿哲"] },
+      privacyCtx
+    );
+    assert(self.violations.some((v) => v.code === "recipient_is_speaker"));
+  });
+
+  check("privacy-turn-card：有反推风险且未同意只能 ask_owner", () => {
+    for (const inferenceRisk of ["possible", "likely"] as const) {
+      const r = validatePrivacyCard(
+        {
+          ...goodPrivacyCard,
+          inferenceRisk,
+          ownerConsent: "unknown",
+          recommendedAction: "safe_to_contact_minimized",
+        },
+        privacyCtx
+      );
+      assert(
+        r.violations.some((v) => v.code === "risk_unknown_needs_ask_owner"),
+        `${inferenceRisk}+unknown 必须打回越权联系`
+      );
+    }
+    // 无风险、无需同意时，正常放行（只拦可证明违反的组合，不替模型臆断）
+    assert.equal(
+      validatePrivacyCard(
+        {
+          ...goodPrivacyCard,
+          inferenceRisk: "none",
+          ownerConsent: "not_needed",
+          recommendedAction: "no_contact_needed",
+          residentReply: "好，我来提醒一下。",
+        },
+        privacyCtx
+      ).ok,
+      true
+    );
+  });
+
+  check("privacy-turn-card：风险与 ownerConsent 状态一致性（两个方向）", () => {
+    // 有风险却写 not_needed：语义上不可能，正好绕过隐私门禁
+    const riskNotNeeded = validatePrivacyCard(
+      {
+        ...goodPrivacyCard,
+        inferenceRisk: "likely",
+        ownerConsent: "not_needed",
+        recommendedAction: "safe_to_contact_minimized",
+      },
+      privacyCtx
+    );
+    assert(
+      riskNotNeeded.violations.some((v) => v.code === "risk_cannot_be_not_needed"),
+      "likely + not_needed 必须被打回（不能绕过 ask_owner 门禁）"
+    );
+    // 反向：没有反推风险却制造"待同意"状态
+    const noRiskPending = validatePrivacyCard(
+      {
+        ...goodPrivacyCard,
+        inferenceRisk: "none",
+        ownerConsent: "unknown",
+        recommendedAction: "ask_owner",
+        residentReply: "好，我来处理。",
+      },
+      privacyCtx
+    );
+    assert(
+      noRiskPending.violations.some(
+        (v) => v.code === "no_risk_requires_not_needed"
+      ),
+      "none + unknown 必须被打回（无风险不该有待同意状态）"
+    );
+    // 一致组合放行：none + not_needed 已在上一条 check 覆盖，这里补 likely + approved
+    assert.equal(
+      validatePrivacyCard(
+        {
+          ...goodPrivacyCard,
+          inferenceRisk: "likely",
+          ownerConsent: "approved",
+          recommendedAction: "safe_to_contact_minimized",
+        },
+        privacyCtx
+      ).ok,
+      true
+    );
+  });
+
+  check("privacy-turn-card：declined 必须 stop", () => {
+    const r = validatePrivacyCard(
+      { ...goodPrivacyCard, ownerConsent: "declined", recommendedAction: "ask_owner" },
+      privacyCtx
+    );
+    assert(r.violations.some((v) => v.code === "declined_must_stop"));
+    assert.equal(
+      validatePrivacyCard(
+        {
+          ...goodPrivacyCard,
+          ownerConsent: "declined",
+          recommendedAction: "stop",
+          residentReply: "好，那我不联系他了。",
+        },
+        privacyCtx
+      ).ok,
+      true
+    );
+  });
+
+  check("privacy-turn-card：未获同意不得宣称已经联系", () => {
+    const claimed = validatePrivacyCard(
+      { ...goodPrivacyCard, residentReply: "我已经联系大凯了，他说以后不进你房间。" },
+      privacyCtx
+    );
+    assert(claimed.violations.some((v) => v.code === "unconsented_contact_claim"));
+    // 将来时、或冲着说话人本人的话不算越权宣称（收窄判据，避免误伤）
+    assert.equal(claimsContactAlreadyMade("我会去联系大凯。"), false);
+    assert.equal(claimsContactAlreadyMade("已经跟你说过了。"), false);
+    assert.equal(claimsContactAlreadyMade("已经联系大凯了。"), true);
+  });
+
+  check("privacy 标准卡 CLI：忽略 pnpm 透传的字面量 --，仍拦真正未知参数", () => {
+    // 标准用法：pnpm coliving:privacy-card -- --scenario <id>
+    assert.deepEqual(
+      findUnknownPrivacyCardFlags([
+        "node",
+        "coliving-privacy-card.ts",
+        "--",
+        "--scenario",
+        "corpus-025-cleaning-privacy-2026-09-09",
+      ]),
+      [],
+      "字面量 -- 是参数分隔符，不能被判成未知参数"
+    );
+    assert.deepEqual(
+      findUnknownPrivacyCardFlags([
+        "node",
+        "coliving-privacy-card.ts",
+        "--",
+        "--scenario",
+        "corpus-025-cleaning-privacy-2026-09-09",
+        "--model",
+        "x",
+      ]),
+      ["--model"],
+      "--model 仍必须被判未知"
+    );
+    assert.deepEqual(
+      findUnknownPrivacyCardFlags([
+        "node",
+        "coliving-privacy-card.ts",
+        "--",
+        "--turn",
+        "2",
+      ]),
+      ["--turn"],
+      "--turn 仍必须被判未知"
+    );
+    assert.deepEqual(
+      findUnknownPrivacyCardFlags(["node", "coliving-privacy-card.ts", "--scenario", "x"]),
+      [],
+      "已知 flag 本身不是未知参数"
+    );
+    assert(
+      privacyCliSrc.includes("findUnknownPrivacyCardFlags(process.argv)"),
+      "CLI 必须用这个共享纯函数做未知参数判定（否则测试与实现脱钩）"
+    );
+  });
+
+  check("privacy 标准卡完全离线：不接模型/网关/.env，也不接生产动作", () => {
+    for (const src of [privacyCardSrc, privacyCliSrc]) {
+      assert(
+        !/from\s+["'][^"']*chat\/coliving\/turn["']/.test(src),
+        "隐私标准卡代码不得 import 生产 turn.ts"
+      );
+      assert(
+        !/from\s+["'][^"']*coliving\/repo["']/.test(src),
+        "隐私标准卡代码不得 import 生产 repo（不写数据库）"
+      );
+      assert(!src.includes("contactPerson("), "不得调用联系住户的工具");
+      assert(!src.includes("runColivingTurn("), "不得调用生产回合函数");
+    }
+    // 完全离线：CLI 里不得出现任何模型/网关/.env 依赖。标准卡是人写的，
+    // 模型生成卡两次实跑都失败，已停止且不再引入。
+    for (const banned of [
+      "generateText",
+      "generateObject",
+      "Output.object",
+      "getLanguageModel",
+      "gateway",
+      "dotenv",
+      "@ai-sdk",
+      'from "ai"',
+    ]) {
+      assert(
+        !privacyCliSrc.includes(banned),
+        `离线 CLI 不得出现 ${banned}（标准卡不调模型）`
+      );
+    }
+    assert(
+      privacyCardSrc.includes("export function validatePrivacyCard"),
+      "校验器必须是导出的纯函数"
+    );
+    assert(privacyCliSrc.includes("validateScenario("), "CLI 必须先走场景校验");
+    assert(
+      privacyCliSrc.includes("validatePrivacyCard("),
+      "CLI 必须跑确定性业务校验"
+    );
+    assert(privacyCliSrc.includes("privacyCard"), "CLI 必须从场景读人工标准卡");
   });
 
   const previous = process.env.COLIVING_JUDGE_OFF;
