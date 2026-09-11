@@ -1,5 +1,5 @@
 /**
- * **人工标准「本轮协调动作卡」检查器（离线、只读、评测专用，不接生产）。**
+ * **人工标准「管理协调动作卡」检查器（离线、只读、评测专用，不接生产）。**
  *
  * 用法：
  *   pnpm coliving:privacy-card -- --scenario corpus-025-cleaning-privacy-2026-09-09
@@ -83,7 +83,7 @@ type PrivacyCardReport = {
   scenarioId: string;
   scenarioSource: string;
   /** 明示卡片来源，避免与已停止的"模型生成卡"混淆。 */
-  cardOrigin: "场景文件人工核准的标准本轮协调动作卡（非模型生成）";
+  cardOrigin: "场景文件人工核准的标准管理协调动作卡（非模型生成）";
   turnIndex: number;
   turnCount: number;
   checkedAt: string;
@@ -108,10 +108,49 @@ function list(items: string[]): string {
 }
 
 const SOURCE_TYPE_LABEL: Record<string, string> = {
-  doctrine: "项目 doctrine",
-  external_standard: "外部权威标准",
+  owner_direction: "老板产品定义（P0）",
+  doctrine: "项目 doctrine（P1）",
+  external_standard: "外部权威标准（P2）",
   project_glue: "项目胶水（只解释表示方法，不作业务依据）",
 };
+
+// 明显区分“已发并等待 / 完成”，以及讨论/阻塞/停止三种非发送态。
+// 有实际出站的只有 sent_waiting_reply / completed；ready_to_send 已删除
+// （它和“outboundMessages 表示实际对外消息”的语义矛盾）。
+const ACTION_STATUS_LABEL: Record<string, string> = {
+  not_started: "尚未开始（方案形成中）",
+  sent_waiting_reply: "已发并等待回复",
+  blocked_for_consent: "已阻塞：等来源所有者确认是否发送",
+  stopped: "已停止（信息所有者拒绝，无出站）",
+  completed: "完成",
+};
+const ACTION_STATUS_CLASS: Record<string, string> = {
+  not_started: "draft",
+  sent_waiting_reply: "sent",
+  blocked_for_consent: "blocked",
+  stopped: "stopped",
+  completed: "done",
+};
+const DECISION_STAGE_LABEL: Record<string, string> = {
+  deliberating: "方案形成中（deliberating）",
+  authorized: "已授权执行（authorized）",
+};
+const SOURCE_CONSTRAINT_LABEL: Record<string, string> = {
+  none: "无来源限制（none）",
+  conceal_source: "要求隐藏来源（conceal_source）",
+  allow_source: "允许暴露来源（allow_source）",
+};
+const RECOMMENDED_ACTION_LABEL: Record<string, string> = {
+  contact_now_minimized: "立即最小化联系（contact_now_minimized）",
+  coordinate_rule: "由 AI 推进规则协调（coordinate_rule）",
+  make_schedule: "推进排班（make_schedule）",
+  ask_owner: "先问信息所有者（ask_owner）",
+  stop: "停止（stop）",
+};
+
+function label(map: Record<string, string>, value: string): string {
+  return map[value] ?? value;
+}
 
 function renderHtml(data: PrivacyCardReport): string {
   const { card: c, validation: v } = data;
@@ -129,13 +168,27 @@ function renderHtml(data: PrivacyCardReport): string {
     c.inferenceRisk === "not_applicable"
       ? '<div class="note">本轮没有对外披露动作，因此反推风险不适用（不等于绝对无风险）。</div>'
       : "";
+  const statusClass = ACTION_STATUS_CLASS[c.actionStatus] ?? "draft";
+  const statusLabel = label(ACTION_STATUS_LABEL, c.actionStatus);
+  const outbound =
+    c.outboundMessages.length === 0
+      ? '<p class="empty">（本轮没有出站消息）</p>'
+      : c.outboundMessages
+          .map(
+            (m) => `<div class="outbound">
+        <div class="meta">收件人：<b>${esc(m.recipient)}</b> ｜ 目的：${esc(m.purpose)}</div>
+        <blockquote>${esc(m.text)}</blockquote>
+      </div>`
+          )
+          .join("");
   const basisRows = c.basis
     .map((entry) => {
-      const label = SOURCE_TYPE_LABEL[entry.sourceType] ?? esc(entry.sourceType);
+      const sourceLabel =
+        SOURCE_TYPE_LABEL[entry.sourceType] ?? esc(entry.sourceType);
       const kind = entry.sourceType.replace(/[^a-z_]/g, "");
       return `<tr>
         <td class="k">${entry.fields.map((f) => `<code>${esc(f)}</code>`).join(" ")}</td>
-        <td><span class="src ${kind}">${esc(label)}</span><br>${esc(entry.sourceRef)}</td>
+        <td><span class="src ${kind}">${esc(sourceLabel)}</span><br>${esc(entry.sourceRef)}</td>
         <td>${esc(entry.rule)}</td>
       </tr>`;
     })
@@ -145,7 +198,7 @@ function renderHtml(data: PrivacyCardReport): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>人工标准本轮协调动作卡（非模型生成）· ${esc(data.scenarioId)}</title>
+<title>人工标准管理协调动作卡（非模型生成）· ${esc(data.scenarioId)}</title>
 <style>
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 24px; color: #1c1c1e; line-height: 1.6; }
   h1 { font-size: 20px; } h2 { font-size: 15px; margin: 18px 0 6px; color: #3a3a3c; }
@@ -163,14 +216,20 @@ function renderHtml(data: PrivacyCardReport): string {
   code { background: #f0f0f3; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .note { margin-top: 6px; padding: 6px 10px; background: #fff8e1; border-left: 3px solid #f0b429; font-size: 13px; }
   .src { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
+  .src.owner_direction { background: #c1121f; }
   .src.doctrine { background: #1f6feb; }
   .src.external_standard { background: #6b4fbb; }
   .src.project_glue { background: #8a8a90; }
+  .st { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 13px; color: #fff; }
+  .st.draft { background: #8a8a90; } .st.sent { background: #1f6feb; }
+  .st.blocked { background: #c62828; } .st.stopped { background: #6b6b70; }
+  .st.done { background: #2e7d32; }
+  .outbound { border: 1px solid #e0e0e6; border-radius: 6px; padding: 8px 12px; margin-top: 6px; background: #fafafb; }
   .internal { color: #6b6b70; font-size: 13px; }
 </style>
 </head>
 <body>
-<h1>人工标准本轮协调动作卡（非模型生成） · ${esc(data.scenarioId)}</h1>
+<h1>人工标准管理协调动作卡（非模型生成） · ${esc(data.scenarioId)}</h1>
 <p class="meta">卡片来源：${esc(data.cardOrigin)} ｜ 第 ${data.turnIndex}/${data.turnCount} 轮 ｜ 校验时间：${esc(data.checkedAt)} ｜ ${badge}</p>
 
 <h2>场景</h2>
@@ -183,24 +242,26 @@ function renderHtml(data: PrivacyCardReport): string {
   <tr><td class="k">本轮原文</td><td><blockquote>${esc(data.context.rawMessage)}</blockquote></td></tr>
 </table>
 
-<h2>一 · 目的与请求动作</h2>
+<h2>一 · 用户管理指令</h2>
 <div class="card">
 <table>
   <tr><td class="k">用户目的 userGoal</td><td><b>${esc(c.userGoal)}</b></td></tr>
   <tr><td class="k">请求动作 requestedAction</td><td><b>${esc(c.requestedAction)}</b></td></tr>
-  <tr><td class="k">动作依据 actionBasis</td><td><b>${esc(c.actionBasis)}</b></td></tr>
 </table>
 </div>
 
-<h2>二 · 对外动作计划</h2>
+<h2>二 · 授权 / 来源限制</h2>
 <div class="card">
 <table>
+  <tr><td class="k">动作依据 actionBasis</td><td><b>${esc(c.actionBasis)}</b></td></tr>
+  <tr><td class="k">来源限制 sourceConstraint</td><td>${esc(label(SOURCE_CONSTRAINT_LABEL, c.sourceConstraint))}</td></tr>
+  <tr><td class="k">方案阶段 decisionStage</td><td><b>${esc(label(DECISION_STAGE_LABEL, c.decisionStage))}</b></td></tr>
   <tr><td class="k">披露计划 disclosurePlan</td><td><b>${esc(c.disclosurePlan)}</b></td></tr>
   <tr><td class="k">拟联系对象 proposedRecipients</td><td>${list(c.proposedRecipients)}</td></tr>
 </table>
 </div>
 
-<h2>三 · 隐私字段</h2>
+<h2>三 · 隐私最小化</h2>
 <div class="card">
 <table>
   <tr><td class="k">信息所有者 sourceOwner</td><td>${esc(c.sourceOwner)}</td></tr>
@@ -211,16 +272,31 @@ function renderHtml(data: PrivacyCardReport): string {
 </table>
 </div>
 
-<h2>四 · 结论</h2>
+<h2>四 · 实际 outbound（最小化正文）</h2>
 <div class="card">
-<table>
-  <tr><td class="k">建议动作 recommendedAction</td><td><b>${esc(c.recommendedAction)}</b></td></tr>
-  <tr><td class="k">对外回复 residentReply</td><td><blockquote>${esc(c.residentReply)}</blockquote></td></tr>
-</table>
-<p class="internal">内部判断摘要（不回给住户）：${esc(c.decisionSummary)}</p>
+${outbound}
 </div>
 
-<h2>逐字段依据（doctrine / 外部标准 / 项目胶水）</h2>
+<h2>五 · 动作完成度 actionStatus</h2>
+<div class="card">
+<table>
+  <tr><td class="k">状态</td><td><span class="st ${statusClass}">${esc(statusLabel)}</span></td></tr>
+  <tr><td class="k">建议动作 recommendedAction</td><td><b>${esc(label(RECOMMENDED_ACTION_LABEL, c.recommendedAction))}</b></td></tr>
+  <tr><td class="k">出站条数</td><td>${c.outboundMessages.length}</td></tr>
+</table>
+</div>
+
+<h2>六 · 给发信人的动作收据</h2>
+<div class="card">
+<blockquote>${esc(c.residentReply)}</blockquote>
+</div>
+
+<h2>内部审阅区（不回给住户）</h2>
+<div class="card">
+<p class="internal">内部判断摘要：${esc(c.decisionSummary)}</p>
+</div>
+
+<h2>逐字段来源（P0 老板定义 / P1 doctrine / P2 外部标准 / P3 项目胶水）</h2>
 <div class="card">
 <table>
   <tr><td class="k"><b>字段</b></td><td><b>来源</b></td><td><b>规则</b></td></tr>
@@ -278,7 +354,7 @@ function main() {
   const report: PrivacyCardReport = {
     scenarioId: scenario.id,
     scenarioSource: scenario.source,
-    cardOrigin: "场景文件人工核准的标准本轮协调动作卡（非模型生成）",
+    cardOrigin: "场景文件人工核准的标准管理协调动作卡（非模型生成）",
     turnIndex: 1,
     turnCount: scenario.turns.length,
     checkedAt,
@@ -296,11 +372,13 @@ function main() {
   writeFileSync(htmlPath, renderHtml(report), "utf8");
 
   console.log(
-    `人工标准本轮协调动作卡已检查：${baseName}\n` +
+    `人工标准管理协调动作卡已检查：${baseName}\n` +
       `  说话人「${speaker}」，userGoal=${report.card.userGoal}，` +
-      `requestedAction=${report.card.requestedAction}，disclosurePlan=${report.card.disclosurePlan}\n` +
-      `  inferenceRisk=${report.card.inferenceRisk}，` +
-      `ownerConsent=${report.card.ownerConsent}，recommendedAction=${report.card.recommendedAction}\n` +
+      `requestedAction=${report.card.requestedAction}，decisionStage=${report.card.decisionStage}\n` +
+      `  sourceConstraint=${report.card.sourceConstraint}，` +
+      `disclosurePlan=${report.card.disclosurePlan}，outbound=${report.card.outboundMessages.length} 条\n` +
+      `  recommendedAction=${report.card.recommendedAction}，` +
+      `actionStatus=${report.card.actionStatus}\n` +
       `  确定性校验：${validation.ok ? "通过" : `失败（${validation.violations.length} 项）`}\n` +
       `  JSON：${jsonPath}\n  HTML：${htmlPath}`
   );

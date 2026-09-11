@@ -12,8 +12,11 @@
 
 import {
   COORDINATION_ACTION_BASES,
+  COORDINATION_ACTION_STATUSES,
+  COORDINATION_DECISION_STAGES,
   COORDINATION_DISCLOSURE_PLANS,
   COORDINATION_REQUESTED_ACTIONS,
+  COORDINATION_SOURCE_CONSTRAINTS,
   COORDINATION_SOURCE_TYPES,
   COORDINATION_USER_GOALS,
   PRIVACY_INFERENCE_RISKS,
@@ -86,6 +89,16 @@ export function validatePrivacyCardShape(raw: unknown, errors: string[]): void {
       `privacyCard.actionBasis 必须是 ${COORDINATION_ACTION_BASES.join("/")} 之一`
     );
   }
+  if (!isEnumValue(COORDINATION_SOURCE_CONSTRAINTS, card.sourceConstraint)) {
+    errors.push(
+      `privacyCard.sourceConstraint 必须是 ${COORDINATION_SOURCE_CONSTRAINTS.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(COORDINATION_DECISION_STAGES, card.decisionStage)) {
+    errors.push(
+      `privacyCard.decisionStage 必须是 ${COORDINATION_DECISION_STAGES.join("/")} 之一`
+    );
+  }
   if (!isEnumValue(COORDINATION_DISCLOSURE_PLANS, card.disclosurePlan)) {
     errors.push(
       `privacyCard.disclosurePlan 必须是 ${COORDINATION_DISCLOSURE_PLANS.join("/")} 之一`
@@ -105,6 +118,30 @@ export function validatePrivacyCardShape(raw: unknown, errors: string[]): void {
     errors.push(
       `privacyCard.recommendedAction 必须是 ${PRIVACY_RECOMMENDED_ACTIONS.join("/")} 之一`
     );
+  }
+  if (!isEnumValue(COORDINATION_ACTION_STATUSES, card.actionStatus)) {
+    errors.push(
+      `privacyCard.actionStatus 必须是 ${COORDINATION_ACTION_STATUSES.join("/")} 之一`
+    );
+  }
+  // 出站消息：数组，每条必须是含 recipient/purpose/text 三个非空字符串的对象。
+  if (!Array.isArray(card.outboundMessages)) {
+    errors.push("privacyCard.outboundMessages 必须是数组");
+  } else {
+    for (const [i, message] of card.outboundMessages.entries()) {
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        errors.push(`privacyCard.outboundMessages[${i}] 必须是对象`);
+        continue;
+      }
+      const m = message as Record<string, unknown>;
+      for (const field of ["recipient", "purpose", "text"] as const) {
+        if (typeof m[field] !== "string" || !m[field]) {
+          errors.push(
+            `privacyCard.outboundMessages[${i}].${field} 必须是非空字符串`
+          );
+        }
+      }
+    }
   }
   // 逐字段依据：至少一条，且每条结构完整、来源等级合法。
   if (!Array.isArray(card.basis) || card.basis.length === 0) {
