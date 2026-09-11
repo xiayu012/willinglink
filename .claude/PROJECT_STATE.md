@@ -21,7 +21,14 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 
 ## 当前工作线（倒序）
 
-### 最新进展：用户意图 × 能力模块 V5（离线，2026-09-10）
+### 最新纠正：取消七项伪能力，能力改为逐项建立（2026-09-10）
+
+- 老板否决 V5 一次性登记的七个 capability：工具存在和离线样例自洽不等于系统拥有能力。相关 registry、CLI、119 项中的 V5 检查和 30 份本地报告已撤销，免费闸回到 V4 的 109 项；当前正式 capability 数为 0。
+- 长期保留“用户意图/目的”维度，以及 capability / policy / playbook 三分。定义已收紧：capability 是端到端可交付、可失败恢复、可凭收据验收并按条件闭环的服务；policy 只设横向边界；playbook 只提供领域材料。
+- 组合方式改为动态工作台，不规定单向顺序。回复可以在行动前、中、后；简单任务不强制建 case；多轮 case 要在完成条件、表态交代和通知覆盖满足后 `closeCase`，一次工具收据不等于结案。
+- 接下来由老板逐项选择并建立能力，不预排固定顺序。现行长期约定见 `.claude/INTENT_CAPABILITY_ARCHITECTURE_V0.md`。
+
+### 已撤销：用户意图 × 七项能力模块 V5（离线失败实验，2026-09-10）
 
 - 新建 `.claude/INTENT_CAPABILITY_ARCHITECTURE_V0.md`：把 `IntentEnvelope → capability selection → V4 action plan → tools/receipts → reply` 作为工程架构，并把可执行能力、跨模块门禁和领域 playbook 分开。
 - 首批七个能力：单条第三方联系为 available（仅指执行构件与回执存在）；收集约束、排班草案、排班分发、规则征询、冲突跟进均为 partial；无既有依据的新费用分摊为 blocked。工具存在不等于模型端到端可靠。
