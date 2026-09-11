@@ -13,6 +13,7 @@
 import {
   COORDINATION_ACTION_BASES,
   COORDINATION_ACTION_STATUSES,
+  COORDINATION_CAPABILITY_ZONES,
   COORDINATION_DECISION_STAGES,
   COORDINATION_DISCLOSURE_PLANS,
   COORDINATION_REQUESTED_ACTIONS,
@@ -48,10 +49,11 @@ const PRIVACY_CARD_STRING_ARRAY_FIELDS = [
   "proposedRecipients",
   "sensitiveClaims",
   "riskReasons",
+  "capabilityReasons",
 ] as const;
 
 /**
- * 校验场景里保存的**人工金标准「本轮协调动作卡」**（gold card）的静态结构。
+ * 校验场景里保存的**离线期望「本轮协调动作卡」**的静态结构。
  *
  * 只查字段存在、类型与枚举合法——语义/状态一致性由 `privacy-turn-card.ts`
  * 的 `validatePrivacyCard` 负责（那是动作边界的单一事实源，不在这里复制一份
@@ -122,6 +124,11 @@ export function validatePrivacyCardShape(raw: unknown, errors: string[]): void {
   if (!isEnumValue(COORDINATION_ACTION_STATUSES, card.actionStatus)) {
     errors.push(
       `privacyCard.actionStatus 必须是 ${COORDINATION_ACTION_STATUSES.join("/")} 之一`
+    );
+  }
+  if (!isEnumValue(COORDINATION_CAPABILITY_ZONES, card.capabilityZone)) {
+    errors.push(
+      `privacyCard.capabilityZone 必须是 ${COORDINATION_CAPABILITY_ZONES.join("/")} 之一`
     );
   }
   // 出站消息：数组，每条必须是含 recipient/purpose/text 三个非空字符串的对象。
@@ -296,9 +303,10 @@ export type EvalScenario = {
   turns: ScenarioTurn[];
   expect?: ScenarioExpectation;
   /**
-   * **人工核准的「本轮协调动作卡」**（gold card，评测专用）。随场景一起保存，
-   * 由老板/Codex 对真实对白逐字段核对后写入；`scripts/coliving-privacy-card.ts`
-   * 只读它、跑 `validatePrivacyCard` 并生成 JSON/HTML，**不调用任何模型**。
+   * **离线期望「本轮协调动作卡」**（评测专用，开发者草案）。随场景一起保存，
+   * 由开发者按需求逐字段填写（**非老板核准、非模型生成**）；
+   * `scripts/coliving-privacy-card.ts` 只读它、跑 `validatePrivacyCard`
+   * 并生成 JSON/HTML，**不调用任何模型**。
    * 结构复用 `PrivacyTurnCard`，避免另立一份会漂移的类型。
    */
   privacyCard?: PrivacyTurnCard;

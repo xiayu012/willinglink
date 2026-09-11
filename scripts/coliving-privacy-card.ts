@@ -1,5 +1,5 @@
 /**
- * **人工标准「管理协调动作卡」检查器（离线、只读、评测专用，不接生产）。**
+ * **离线「管理协调动作卡」期望检查器（离线、只读、评测专用，不接生产）。**
  *
  * 用法：
  *   pnpm coliving:privacy-card -- --scenario corpus-025-cleaning-privacy-2026-09-09
@@ -7,13 +7,15 @@
  * 它做的是（也只做这些）：
  * - 从 `lib/chat/coliving/evals/scenarios/` 按 id 读一个已有场景，先走
  *   `validateScenario`；
- * - 取出场景里**人工核准的金标准卡**（`privacyCard`，由老板/Codex 逐字段核对
- *   后写进场景文件），用 `validatePrivacyCard` 跑确定性业务校验；
+ * - 取出场景里**开发者填写的离线期望卡**（`privacyCard`：按需求逐字段填写的
+ *   期望草案，**非老板核准、非模型生成**），用 `validatePrivacyCard` 跑确定性
+ *   业务校验；
  * - 生成 JSON + HTML 供人工查看，校验失败时醒目报红并非零退出。
  *
  * 边界（写死在代码里，别在这里加东西）：
  * - **完全离线**：不 import AI SDK / provider / model，不加载 `.env`，
- *   不联网，不调用任何模型。金标准卡是人写的，不是模型生成的。
+ *   不联网，不调用任何模型。期望卡是开发者手写的离线草案，不是模型生成的，
+ *   也不代表老板已认可。
  * - **不调用 `runColivingTurn`**，不调 critic、contactPerson，不写数据库，
  *   不发 Twilio / 企微 / 小红书。整条链路只是"读场景 → 校验 → 写报告"。
  * - 说话人、名册、原文全部来自场景文件，不让任何外部输入编。
@@ -82,8 +84,8 @@ function loadScenarioById(id: string): EvalScenario {
 type PrivacyCardReport = {
   scenarioId: string;
   scenarioSource: string;
-  /** 明示卡片来源，避免与已停止的"模型生成卡"混淆。 */
-  cardOrigin: "场景文件人工核准的标准管理协调动作卡（非模型生成）";
+  /** 明示卡片来源：开发者填写的离线期望草案，避免与已停止的"模型生成卡"混淆。 */
+  cardOrigin: "场景文件离线期望协调动作卡（开发者草案，非模型生成、非老板核准）";
   turnIndex: number;
   turnCount: number;
   checkedAt: string;
@@ -121,7 +123,7 @@ const ACTION_STATUS_LABEL: Record<string, string> = {
   not_started: "尚未开始（方案形成中）",
   sent_waiting_reply: "已发并等待回复",
   blocked_for_consent: "已阻塞：等来源所有者确认是否发送",
-  stopped: "已停止（信息所有者拒绝，无出站）",
+  stopped: "已停止（信息所有者拒绝或能力边界停止，无出站）",
   completed: "完成",
 };
 const ACTION_STATUS_CLASS: Record<string, string> = {
@@ -147,6 +149,18 @@ const RECOMMENDED_ACTION_LABEL: Record<string, string> = {
   ask_owner: "先问信息所有者（ask_owner）",
   stop: "停止（stop）",
 };
+// 能力分区：本轮这项请求当前能独立处理到什么程度（CAPABILITY_BOUNDARY_V0 三档）。
+// 说明红区不是"遇到某个话题就停"，而是缺少关键依据时停止实质协调。
+const CAPABILITY_ZONE_LABEL: Record<string, string> = {
+  green: "绿区 · 可以独立处理",
+  yellow: "黄区 · 只能有限处理",
+  red: "红区 · 当前版本不独立协调（停止实质动作并说明边界）",
+};
+const CAPABILITY_ZONE_CLASS: Record<string, string> = {
+  green: "zone-green",
+  yellow: "zone-yellow",
+  red: "zone-red",
+};
 
 function label(map: Record<string, string>, value: string): string {
   return map[value] ?? value;
@@ -170,6 +184,8 @@ function renderHtml(data: PrivacyCardReport): string {
       : "";
   const statusClass = ACTION_STATUS_CLASS[c.actionStatus] ?? "draft";
   const statusLabel = label(ACTION_STATUS_LABEL, c.actionStatus);
+  const zoneClass = CAPABILITY_ZONE_CLASS[c.capabilityZone] ?? "zone-yellow";
+  const zoneLabel = label(CAPABILITY_ZONE_LABEL, c.capabilityZone);
   const outbound =
     c.outboundMessages.length === 0
       ? '<p class="empty">（本轮没有出站消息）</p>'
@@ -198,7 +214,7 @@ function renderHtml(data: PrivacyCardReport): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>人工标准管理协调动作卡（非模型生成）· ${esc(data.scenarioId)}</title>
+<title>离线期望协调卡（开发者草案，非模型生成、非老板核准）· ${esc(data.scenarioId)}</title>
 <style>
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 24px; color: #1c1c1e; line-height: 1.6; }
   h1 { font-size: 20px; } h2 { font-size: 15px; margin: 18px 0 6px; color: #3a3a3c; }
@@ -224,12 +240,15 @@ function renderHtml(data: PrivacyCardReport): string {
   .st.draft { background: #8a8a90; } .st.sent { background: #1f6feb; }
   .st.blocked { background: #c62828; } .st.stopped { background: #6b6b70; }
   .st.done { background: #2e7d32; }
+  .zone { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 13px; color: #fff; }
+  .zone-green { background: #2e7d32; } .zone-yellow { background: #f0b429; color: #3a2a00; }
+  .zone-red { background: #c62828; }
   .outbound { border: 1px solid #e0e0e6; border-radius: 6px; padding: 8px 12px; margin-top: 6px; background: #fafafb; }
   .internal { color: #6b6b70; font-size: 13px; }
 </style>
 </head>
 <body>
-<h1>人工标准管理协调动作卡（非模型生成） · ${esc(data.scenarioId)}</h1>
+<h1>离线期望协调卡（开发者草案，非模型生成、非老板核准） · ${esc(data.scenarioId)}</h1>
 <p class="meta">卡片来源：${esc(data.cardOrigin)} ｜ 第 ${data.turnIndex}/${data.turnCount} 轮 ｜ 校验时间：${esc(data.checkedAt)} ｜ ${badge}</p>
 
 <h2>场景</h2>
@@ -241,6 +260,15 @@ function renderHtml(data: PrivacyCardReport): string {
   <tr><td class="k">名册</td><td>${roster}</td></tr>
   <tr><td class="k">本轮原文</td><td><blockquote>${esc(data.context.rawMessage)}</blockquote></td></tr>
 </table>
+
+<h2>能力分区 capabilityZone</h2>
+<div class="card">
+<table>
+  <tr><td class="k">分区</td><td><span class="zone ${zoneClass}">${esc(zoneLabel)}</span></td></tr>
+  <tr><td class="k">分区理由 capabilityReasons</td><td>${list(c.capabilityReasons)}</td></tr>
+</table>
+<p class="internal">红区表示"缺少关键依据时不独立协调"，不是"遇到某个话题（如费用）就一律停止"。</p>
+</div>
 
 <h2>一 · 用户管理指令</h2>
 <div class="card">
@@ -321,8 +349,8 @@ function main() {
   }
   if (!scenario.privacyCard) {
     console.error(
-      `场景「${scenario.id}」没有保存人工金标准卡（privacyCard）。` +
-        "金标准卡由老板/Codex 核对后写进场景文件；本工具不生成卡片。"
+      `场景「${scenario.id}」没有保存离线期望卡（privacyCard）。` +
+        "期望卡由开发者按需求逐字段写进场景文件（非老板核准、非模型生成）；本工具不生成卡片。"
     );
     process.exit(2);
   }
@@ -354,7 +382,7 @@ function main() {
   const report: PrivacyCardReport = {
     scenarioId: scenario.id,
     scenarioSource: scenario.source,
-    cardOrigin: "场景文件人工核准的标准管理协调动作卡（非模型生成）",
+    cardOrigin: "场景文件离线期望协调动作卡（开发者草案，非模型生成、非老板核准）",
     turnIndex: 1,
     turnCount: scenario.turns.length,
     checkedAt,
@@ -364,7 +392,7 @@ function main() {
   };
 
   const stamp = checkedAt.replace(/[:.]/g, "-");
-  const baseName = `${scenario.id}-gold-${stamp}`;
+  const baseName = `${scenario.id}-expected-${stamp}`;
   mkdirSync(REPORT_DIR, { recursive: true });
   const jsonPath = path.join(REPORT_DIR, `${baseName}.json`);
   const htmlPath = path.join(REPORT_DIR, `${baseName}.html`);
@@ -372,7 +400,7 @@ function main() {
   writeFileSync(htmlPath, renderHtml(report), "utf8");
 
   console.log(
-    `人工标准管理协调动作卡已检查：${baseName}\n` +
+    `离线期望协调卡已检查：${baseName}\n` +
       `  说话人「${speaker}」，userGoal=${report.card.userGoal}，` +
       `requestedAction=${report.card.requestedAction}，decisionStage=${report.card.decisionStage}\n` +
       `  sourceConstraint=${report.card.sourceConstraint}，` +

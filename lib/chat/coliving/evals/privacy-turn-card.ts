@@ -17,7 +17,7 @@
  * 明确授权仍不等于允许把原话和私人细节整段转发，最小披露继续有效。
  *
  * 本模块只做两件事：
- * 1. 定义动作卡的 schema/type 与各枚举（也是场景里人工金标准卡的字段定义）；
+ * 1. 定义动作卡的 schema/type 与各枚举（也是场景里离线期望卡的字段定义）；
  * 2. 提供**纯函数**状态校验——卡上的字段不能只凭作者声明就算数，越权/自相矛盾的
  *    组合必须被确定性拦住（讨论阶段不得有出站、已授权阶段必须有实际动作、收件人
  *    双向覆盖、隐藏来源冲突只能阻塞问所有者、已授权的最小化联系不重复请示、
@@ -26,9 +26,9 @@
  * 边界（重要）：
  * - **不接入生产**：`runColivingTurn`、critic、`contactPerson` 都不引用本文件；
  *   这里没有 repo、没有 DB、没有任何发送动作，只有类型和纯函数。
- * - 语义判断（哪些话敏感、会不会被反推）由人工核准的金标准卡给出（模型生成卡两次
+ * - 语义判断（哪些话敏感、会不会被反推）由开发者填写的离线期望卡给出（模型生成卡两次
  *   实跑都失败，已停止）；**动作边界由本文件的校验器说了算**。
- * - **不用话术正则猜用户是否想联系**：金标准由人工填写，校验只检查状态组合。
+ * - **不用话术正则猜用户是否想联系**：期望卡由开发者填写，校验只检查状态组合。
  * - 校验是“偏严格”的：只拦可证明违反的组合，不替作者猜它没写的东西。
  */
 
@@ -88,10 +88,29 @@ export type CoordinationDecisionStage =
   (typeof COORDINATION_DECISION_STAGES)[number];
 
 /**
+ * 能力分区：本轮这项请求当前能可靠独立处理到什么程度，见
+ * `.claude/CAPABILITY_BOUNDARY_V0.md` 的三档。
+ * - `green`：低风险、动作明确、成功失败可核验，可以独立处理；
+ * - `yellow`：只能有限处理（缺一个会改变处置的事实等），可推进一小步；
+ * - `red`：当前版本不独立协调，转为说明边界并停止（`stop` 终态）。
+ *
+ * **不等于**「这个话题是不是钱」：缺少既有依据却要求 AI 自定费用承担才是红区，
+ * 已有账单/明确分摊规则的简单核对属于绿区，不能被一刀切成红。
+ */
+export const COORDINATION_CAPABILITY_ZONES = [
+  "green",
+  "yellow",
+  "red",
+] as const;
+export type CoordinationCapabilityZone =
+  (typeof COORDINATION_CAPABILITY_ZONES)[number];
+
+/**
  * 本轮对外数据动作计划。
  * - `considering`：尚未发送（讨论中，或隐藏来源冲突被阻塞）；
  * - `approved_to_send`：已批准发送，必须有实际出站消息；
- * - `cancelled`：对外动作已取消（信息所有者拒绝后停止），不得有出站消息。
+ * - `cancelled`：对外动作已取消（信息所有者拒绝后停止，或能力分区为 `red` 时停止
+ *   实质协调），不得有出站消息。
  * V2 删除了 V1 的 `none`/answer-only 逻辑：本轮要么在讨论要么在协调，不存在只答不做的卡。
  */
 export const COORDINATION_DISCLOSURE_PLANS = [
@@ -132,7 +151,8 @@ export type PrivacyOwnerConsent = (typeof PRIVACY_OWNER_CONSENTS)[number];
  *   协调消息，讨论阶段（deliberating）允许只给方案、不发出站；
  * - `make_schedule`：推进排班（可在讨论阶段给出候选，不强制出站）；
  * - `ask_owner`：隐藏来源冲突时唯一允许的阻塞动作；
- * - `stop`：信息所有者拒绝后停止（无出站，终态）。
+ * - `stop`：主动停止（无出站，终态）。目前有两种来源：信息所有者拒绝后停止隐私
+ *   动作，以及能力分区为 `red` 时停止实质协调（见 `capabilityZone`）。
  */
 export const PRIVACY_RECOMMENDED_ACTIONS = [
   "contact_now_minimized",
@@ -239,6 +259,15 @@ export type PrivacyTurnCard = {
   residentReply: string;
   /** 一句话说明为什么建议这个动作（内部摘要，不回给住户）。 */
   decisionSummary: string;
+  // —— 能力边界 ——
+  /** 本轮这项请求当前能独立处理到什么程度（见 `CAPABILITY_BOUNDARY_V0.md` 三档）。 */
+  capabilityZone: CoordinationCapabilityZone;
+  /**
+   * 支持能力分区判断的具体理由（可复核的事实，不是逐步思考过程）。
+   * **必须收窄到具体缺失的前提**（例如「缺少既有费用分摊依据却要求形成承担规则」），
+   * 不能写成笼统的「所有费用问题都不处理」，否则红区会过宽。
+   */
+  capabilityReasons: string[];
   /** 逐字段依据：每个业务字段必须能指回 P0/P1/P2 来源。 */
   basis: CoordinationBasisEntry[];
 };
@@ -299,6 +328,9 @@ export type PrivacyCardViolationCode =
   | "coordinate_rule_requires_outbound"
   | "ask_owner_requires_blocked"
   | "stop_forbids_outbound"
+  // 能力边界
+  | "red_zone_requires_stop"
+  | "stop_requires_terminal_state"
   // 依据
   | "basis_field_missing_source"
   | "basis_all_project_glue";
@@ -357,6 +389,8 @@ const REQUIRED_BASIS_FIELDS: readonly string[] = [
   "ownerConsent",
   "recommendedAction",
   "residentReply",
+  "capabilityZone",
+  "capabilityReasons",
 ];
 
 /**
@@ -367,7 +401,8 @@ const REQUIRED_BASIS_FIELDS: readonly string[] = [
  * 2. `authorized` → 必须有出站；两个例外：（a）等待确认的隐藏来源冲突
  *    (`conceal_source + possible/likely + ownerConsent=unknown`)
  *    → `blocked_for_consent + ask_owner`；（b）主动停止
- *    （`recommendedAction=stop`，如信息所有者拒绝后的终态）→ 无出站；
+ *    （`recommendedAction=stop`：信息所有者拒绝后的隐私终态，或 `capabilityZone=red`
+ *    的能力边界停止）→ 无出站；
  * 3. 出站收件人必须来自名册、不是说话人、出现在 `proposedRecipients`；反向每个
  *    `proposedRecipient` 也要有对应出站（阻塞态除外）；
  * 4. `authorized + explicit_user_request + sourceConstraint=none` 不得重复请示
@@ -384,6 +419,9 @@ const REQUIRED_BASIS_FIELDS: readonly string[] = [
  *    有反推风险且已发送时同意必须 `approved`；
  * 9. `basis` **逐字段**用 P0/P1/P2 来源覆盖 `REQUIRED_BASIS_FIELDS`，且不得全是
  *    `project_glue`。
+ * 10. 能力分区：`capabilityZone=red` 且已授权执行时，必须是停止终态
+ *    （`stop + stopped + cancelled + 无出站`）；`authorized + stop` 也必须是该终态
+ *    （不再允许只标 stop 却留着旧的 `considering`/`approved_to_send`）。
  */
 export function validatePrivacyCard(
   card: PrivacyTurnCard,
@@ -702,6 +740,33 @@ export function validatePrivacyCard(
       code: "stop_forbids_outbound",
       message: "stop 表示停止动作，不得有出站消息",
     });
+  }
+
+  // —— 不变量 10：能力分区与停止终态 ——
+  // 已授权执行时的 stop 只能是停止终态（信息所有者拒绝后的隐私停止，或能力边界
+  // 为 red 的停止）。讨论阶段的 stop 只是"这轮先不做"，沿用 not_started/considering。
+  if (!deliberating && card.recommendedAction === "stop") {
+    if (card.actionStatus !== "stopped" || card.disclosurePlan !== "cancelled") {
+      violations.push({
+        code: "stop_requires_terminal_state",
+        message: `已授权执行的 stop 必须是停止终态（actionStatus=stopped 且 disclosurePlan=cancelled），当前是 actionStatus=${card.actionStatus}、disclosurePlan=${card.disclosurePlan}`,
+      });
+    }
+  }
+  // 红区表示当前版本不独立协调，必须停止实质动作，不能一边说做不了一边对外联系。
+  if (card.capabilityZone === "red" && !deliberating) {
+    const capabilityStopped =
+      card.recommendedAction === "stop" &&
+      card.actionStatus === "stopped" &&
+      card.disclosurePlan === "cancelled" &&
+      !hasOutbound;
+    if (!capabilityStopped) {
+      violations.push({
+        code: "red_zone_requires_stop",
+        message:
+          "capabilityZone=red 表示当前版本不独立协调这项请求，必须是停止终态（recommendedAction=stop、actionStatus=stopped、disclosurePlan=cancelled、无出站），不能继续对外动作",
+      });
+    }
   }
 
   // —— 不变量 9：逐字段依据必须用 P0/P1/P2 来源覆盖每个业务字段 ——
