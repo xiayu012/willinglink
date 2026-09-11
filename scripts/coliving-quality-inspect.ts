@@ -80,6 +80,22 @@ import {
   ACTION_PLAN_SAMPLES,
   SIMPLE_GREEN_SAMPLE,
 } from "../lib/chat/coliving/evals/action-plan-samples";
+import {
+  CAPABILITY_REGISTRY_INDEX,
+  INTENT_BUSINESS_FIELDS,
+  MATURITY_LABEL,
+  MATURITY_STABILITY,
+  MAX_CAPABILITIES,
+  extractProductionToolNames,
+  validateCapabilityRegistry,
+  validateIntentEnvelope,
+  validateIntentSample,
+} from "../lib/chat/coliving/evals/intent-capability";
+import { findUnknownIntentCapabilityFlags } from "../lib/chat/coliving/evals/intent-capability-args";
+import {
+  INTENT_CAPABILITY_SAMPLES,
+  NEGATIVE_SAMPLE,
+} from "../lib/chat/coliving/evals/intent-capability-samples";
 
 const TOOL_DECL_NAMES = [
   "sendReply", "decide", "logEvent", "contactPerson", "proposeRule",
@@ -3234,6 +3250,534 @@ async function main() {
     assert(
       actionPlanCliSrc.includes("ACTION_PLAN_SAMPLES"),
       "CLI 必须从开发者手写样例读期望计划"
+    );
+  });
+
+  /**
+   * ── 用户意图 × 能力模块架构 V0（离线结构实验，只读、评测专用）──
+   *
+   * 免费确定性检查：证明能力 registry 边界清楚（≤7 个模块、工具名真实存在、
+   * blocked 无可执行工具）、意图契约可追溯（授权/限制是原文子串）、一条消息可有多意图
+   * 且限制不跨意图连坐。全程不调模型、不联网、不写库。语义由开发者手写样例给出，
+   * 这里只查状态一致性——**不用正则或关键词声称「意图理解正确」**。
+   */
+  const intentCapabilitySrc = readFileSync(
+    "lib/chat/coliving/evals/intent-capability.ts",
+    "utf8"
+  );
+  const intentSamplesSrc = readFileSync(
+    "lib/chat/coliving/evals/intent-capability-samples.ts",
+    "utf8"
+  );
+  const intentArgsSrc = readFileSync(
+    "lib/chat/coliving/evals/intent-capability-args.ts",
+    "utf8"
+  );
+  const intentCliSrc = readFileSync(
+    "scripts/coliving-intent-capability.ts",
+    "utf8"
+  );
+  // 从**当前生产源码**独立重算工具名（不 import turn.ts）。
+  const productionToolNames = extractProductionToolNames(
+    readFileSync("lib/chat/coliving/turn.ts", "utf8")
+  );
+  const intentIndex = CAPABILITY_REGISTRY_INDEX;
+
+  check("意图×能力：registry ≤7 个模块、id 唯一、allowedTools 都存在于当前生产工具定义", () => {
+    assert(
+      intentIndex.capabilities.length <= MAX_CAPABILITIES,
+      `首批能力模块 ${intentIndex.capabilities.length} 个，超过上限 ${MAX_CAPABILITIES}`
+    );
+    const ids = intentIndex.capabilities.map((c) => c.id);
+    assert.equal(
+      new Set(ids).size,
+      ids.length,
+      `能力模块 id 必须唯一，实际：${ids.join("、")}`
+    );
+    // 工具名核对必须对**当前生产源码文本**成立，而不是对一份可能漂移的手抄清单成立。
+    assert.deepEqual(
+      [...productionToolNames].sort(),
+      [...TOOL_DECL_NAMES].sort(),
+      "生产 turn.ts 声明的工具名与既有清单不一致：先确认是新增/改名还是解析漂移"
+    );
+    const productionSet = new Set(productionToolNames);
+    for (const module of intentIndex.capabilities) {
+      for (const tool of module.allowedTools) {
+        assert(
+          productionSet.has(tool),
+          `能力模块「${module.id}」列了不存在的工具「${tool}」`
+        );
+      }
+    }
+    assert.equal(
+      validateCapabilityRegistry(intentIndex, { productionToolNames }).ok,
+      true,
+      `registry 应通过一致性校验：${JSON.stringify(
+        validateCapabilityRegistry(intentIndex, { productionToolNames }).violations
+      )}`
+    );
+  });
+
+  check("意图×能力：blocked 无允许执行工具与成功收据；门禁/playbook 不混入 capability registry", () => {
+    const blocked = intentIndex.capabilities.filter((c) => c.maturity === "blocked");
+    assert(blocked.length > 0, "首批应至少保留一个 blocked 模块（无既有依据的费用分摊）");
+    for (const module of blocked) {
+      assert.equal(
+        module.allowedTools.length,
+        0,
+        `blocked 模块「${module.id}」不得有允许执行工具`
+      );
+      assert.equal(
+        module.successReceipts.length,
+        0,
+        `blocked 模块「${module.id}」不得有成功执行收据`
+      );
+    }
+    // 三份索引是不同种类：key 结构不同，且 id 不跨类重合。
+    for (const module of intentIndex.capabilities) {
+      assert.deepEqual(
+        Object.keys(module).sort(),
+        [
+          "allowedTools",
+          "id",
+          "maturity",
+          "playbooks",
+          "requiredInputs",
+          "sources",
+          "stopConditions",
+          "successReceipts",
+          "title",
+          "verifiableOutcome",
+        ],
+        `能力模块「${module.id}」字段结构变化，需同步检查门禁/playbook 是否被混入`
+      );
+    }
+    const capabilityIds = new Set(intentIndex.capabilities.map((c) => c.id));
+    for (const policy of intentIndex.policies) {
+      assert.deepEqual(
+        Object.keys(policy).sort(),
+        ["appliesToCapabilities", "id", "rule", "sources", "title"],
+        `cross-cutting policy「${policy.id}」结构不对：门禁不得带工具/成熟度`
+      );
+      assert(
+        !capabilityIds.has(policy.id),
+        `「${policy.id}」不得同时是 capability 与 policy`
+      );
+    }
+    for (const playbook of intentIndex.playbooks) {
+      assert.deepEqual(
+        Object.keys(playbook).sort(),
+        ["id", "scope", "sources", "title"],
+        `playbook「${playbook.id}」结构不对：领域 playbook 不得带工具/成熟度`
+      );
+      assert(
+        !capabilityIds.has(playbook.id),
+        `「${playbook.id}」不得同时是 capability 与 playbook`
+      );
+    }
+    // 负例：blocked 模块被塞进工具/收据必须被打回。
+    const base = intentIndex.capabilities[0];
+    assert(base, "registry 至少有一个模块");
+    const badIndex = {
+      capabilities: [{ ...base, maturity: "blocked" as const }],
+      policies: intentIndex.policies,
+      playbooks: intentIndex.playbooks,
+    };
+    const badResult = validateCapabilityRegistry(badIndex, { productionToolNames });
+    assert.equal(badResult.ok, false, "blocked 模块带工具/收据必须被打回");
+    assert(
+      badResult.violations.some((v) => v.code === "blocked_has_allowed_tools"),
+      "应报 blocked_has_allowed_tools"
+    );
+    assert(
+      badResult.violations.some((v) => v.code === "blocked_has_success_receipts"),
+      "应报 blocked_has_success_receipts"
+    );
+    // 负例：不存在的工具名必须被打回。
+    const badTool = validateCapabilityRegistry(
+      {
+        capabilities: [{ ...base, allowedTools: ["notARealTool"] }],
+        policies: intentIndex.policies,
+        playbooks: intentIndex.playbooks,
+      },
+      { productionToolNames }
+    );
+    assert(
+      badTool.violations.some((v) => v.code === "unknown_tool"),
+      "不存在的工具名必须被打回 unknown_tool"
+    );
+  });
+
+  check("意图×能力：三张开发者期望样例通过契约 + 期望结论校验", () => {
+    assert.equal(INTENT_CAPABILITY_SAMPLES.length, 3, "首批恰好三张开发者样例");
+    for (const sample of INTENT_CAPABILITY_SAMPLES) {
+      const result = validateIntentSample(sample, intentIndex);
+      assert.equal(
+        result.ok,
+        true,
+        `样例「${sample.id}」应通过校验，实际违规：${result.violations
+          .map((v) => `${v.intentId ?? "envelope"}·${v.code}`)
+          .join("、")}`
+      );
+    }
+  });
+
+  check("意图×能力：授权/限制原话必须是 rawMessage 逐字子串（来源校验，不是关键词猜）", () => {
+    const sample = INTENT_CAPABILITY_SAMPLES[0];
+    assert(sample, "至少一张样例");
+    // 负例：把授权依据改成一句原文里没有的话 → 必须被打回。
+    const tampered: typeof sample = {
+      ...sample,
+      envelope: {
+        intents: sample.envelope.intents.map((i) => ({
+          ...i,
+          authorizationEvidence: "我从来没说过这句话",
+        })),
+      },
+    };
+    const r = validateIntentEnvelope(tampered.envelope, intentIndex, tampered.context);
+    assert(
+      r.violations.some((v) => v.code === "evidence_not_in_message"),
+      "授权依据不在原文里必须被打回 evidence_not_in_message"
+    );
+    // 负例：把限制的依据改成原文里没有的话 → 同样被打回。
+    const constraintSample = INTENT_CAPABILITY_SAMPLES[1];
+    assert(constraintSample, "第二张样例存在");
+    const tamperedConstraint = {
+      ...constraintSample.envelope,
+      intents: constraintSample.envelope.intents.map((i) =>
+        i.constraints.length > 0
+          ? {
+              ...i,
+              constraints: i.constraints.map((c) => ({ ...c, evidence: "编的依据" })),
+            }
+          : i
+      ),
+    };
+    const rc = validateIntentEnvelope(
+      tamperedConstraint,
+      intentIndex,
+      constraintSample.context
+    );
+    assert(
+      rc.violations.some((v) => v.code === "evidence_not_in_message"),
+      "限制依据不在原文里必须被打回 evidence_not_in_message"
+    );
+    // 正例：未授权的意图可以不写授权原话（null），不算违规。
+    const publish = constraintSample.envelope.intents.find(
+      (i) => i.authorizationEvidence === null
+    );
+    assert(publish, "第二张样例应有一个未授权（null）的意图，证明「未授权」可表达");
+  });
+
+  check("意图×能力：同消息多意图合法；限制只作用于关联意图，不跨意图连坐", () => {
+    const sample = INTENT_CAPABILITY_SAMPLES[1];
+    assert(sample, "第二张样例存在");
+    assert(
+      sample.envelope.intents.length >= 3,
+      "「先取数、排草案、我定了再发」至少拆出三个意图"
+    );
+    const byId = new Map(sample.envelope.intents.map((i) => [i.id, i]));
+    const collect = byId.get("collect-xiaowang");
+    const draft = byId.get("draft-schedule");
+    const publish = byId.get("publish-schedule");
+    assert(collect && draft && publish, "三个意图 id 必须存在");
+    const exp = (id: string) =>
+      sample.expectations.find((e) => e.intentId === id)?.executable;
+    assert.equal(exp("collect-xiaowang"), true, "取数已获准：应可执行");
+    assert.equal(exp("draft-schedule"), true, "排草案可执行");
+    assert.equal(exp("publish-schedule"), false, "发布未获授权：不得执行");
+    // 排草案是 pickSchedule → chooseSchedule 两工具链，生产有漏调/心算的真实事故记录：
+    // 成熟度必须是 partial（内部构件可实现可核验，但不等于模型稳定路由）。
+    const draftModule = intentIndex.capabilities.find(
+      (c) => c.id === draft.capabilityId
+    );
+    assert.equal(
+      draftModule?.maturity,
+      "partial",
+      "排草案（两工具链，有漏步骤事故证据）不得标 available，应为 partial"
+    );
+    // preview_before_publish 只挂在发布意图上；取数/草案不因此被连坐。
+    assert.equal(collect.constraints.length, 0, "取数意图不应被发布限制连坐");
+    assert.equal(draft.constraints.length, 0, "草案意图不应被发布限制连坐");
+    assert.equal(publish.constraints.length, 1, "限制只挂在发布意图上");
+    assert.equal(
+      publish.constraints[0]?.kind,
+      "preview_before_publish",
+      "发布意图的限制应是 preview_before_publish"
+    );
+  });
+
+  check("意图×能力：blocked 不得被标为可执行（负例真的被拦）", () => {
+    const neg = validateIntentSample(NEGATIVE_SAMPLE, intentIndex);
+    assert.equal(neg.ok, false, "负例必须被打回");
+    assert(
+      neg.violations.some((v) => v.code === "blocked_capability_marked_executable"),
+      `负例应报 blocked_capability_marked_executable，实际：${neg.violations
+        .map((v) => v.code)
+        .join("、")}`
+    );
+    // 024：整条消息不是一个 red——过夜是 partial 可协调，只有费用分摊是 blocked。
+    const mixed = INTENT_CAPABILITY_SAMPLES[2];
+    assert(mixed, "第三张样例存在");
+    const utilities = mixed.expectations.find(
+      (e) => e.intentId === "utility-cost-split"
+    );
+    assert.equal(utilities?.executable, false, "被阻塞的费用分摊不得标为可执行");
+    const guestIntent = mixed.envelope.intents.find(
+      (i) => i.capabilityId === "circulate-rule"
+    );
+    assert(guestIntent, "024 应有访客规则意图");
+    const guestModule = intentIndex.capabilities.find(
+      (c) => c.id === guestIntent.capabilityId
+    );
+    assert.equal(guestModule?.maturity, "partial", "访客规则能力应为 partial");
+    assert(
+      mixed.envelope.intents.some((i) => {
+        const m = intentIndex.capabilities.find((c) => c.id === i.capabilityId);
+        return m?.maturity !== "blocked";
+      }),
+      "整条消息不能全是 blocked：至少有一部分可以推进"
+    );
+  });
+
+  check("意图×能力：无授权原话或带「本轮别对外」限制时，不得标为可执行", () => {
+    const simple = INTENT_CAPABILITY_SAMPLES[0];
+    assert(simple, "第一张样例存在");
+    const baseIntent = simple.envelope.intents[0];
+    assert(baseIntent, "简单提醒的意图存在");
+    const baseExpectation = simple.expectations[0];
+    assert(baseExpectation, "简单提醒的期望结论存在");
+
+    // 负例 A：authorizationEvidence === null 却 executable: true → 必须被打回。
+    const noAuth = {
+      ...simple,
+      envelope: {
+        intents: [{ ...baseIntent, authorizationEvidence: null }],
+      },
+      expectations: [{ ...baseExpectation, executable: true }],
+    };
+    const noAuthResult = validateIntentSample(noAuth, intentIndex);
+    assert.equal(noAuthResult.ok, false, "无授权原话却可执行必须被打回");
+    assert(
+      noAuthResult.violations.some(
+        (v) => v.code === "missing_authorization_but_executable"
+      ),
+      `应报 missing_authorization_but_executable，实际：${noAuthResult.violations
+        .map((v) => v.code)
+        .join("、")}`
+    );
+
+    // 负例 B：带 preview_before_publish / hold_before_send 却 executable: true → 必须被打回。
+    for (const kind of ["preview_before_publish", "hold_before_send"] as const) {
+      const blockedByConstraint = {
+        ...simple,
+        envelope: {
+          intents: [
+            {
+              ...baseIntent,
+              constraints: [{ kind, evidence: "进我房间前先敲门" }],
+            },
+          ],
+        },
+        expectations: [{ ...baseExpectation, executable: true }],
+      };
+      const r = validateIntentSample(blockedByConstraint, intentIndex);
+      assert.equal(
+        r.ok,
+        false,
+        `带 ${kind} 限制却标为可执行必须被打回`
+      );
+      assert(
+        r.violations.some((v) => v.code === "execution_constraint_conflict"),
+        `带 ${kind} 限制却可执行应报 execution_constraint_conflict，实际：${r.violations
+          .map((v) => v.code)
+          .join("、")}`
+      );
+    }
+
+    // 正例：conceal_source 是披露方式约束，不是「发不发」的授权，不自动禁止执行。
+    const concealOnly = {
+      ...simple,
+      envelope: {
+        intents: [
+          {
+            ...baseIntent,
+            constraints: [{ kind: "conceal_source" as const, evidence: "请你提醒大凯" }],
+          },
+        ],
+      },
+      expectations: [{ ...baseExpectation, executable: true }],
+    };
+    const concealResult = validateIntentSample(concealOnly, intentIndex);
+    assert.equal(
+      concealResult.ok,
+      true,
+      `conceal_source 不应被一刀切当成禁止执行，实际违规：${concealResult.violations
+        .map((v) => `${v.intentId ?? "envelope"}·${v.code}`)
+        .join("、")}`
+    );
+  });
+
+  check("意图×能力：partial 不显示为稳定可用；简单提醒字段少（防过度设计）", () => {
+    assert.equal(INTENT_BUSINESS_FIELDS.length, 6, "意图核心业务字段恰好 6 个");
+    assert.notEqual(
+      MATURITY_LABEL.partial,
+      MATURITY_LABEL.available,
+      "报告里 partial 的标签不得等同于 available"
+    );
+    assert(
+      !MATURITY_LABEL.partial.includes("稳定可用"),
+      "报告不得把 partial 说成稳定可用"
+    );
+    assert.notEqual(
+      MATURITY_STABILITY.partial,
+      MATURITY_STABILITY.available,
+      "partial 的稳定性措辞不得等同于 available"
+    );
+    // 简单提醒：一条消息一个意图，字段就是 id + 6 个业务字段，没有多余限制项。
+    const simple = INTENT_CAPABILITY_SAMPLES[0];
+    assert(simple, "第一张样例存在");
+    assert.equal(simple.envelope.intents.length, 1, "简单提醒只有一个意图");
+    const intent = simple.envelope.intents[0];
+    assert(intent, "简单提醒的意图存在");
+    assert.deepEqual(
+      Object.keys(intent).sort(),
+      [
+        "authorizationEvidence",
+        "capabilityId",
+        "completionCriteria",
+        "constraints",
+        "desiredOutcome",
+        "id",
+        "target",
+      ],
+      "简单意图只填 id + 6 个业务字段，不强迫填无关状态"
+    );
+    assert.equal(intent.constraints.length, 0, "简单提醒无需填限制");
+    assert.equal(
+      intent.capabilityId,
+      "send-targeted-message",
+      "简单提醒应命中 available 的定向消息能力"
+    );
+    const module = intentIndex.capabilities.find(
+      (c) => c.id === intent.capabilityId
+    );
+    assert.equal(
+      module?.maturity,
+      "available",
+      "定向消息能力应为 available（仅指 contactPerson 构件与投递回执已具备，不代表端到端模型稳定）"
+    );
+    // available 的标签不得声称稳定/线上已验证，否则超出本轮离线证据。
+    assert(
+      !MATURITY_LABEL.available.includes("稳定可用") &&
+        !MATURITY_LABEL.available.includes("线上稳定"),
+      "available 标签不得声称线上稳定可用"
+    );
+  });
+
+  check("意图×能力 CLI：忽略 pnpm 透传的字面量 --，仍拦真正未知参数", () => {
+    assert.deepEqual(
+      findUnknownIntentCapabilityFlags([
+        "node",
+        "coliving-intent-capability.ts",
+        "--",
+        "--sample",
+        "sample-01-simple-reminder",
+      ]),
+      [],
+      "字面量 -- 是参数分隔符，不能被判成未知参数"
+    );
+    assert.deepEqual(
+      findUnknownIntentCapabilityFlags([
+        "node",
+        "coliving-intent-capability.ts",
+        "--",
+        "--sample",
+        "x",
+        "--model",
+        "y",
+      ]),
+      ["--model"],
+      "--model 仍必须被判未知"
+    );
+    assert.deepEqual(
+      findUnknownIntentCapabilityFlags([
+        "node",
+        "coliving-intent-capability.ts",
+        "--scenario",
+        "x",
+      ]),
+      ["--scenario"],
+      "只支持 --sample；--scenario 必须被判未知"
+    );
+    assert(
+      intentCliSrc.includes("findUnknownIntentCapabilityFlags(process.argv)"),
+      "CLI 必须用这个共享纯函数做未知参数判定（否则测试与实现脱钩）"
+    );
+  });
+
+  check("意图×能力完全离线：不 import 生产 turn/repo、不调模型/网关，工具名靠读源码核对", () => {
+    for (const src of [
+      intentCapabilitySrc,
+      intentSamplesSrc,
+      intentArgsSrc,
+      intentCliSrc,
+    ]) {
+      assert(
+        !/from\s+["'][^"']*chat\/coliving\/turn["']/.test(src),
+        "意图×能力代码不得 import 生产 turn.ts"
+      );
+      assert(
+        !/from\s+["'][^"']*coliving\/repo["']/.test(src),
+        "意图×能力代码不得 import 生产 repo（不写数据库）"
+      );
+      assert(!src.includes("contactPerson("), "不得调用联系住户的工具");
+      assert(!src.includes("runColivingTurn("), "不得调用生产回合函数");
+      assert(!src.includes("validateActionPlan("), "V4 执行状态不得泄漏进意图结构");
+    }
+    for (const banned of [
+      "generateText",
+      "generateObject",
+      "Output.object",
+      "getLanguageModel",
+      "gateway",
+      "dotenv",
+      "@ai-sdk",
+      'from "ai"',
+    ]) {
+      assert(
+        !intentCliSrc.includes(banned),
+        `离线 CLI 不得出现 ${banned}（不调模型）`
+      );
+    }
+    assert(
+      intentCapabilitySrc.includes("export function validateCapabilityRegistry"),
+      "registry 校验必须是导出的纯函数"
+    );
+    assert(
+      intentCapabilitySrc.includes("export function validateIntentEnvelope"),
+      "意图校验必须是导出的纯函数"
+    );
+    assert(
+      intentCapabilitySrc.includes("export function extractProductionToolNames"),
+      "工具名核对必须是读源码文本的纯函数（不 import turn.ts）"
+    );
+    assert(
+      intentCliSrc.includes("validateCapabilityRegistry("),
+      "CLI 必须跑 registry 一致性校验"
+    );
+    assert(
+      intentCliSrc.includes("validateIntentSample("),
+      "CLI 必须跑样例校验"
+    );
+    assert(
+      intentCliSrc.includes("extractProductionToolNames("),
+      "CLI 必须读生产源码核对工具名"
+    );
+    assert(
+      intentCliSrc.includes("INTENT_CAPABILITY_SAMPLES"),
+      "CLI 必须从开发者手写样例读期望映射"
     );
   });
 

@@ -36,6 +36,7 @@
     "coliving:quality": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-quality-inspect.ts",
     "coliving:privacy-card": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-privacy-card.ts",
     "coliving:action-plan": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-action-plan.ts",
+    "coliving:intent-capability": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-intent-capability.ts",
     "twilio:selftest": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/twilio-selftest.ts",
     "twilio:inspect": "tsx scripts/twilio-inspect.ts",
     "coliving:sim": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-sim.ts",

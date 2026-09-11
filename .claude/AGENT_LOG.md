@@ -12,6 +12,22 @@
 
 ---
 
+## 2026-09-10 · V5 用户意图 × 能力模块离线架构
+
+**背景**：老板提出按能力模块划清边界，并把住户的意图/目的作为长期开发维度。V4 已能表示逐动作状态，但缺少用户目标到能力选择的独立层。
+
+**Claude Code 实现**：新增 `intent-capability.ts`、三张手写样例、参数解析与离线报告 CLI；package 增加 `coliving:intent-capability`；quality 增加 registry、授权证据、多意图、blocked 和离线性门禁。七个 capability 与五个 cross-cutting policies、五个 playbooks 分开，IntentItem 为 id 加六个业务字段。
+
+**Codex 独立复审退回**：第一版把两步排班草案标 available，尽管生产源码已有漏调用/心算/链路耗尽事故；把 available 报成 stable；把回复当前发信人的 `sendReply` 混进第三方定向联系；校验器也允许无授权或要求先预览时仍标 executable。退回后排班降为 partial，available 收窄为“执行构件和回执具备”，第三方联系只允许 `contactPerson`，并增加无授权/预览/暂缓执行负例门禁。
+
+**证据归属**：Doctrine 直接支持权限、决定权、隐私、事实来源、参与和收据；IntentEnvelope、七模块、三分索引及整条转换链是工程推导。三张报告是开发者草案，不是模型输出或老板核准。
+
+**Codex 验证**：`pnpm.cmd coliving:intent-capability` 三张报告通过；`pnpm.cmd coliving:quality` 119 项通过；`git diff --check` 通过；`tsc --noEmit` 只有既有 `speech-input.tsx:55-56` 两条 TS2717。未接生产、未调用模型或网络、未写库或发送；`public/sw.js` 未触碰。
+
+**下一步**：老板先人工看报告；认可结构后，才考虑少量留出语料的模型填卡基线，仍不直接接生产。
+
+---
+
 ## 2026-09-10 · 动作阶段 V4：整轮二分改为离线逐动作计划
 
 **背景**：V3 的整轮 `decisionStage=deliberating|authorized` 把整轮出站绑死，一个请求里的多个动作不能分别表达授权、就绪和执行状态。本轮只做隔离的离线结构实验。
