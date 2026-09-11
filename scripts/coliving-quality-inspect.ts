@@ -63,6 +63,23 @@ import {
   type PrivacyCardContext,
   type PrivacyTurnCard,
 } from "../lib/chat/coliving/evals/privacy-turn-card";
+import {
+  ACTION_AUTHORIZATIONS,
+  ACTION_CAPABILITIES,
+  ACTION_KINDS,
+  ACTION_READINESS,
+  ACTION_STATUSES,
+  THIRD_PARTY_ACTION_KINDS,
+  validateActionPlan,
+  type ActionItem,
+  type ActionPlan,
+  type ActionPlanContext,
+} from "../lib/chat/coliving/evals/action-plan";
+import { findUnknownActionPlanFlags } from "../lib/chat/coliving/evals/action-plan-args";
+import {
+  ACTION_PLAN_SAMPLES,
+  SIMPLE_GREEN_SAMPLE,
+} from "../lib/chat/coliving/evals/action-plan-samples";
 
 const TOOL_DECL_NAMES = [
   "sendReply", "decide", "logEvent", "contactPerson", "proposeRule",
@@ -2550,6 +2567,674 @@ async function main() {
       "CLI 必须跑确定性业务校验"
     );
     assert(privacyCliSrc.includes("privacyCard"), "CLI 必须从场景读人工标准卡");
+  });
+
+  /**
+   * ── 离线逐动作协调计划（V4 结构实验，只读、离线、评测专用）──
+   *
+   * 免费确定性检查：证明逐动作结构能表达 V3 整轮二分表达不了的差异，且校验器
+   * 对「收据 / 授权 / 就绪度 / 能力分区 / 依赖」的规则真的会拦人。全程不调模型、
+   * 不联网、不写库。语义由开发者手写样例给出，这里只查状态一致性。
+   */
+  const actionPlanSrc = readFileSync(
+    "lib/chat/coliving/evals/action-plan.ts",
+    "utf8"
+  );
+  const actionPlanSamplesSrc = readFileSync(
+    "lib/chat/coliving/evals/action-plan-samples.ts",
+    "utf8"
+  );
+  const actionPlanArgsSrc = readFileSync(
+    "lib/chat/coliving/evals/action-plan-args.ts",
+    "utf8"
+  );
+  const actionPlanCliSrc = readFileSync(
+    "scripts/coliving-action-plan.ts",
+    "utf8"
+  );
+  const apCtx: ActionPlanContext = {
+    speaker: "小林",
+    roster: ["小林", "小王"],
+    rawMessage: "（评测用语境）",
+  };
+  const apOut = (recipient: string) => ({
+    recipient,
+    purpose: "最小化边界提醒",
+    text: "（评测用出站正文）",
+  });
+  // 中性动作：needs_confirmation + planned + 无出站 → 不触发任何规则，
+  // 供构造「只差一条待测违规」的最小 fixture。
+  const apNeutral = (over: Partial<ActionItem>): ActionItem => ({
+    id: "n",
+    kind: "make_schedule",
+    purpose: "（评测用动作）",
+    authorization: "needs_confirmation",
+    capability: "green",
+    status: "planned",
+    ...over,
+  });
+  const apViolates = (plan: ActionPlan, code: string): boolean =>
+    validateActionPlan(plan, apCtx).violations.some((v) => v.code === code);
+
+  check("逐动作计划：五个轴正交且复用 V3 能力分区（不另立会漂移的定义）", () => {
+    assert.deepEqual(
+      [...ACTION_CAPABILITIES],
+      [...COORDINATION_CAPABILITY_ZONES],
+      "能力分区必须就是 V3 的绿/黄/红，避免两份定义漂移"
+    );
+    assert.deepEqual([...ACTION_KINDS].length, 5, "动作种类只有 5 个正交取值");
+    assert.deepEqual(
+      [...ACTION_AUTHORIZATIONS].length,
+      4,
+      "授权依据只有 4 个取值（含 needs_confirmation）"
+    );
+    assert.deepEqual(
+      [...ACTION_READINESS].length,
+      2,
+      "信息就绪度只有 2 个取值（缺省即 ready）"
+    );
+    assert.deepEqual([...ACTION_STATUSES].length, 4, "执行状态只有 4 个取值");
+    for (const kind of THIRD_PARTY_ACTION_KINDS) {
+      assert(
+        (ACTION_KINDS as readonly string[]).includes(kind),
+        `需要第三方出站的种类「${kind}」必须是合法 kind`
+      );
+    }
+  });
+
+  check("逐动作计划：三张开发者期望样例 + 简单绿区样例全部通过确定性校验", () => {
+    for (const sample of ACTION_PLAN_SAMPLES) {
+      const result = validateActionPlan(sample.plan, sample.context);
+      assert.equal(
+        result.ok,
+        true,
+        `样例「${sample.id}」应通过校验，实际违规：${result.violations
+          .map((v) => `${v.actionId ?? "plan"}·${v.code}`)
+          .join("、")}`
+      );
+    }
+    const simple = validateActionPlan(
+      SIMPLE_GREEN_SAMPLE.plan,
+      SIMPLE_GREEN_SAMPLE.context
+    );
+    assert.equal(
+      simple.ok,
+      true,
+      `简单绿区提醒应通过校验，实际违规：${simple.violations
+        .map((v) => v.code)
+        .join("、")}`
+    );
+  });
+
+  check("逐动作计划：id 重复 / 依赖不存在 / 自依赖被拦", () => {
+    assert(
+      apViolates(
+        { actions: [apNeutral({ id: "dup" }), apNeutral({ id: "dup" })], requesterReply: "好。" },
+        "duplicate_action_id"
+      ),
+      "重复 action id 必须被打回"
+    );
+    assert(
+      apViolates(
+        { actions: [apNeutral({ id: "x", dependsOn: ["x"] })], requesterReply: "好。" },
+        "self_dependency"
+      ),
+      "动作不能依赖自己"
+    );
+    assert(
+      apViolates(
+        { actions: [apNeutral({ id: "x", dependsOn: ["ghost"] })], requesterReply: "好。" },
+        "unknown_dependency"
+      ),
+      "依赖不存在动作必须被打回"
+    );
+  });
+
+  check("逐动作计划：空计划（actions=[] 只配一句 requesterReply）单独被拦", () => {
+    // 反例：没有任何动作、只写一句回复——等于用一句 requesterReply 冒充整轮行动。
+    assert(
+      apViolates(
+        { actions: [], requesterReply: "好的，我来处理。" },
+        "empty_actions"
+      ),
+      "actions 为空时即使有 requesterReply 也必须打回 empty_actions"
+    );
+    // 正例：只要有一个合法动作就不得误报 empty_actions。
+    const oneAction = validateActionPlan(
+      { actions: [apNeutral({ id: "a" })], requesterReply: "好的。" },
+      apCtx
+    );
+    assert.equal(
+      oneAction.ok,
+      true,
+      `至少一个动作的计划应通过，实际违规：${oneAction.violations
+        .map((v) => v.code)
+        .join("、")}`
+    );
+    assert.equal(
+      oneAction.violations.some((v) => v.code === "empty_actions"),
+      false,
+      "非空计划不得误报 empty_actions"
+    );
+  });
+
+  check("逐动作计划：声称已发出/完成必须有本动作收据，requesterReply 不能冒充", () => {
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "c",
+              kind: "contact_person",
+              authorization: "requester_requested",
+              status: "waiting_reply",
+            }),
+          ],
+          requesterReply: "已经问过小王了。",
+        },
+        "waiting_reply_without_receipt"
+      ),
+      "标 waiting_reply 却没有出站收据必须被打回"
+    );
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "c",
+              kind: "publish_plan",
+              authorization: "requester_requested",
+              status: "done",
+            }),
+          ],
+          requesterReply: "已经发给大家了。",
+        },
+        "done_send_action_without_receipt"
+      ),
+      "对外动作标 done 却没有收据、只靠回复宣称，必须被打回"
+    );
+    assert(
+      apViolates(
+        { actions: [apNeutral({ id: "n" })], requesterReply: "已经联系小王了。" },
+        "reply_claims_contact_without_receipt"
+      ),
+      "无任何出站却宣称已联系必须被打回"
+    );
+  });
+
+  check("逐动作计划：仍需确认 / 已被拒绝的动作不得提前对第三方执行", () => {
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "c",
+              kind: "contact_person",
+              authorization: "needs_confirmation",
+              status: "waiting_reply",
+              outbound: [apOut("小王")],
+            }),
+          ],
+          requesterReply: "好的。",
+        },
+        "confirmation_required_but_acted"
+      ),
+      "needs_confirmation 的动作确认前不得出站"
+    );
+    assert(
+      apViolates(
+        {
+          actions: [apNeutral({ id: "c", authorization: "denied" })],
+          requesterReply: "好的。",
+        },
+        "denied_but_acted"
+      ),
+      "denied 的动作只能停止"
+    );
+  });
+
+  check("逐动作计划：缺发信人关键事实只封该动作及其依赖，不整轮连坐", () => {
+    // 相邻反例：同一消息里「先问小王周末能不能修门」和「帮我排厨房时间」是两件事。
+    // 厨房安排缺发信人自己的可用时间，但**独立**的修门询问仍可正常出站。
+    const kitchenMissing = apNeutral({
+      id: "kitchen",
+      kind: "make_schedule",
+      authorization: "requester_requested",
+      readiness: "missing_requester_fact",
+      blockedReason: "缺发信人自己的可用时间",
+    });
+    const independentRepair = apNeutral({
+      id: "ask-wang-repair",
+      kind: "contact_person",
+      authorization: "requester_requested",
+      status: "waiting_reply",
+      outbound: [apOut("小王")],
+    });
+    const independent = validateActionPlan(
+      {
+        actions: [independentRepair, kitchenMissing],
+        requesterReply: "修门的事我问小王了；厨房排班还缺你自己的时间。",
+      },
+      apCtx
+    );
+    assert.equal(
+      independent.ok,
+      true,
+      `独立动作（修门询问）应能出站、不被缺项连坐，实际违规：${independent.violations
+        .map((v) => `${v.actionId ?? "plan"}·${v.code}`)
+        .join("、")}`
+    );
+    // 缺项动作自身不得出站/执行（为了过闸联系第三方也不行）。
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "sched",
+              kind: "contact_person",
+              authorization: "requester_requested",
+              readiness: "missing_requester_fact",
+              status: "waiting_reply",
+              outbound: [apOut("小王")],
+            }),
+          ],
+          requesterReply: "我问问小王。",
+        },
+        "missing_requester_fact_executed"
+      ),
+      "缺发信人关键事实的动作自身不得出站/执行"
+    );
+    // 依赖缺项动作的动作（含隔一层的传递依赖）同样被拦。
+    assert(
+      apViolates(
+        {
+          actions: [
+            kitchenMissing,
+            apNeutral({
+              id: "draft",
+              kind: "make_schedule",
+              authorization: "requester_requested",
+              status: "planned",
+              dependsOn: ["kitchen"],
+            }),
+            apNeutral({
+              id: "publish",
+              kind: "publish_plan",
+              authorization: "requester_requested",
+              status: "done",
+              dependsOn: ["draft"],
+              outbound: [apOut("小王")],
+            }),
+          ],
+          requesterReply: "排好了就发。",
+        },
+        "missing_requester_fact_blocks_dependent"
+      ),
+      "依赖（含传递依赖）缺项动作的动作不得执行"
+    );
+    // 一轮问两个问题 → 打回。
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({ id: "q1", requesterQuestion: "问题一？" }),
+            apNeutral({ id: "q2", requesterQuestion: "问题二？" }),
+          ],
+          requesterReply: "请问……",
+        },
+        "multiple_requester_questions"
+      ),
+      "一轮最多一个会改变处置的问题"
+    );
+    // ask_requester 的收据是问话，不能有第三方出站；标 done 必须给问题。
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "ask",
+              kind: "ask_requester",
+              authorization: "coordinator_duty",
+              status: "done",
+              requesterQuestion: "你哪天方便？",
+              outbound: [apOut("小王")],
+            }),
+          ],
+          requesterReply: "请问……",
+        },
+        "ask_requester_forbids_outbound"
+      ),
+      "向发信人问话的动作不得产生第三方出站"
+    );
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "ask",
+              kind: "ask_requester",
+              authorization: "coordinator_duty",
+              status: "done",
+            }),
+          ],
+          requesterReply: "请问……",
+        },
+        "ask_requester_requires_question"
+      ),
+      "ask_requester 标 done 必须给出那个问题"
+    );
+  });
+
+  check("逐动作计划：red 停止且不牵连同计划其它动作", () => {
+    assert(
+      apViolates(
+        {
+          actions: [apNeutral({ id: "u", capability: "red" })],
+          requesterReply: "这个我做不了。",
+        },
+        "red_requires_stop"
+      ),
+      "red 动作必须 stopped"
+    );
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "u",
+              capability: "red",
+              status: "stopped",
+              outbound: [apOut("小王")],
+            }),
+          ],
+          requesterReply: "这个我做不了。",
+        },
+        "red_forbids_outbound"
+      ),
+      "red 动作不得有第三方出站"
+    );
+    // 同计划里绿区已发出 + 红区停止：red 不得把绿区也改写为红（校验器不跨动作传播）。
+    const mixed = validateActionPlan(
+      {
+        actions: [
+          apNeutral({
+            id: "guest",
+            kind: "contact_person",
+            authorization: "requester_requested",
+            capability: "green",
+            status: "waiting_reply",
+            outbound: [apOut("小王")],
+          }),
+          apNeutral({
+            id: "utility",
+            kind: "establish_rule",
+            authorization: "denied",
+            capability: "red",
+            status: "stopped",
+            capabilityReasons: ["缺少既有依据却要决定费用承担，超出当前可靠能力"],
+          }),
+        ],
+        requesterReply: "过夜的事我问了对方；水电分摊这轮我做不了。",
+      },
+      apCtx
+    );
+    assert.equal(
+      mixed.ok,
+      true,
+      `绿+红混合计划应当通过（red 不牵连同计划其它动作），实际违规：${mixed.violations
+        .map((v) => `${v.actionId ?? "plan"}·${v.code}`)
+        .join("、")}`
+    );
+    assert.equal(
+      mixed.violations.some((v) => v.code === "red_requires_stop"),
+      false,
+      "绿区动作不得被红区牵连误报"
+    );
+  });
+
+  check("逐动作计划：依赖未满足不得发布（满足后放行）", () => {
+    const collect = apNeutral({
+      id: "collect",
+      kind: "contact_person",
+      authorization: "requester_requested",
+      status: "waiting_reply",
+      outbound: [apOut("小王")],
+    });
+    const publishWaiting = apNeutral({
+      id: "publish",
+      kind: "publish_plan",
+      authorization: "requester_requested",
+      status: "done",
+      dependsOn: ["collect"],
+      outbound: [apOut("小王")],
+    });
+    assert(
+      apViolates(
+        { actions: [collect, publishWaiting], requesterReply: "表先给小林看过才发。" },
+        "dependency_not_satisfied"
+      ),
+      "依赖的收集动作还没完成时不得发布"
+    );
+    const satisfied = validateActionPlan(
+      {
+        actions: [{ ...collect, status: "done" }, publishWaiting],
+        requesterReply: "表先给小林看过才发。",
+      },
+      apCtx
+    );
+    assert.equal(
+      satisfied.ok,
+      true,
+      `依赖满足后应放行，实际违规：${satisfied.violations
+        .map((v) => v.code)
+        .join("、")}`
+    );
+  });
+
+  check("逐动作计划：简单单动作绿区提醒字段很少即可通过（防过度设计）", () => {
+    const action = SIMPLE_GREEN_SAMPLE.plan.actions[0];
+    assert(action, "简单样例必须有一个动作");
+    assert.deepEqual(
+      Object.keys(action).sort(),
+      ["authorization", "capability", "id", "kind", "outbound", "purpose", "status"],
+      "简单动作只填 7 个字段：readiness/dependsOn/blockedReason/requesterQuestion 都可缺省"
+    );
+    // 已授权绿区已做完的动作不能只写 planned 混过去（V3「已授权必须出站」的逐动作版）。
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "remind",
+              kind: "contact_person",
+              authorization: "requester_requested",
+              capability: "green",
+              status: "planned",
+            }),
+          ],
+          requesterReply: "好的。",
+        },
+        "actionable_but_not_acted"
+      ),
+      "已获请求 + 绿区 + 就绪 + 无依赖的动作不能只标 planned"
+    );
+    // blockedReason 只是解释，不授权绕过：写了理由仍必须拦，防止它变成一句话过闸的口子。
+    assert(
+      apViolates(
+        {
+          actions: [
+            apNeutral({
+              id: "remind",
+              kind: "contact_person",
+              authorization: "requester_requested",
+              capability: "green",
+              status: "planned",
+              blockedReason: "我打算下一轮再做",
+            }),
+          ],
+          requesterReply: "好的。",
+        },
+        "actionable_but_not_acted"
+      ),
+      "写了 blockedReason 也不能只标 planned：理由只解释，不改变校验结果"
+    );
+    // 报错文案必须指回结构化条件，而不是暗示「写段理由就能过闸」。
+    const actionable = validateActionPlan(
+      {
+        actions: [
+          apNeutral({
+            id: "remind",
+            kind: "contact_person",
+            authorization: "requester_requested",
+            capability: "green",
+            status: "planned",
+          }),
+        ],
+        requesterReply: "好的。",
+      },
+      apCtx
+    );
+    const actionableMsg =
+      actionable.violations.find((v) => v.code === "actionable_but_not_acted")
+        ?.message ?? "";
+    assert(
+      actionableMsg.includes("blockedReason"),
+      "报错应说明 blockedReason 只解释、不授权绕过"
+    );
+    assert(
+      !actionableMsg.includes("写明阻塞原因"),
+      "报错不得再暗示写一段 free-text 理由就能过闸"
+    );
+  });
+
+  // 本样例的**粗粒度**防回归：只守已知的 025/026 同类隐私事故（点名投诉人、
+  // 带出只有当事人才知道的私密现场），符合「一条普遍必要理由 + 可执行动作」。
+  // **不是完整语义认证**：正则证明不了措辞自然、也没有覆盖没列到的泄漏词，
+  // 自然度与全部语义仍由人工审查（见任务卡「不用关键词判断自然度或语义正确」）。
+  check("逐动作计划：简单绿区样例的出站不点投诉人、不带私密细节（粗粒度防回归，非语义认证）", () => {
+    const action = SIMPLE_GREEN_SAMPLE.plan.actions[0];
+    assert(action, "简单样例必须有一个动作");
+    const outboundText = (action.outbound ?? []).map((m) => m.text).join("\n");
+    assert(outboundText.trim().length > 0, "简单样例必须有出站正文");
+    const leakedPhrases = [
+      SIMPLE_GREEN_SAMPLE.context.speaker, // 「阿哲」：不得点名投诉人
+      "换衣服", // 只有当事人才知道的私密细节
+      "正忙着",
+    ];
+    for (const leaked of [...new Set(leakedPhrases.filter(Boolean))]) {
+      assert(
+        !outboundText.includes(leaked),
+        `简单样例出站不得出现「${leaked}」：这一条只守已知的 025/026 同类隐私事故，不能证明整段话自然`
+      );
+    }
+    // 只给真实动作收据：出现「提醒」字样（已提醒），且不得回流防御性免责声明
+    // 「保证 / 会不会照做 / 没法替他」——住户要的是动作是否发出，不是替第三方
+    // 承诺服从或推责。本检查只是**本事故的回归哨兵**（粗粒度正则），不证明措辞
+    // 自然、也不覆盖没列到的免责说法；自然度仍由人工审查。
+    assert(
+      SIMPLE_GREEN_SAMPLE.plan.requesterReply.includes("提醒"),
+      "requesterReply 应报告提醒已发出（真实动作收据）"
+    );
+    const disclaimerPhrases = ["保证", "会不会照做", "没法替他"];
+    for (const disclaimer of disclaimerPhrases) {
+      assert(
+        !SIMPLE_GREEN_SAMPLE.plan.requesterReply.includes(disclaimer),
+        `requesterReply 不得回流免责声明「${disclaimer}」：本检查只是本事故的回归哨兵，不能证明整段话自然`
+      );
+    }
+  });
+
+  check("逐动作计划 CLI：忽略 pnpm 透传的字面量 --，仍拦真正未知参数", () => {
+    assert.deepEqual(
+      findUnknownActionPlanFlags([
+        "node",
+        "coliving-action-plan.ts",
+        "--",
+        "--sample",
+        "sample-01-gather-then-confirm",
+      ]),
+      [],
+      "字面量 -- 是参数分隔符，不能被判成未知参数"
+    );
+    assert.deepEqual(
+      findUnknownActionPlanFlags([
+        "node",
+        "coliving-action-plan.ts",
+        "--",
+        "--sample",
+        "x",
+        "--model",
+        "y",
+      ]),
+      ["--model"],
+      "--model 仍必须被判未知"
+    );
+    assert.deepEqual(
+      findUnknownActionPlanFlags([
+        "node",
+        "coliving-action-plan.ts",
+        "--scenario",
+        "x",
+      ]),
+      ["--scenario"],
+      "只支持 --sample；--scenario 必须被判未知"
+    );
+    assert(
+      actionPlanCliSrc.includes("findUnknownActionPlanFlags(process.argv)"),
+      "CLI 必须用这个共享纯函数做未知参数判定（否则测试与实现脱钩）"
+    );
+  });
+
+  check("逐动作计划完全离线：不接模型/网关/.env，也不接生产动作", () => {
+    for (const src of [
+      actionPlanSrc,
+      actionPlanSamplesSrc,
+      actionPlanArgsSrc,
+      actionPlanCliSrc,
+    ]) {
+      assert(
+        !/from\s+["'][^"']*chat\/coliving\/turn["']/.test(src),
+        "逐动作计划代码不得 import 生产 turn.ts"
+      );
+      assert(
+        !/from\s+["'][^"']*coliving\/repo["']/.test(src),
+        "逐动作计划代码不得 import 生产 repo（不写数据库）"
+      );
+      assert(!src.includes("contactPerson("), "不得调用联系住户的工具");
+      assert(!src.includes("runColivingTurn("), "不得调用生产回合函数");
+      assert(!src.includes("validatePrivacyCard("), "不得让 V3 整轮不变量控制 V4 动作");
+    }
+    for (const banned of [
+      "generateText",
+      "generateObject",
+      "Output.object",
+      "getLanguageModel",
+      "gateway",
+      "dotenv",
+      "@ai-sdk",
+      'from "ai"',
+    ]) {
+      assert(
+        !actionPlanCliSrc.includes(banned),
+        `离线 CLI 不得出现 ${banned}（不调模型）`
+      );
+    }
+    assert(
+      actionPlanSrc.includes("export function validateActionPlan"),
+      "校验器必须是导出的纯函数"
+    );
+    assert(
+      actionPlanSrc.includes('from "./privacy-turn-card"'),
+      "必须复用 V3 的 OutboundMessage / 能力分区 / claimsContactAlreadyMade"
+    );
+    assert(
+      actionPlanCliSrc.includes("validateActionPlan("),
+      "CLI 必须跑确定性业务校验"
+    );
+    assert(
+      actionPlanCliSrc.includes("ACTION_PLAN_SAMPLES"),
+      "CLI 必须从开发者手写样例读期望计划"
+    );
   });
 
   const previous = process.env.COLIVING_JUDGE_OFF;

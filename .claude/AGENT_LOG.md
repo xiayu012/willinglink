@@ -12,6 +12,22 @@
 
 ---
 
+## 2026-09-10 · 动作阶段 V4：整轮二分改为离线逐动作计划
+
+**背景**：V3 的整轮 `decisionStage=deliberating|authorized` 把整轮出站绑死，一个请求里的多个动作不能分别表达授权、就绪和执行状态。本轮只做隔离的离线结构实验。
+
+**Claude Code 实现**：新增 `action-plan.ts`（类型与纯函数校验）、`action-plan-samples.ts`（三张开发者期望样例和一张简单绿区样例）、`action-plan-args.ts`、`coliving-action-plan.ts` 及 package 命令。逐动作记录 kind、authorization、readiness、status、capability、依赖和出站收据，不使用 V3 整轮不变量。
+
+**Codex 独立复审退回**：第一版把任一 `missing_requester_fact` 扩大为整张计划禁止出站，重新制造整轮耦合；024 问句提供 AI 明知做不了的“两件事一起定”选项；简单提醒又出现无理由冷命令、夸大对方必然服从，后续还泄露阿哲姓名和换衣服细节、加入无必要免责声明。Claude 分轮修正后，缺项只封该动作及其传递依赖，独立动作可继续；024 只确认是否接受收窄范围；简单提醒只给普遍理由、动作和真实发送收据。
+
+**依据归属**：Doctrine 直接支持决定权、参与、一次只问关键缺项、承诺与收据、无约定不自定费用；`plan + actionItems[]` 是工程推导，不冒充 Doctrine 原文或外部研究结论。
+
+**验证**：Codex 独立复跑 `coliving:quality`，109 项通过；三张 HTML 均显示逐动作状态并确定性校验通过；`tsc --noEmit` 仍只有既有 `speech-input.tsx:55-56` 两条 TS2717；`git diff --check` 通过。当前不接生产、不调模型、不写库或发消息，不碰 `public/sw.js`。
+
+**残余风险**：只证明结构能表达反例，不证明模型会正确填卡，也不证明优于现有 context；三张样例是开发者草案。依赖实现做传递闭包但未做完整环检测，只有出现现实需要时才扩展。
+
+---
+
 ## 2026-09-10 · 024 输入语料口语化 + 收窄“流程腔”哨兵（Codex 复审退回修正）
 
 **背景**：上一轮把 024 入站语料口语化后，Codex 独立复审退回两点：
