@@ -11,7 +11,7 @@ import type { OutboundAction, State } from "../../coordination/types";
 import { critique, critiqueBatch, hasSafetySensitiveTopic } from "./critic";
 import type { Verdict } from "./critic";
 import { assertCanWrite } from "./guard";
-import { colivingModelId } from "./model";
+import { colivingModelId, relayRewriteModelId } from "./model";
 import { embedOne } from "./embedding";
 import * as repo from "./repo";
 import {
@@ -149,6 +149,51 @@ const PROCESS_NARRATION_FUTURE_ACTION =
 const PROCESS_NARRATION_ATTRIBUTION =
   /(?:知道|猜到|猜出|猜得出|猜出来|猜得到|看得出|看得出来|看出来|看得到|意识到|发现|想到|想得到|推断|推断得出|推测|推测得出|断定)(?:了)?是[你您](?:提|说|反映|投诉)(?:的|过)(?!对)|换(?:个|成|一个)(?:(?:更|再|稍|尽量)?(?:笼统|模糊|概括|隐晦|委婉|中性|含蓄|普通)|别的|其他|不点名|不指明|不点破|不提是谁|匿名)?(?:的)?(?:接法|说法|方式|口径)|(?:不提|不说|不讲)具体(?:是)?谁/;
 
+/**
+ * **条件性后续支持**：由住户的新反馈触发、直接绑在眼前这件事上的一句话。
+ * 例：「要是还吵就告诉我，我再找他」「如果他回复了，你把原话发我，我再帮你看」。
+ *
+ * 这类话落在第 3 组（将来时自述动作）的句式里，但它是给住户一个明确的
+ * **开关**（住户回来反馈才动作），不是凭空给自己排活的空承诺——把它当
+ * 「我再找他」误杀，等于逼大脑把正常的下一步也说不得（第四轮 relay 报告暴露）。
+ *
+ * 例外必须窄，所以**条件必须同时含两半**：
+ *  1. 一个条件词（要是/如果/…）；
+ *  2. 一句请**住户**回来反馈的话（告诉我/发我/跟我说/…）；
+ *  3. 之后才是 AI 的动作（我再…/我会…）。
+ * 只有条件词、没有请对方反馈的（「万一还吵，我再找他」）不算——那还是
+ * 无凭据的空承诺，照拦；无条件的「我再找他」、单纯的「有消息我告诉你」
+ * 也照拦（后者本由延后汇报组管）。命中这一段的先剥掉，再跑将来的动作组，
+ * 所以同一句里另有无关的将来时动作（「我会找房东谈」）仍会被抓。
+ */
+const PROCESS_NARRATION_CONDITIONAL_FOLLOW_UP =
+  /(?:要是|如果|若是|假如|倘若|万一|一旦|哪天)[^。！？!?\n]{0,60}(?:告诉我|跟我说|跟我讲|说一声|发给我|发我|通知我|喊我|叫我|让我知道)[^。！？!?\n]{0,40}?我(?:再|会|就|到时候)/g;
+
+/** 这一条文本剥掉条件性后续支持后的样子——只给第 3 组用，别动其他组。 */
+export function stripConditionalFollowUp(text: string): string {
+  return text.replace(PROCESS_NARRATION_CONDITIONAL_FOLLOW_UP, "…");
+}
+
+/**
+ * 第 5 组：**AI 自己排期的"对方回复后再通知你"**——「他一回复我就告诉你」
+ * 「他回过话我告诉你」。第五轮 relay 人工复核（021）抓到：回信把还没发生的
+ * 将来承诺，当成了回给发信人的"当前状态"。
+ *
+ * 它和第 3 组（条件性后续支持）必须分开，区别在**触发源**：
+ *  - 允许（第 3 组、已由 `stripConditionalFollowUp` 剥掉）：`他回复了，
+ *    你把原话发我，我再帮你看`——住户回来反馈才动作，是给他的开关；
+ *  - 拦（这一组）：`他一回复我就告诉你`——触发源是对方，住户没回来反馈。
+ *    它不是当前状态；住户没要求这项通知时，不必在本轮多许一个未来通知动作
+ *    （明确要求时才例外）。跟"在等谁回话"（此刻的事实）不同。
+ * 窄约束：主语须是第三方（他/她/对方/…）紧接一个"回复/回话类"事件词，事件
+ * 后立刻回一句给住户的将来时汇报（我/这边 + 就/再/会… + 告诉你），中间不得
+ * 出现「你/您」——那会命中住户自己触发的合法条件句（「你告诉我」）。
+ * 事件词后加 `(?!说|道|称|表示)`，避免把"他回复说可以，我告诉你一下"这类
+ * 已发生的**内容转述**误当成未发生的承诺。
+ */
+const PROCESS_NARRATION_AI_OWNED_DEFERRED_REPORT =
+  /(?:他|她|对方|那边|人家|那人)[^。！？!?\n]{0,6}(?:一(?:回复|回话|回信|有消息|有回复|有回音)|回过话|回了话|回过消息|回了消息|(?:回复|回话|回信|答复|回音|消息)(?:了)?|回你|回我|有(?:消息|回复|回音))(?!说|道|称|表示)[^。！？!?\n你您]{0,10}(?:我|这边)[^。！？!?\n]{0,4}(?:就|再|会|马上|立刻|第一时间|到时候)?[^。！？!?\n]{0,6}(?:告诉你|告诉您|跟你说|通知你|发给你|跟你讲|给你说)/;
+
 export function checkProcessNarration(
   text: string
 ): { broke: "0"; why: string } | null {
@@ -166,7 +211,7 @@ export function checkProcessNarration(
         "该这轮做的现在就做完，别预告「之后再告诉你」。"
     );
   }
-  if (PROCESS_NARRATION_FUTURE_ACTION.test(text)) {
+  if (PROCESS_NARRATION_FUTURE_ACTION.test(stripConditionalFollowUp(text))) {
     reasons.push(
       "「我这就去找她谈」「我先把情况跟小俊对清楚」「我马上再提醒一遍」这类将来时" +
         "把自己要做、该做的动作念了出来——已经做了的就用完成时自然说（“已经问过小俊了，" +
@@ -182,8 +227,118 @@ export function checkProcessNarration(
         "该防的用完成时说清已按全屋口径处理过即可，别把身份暴露的顾虑念给住户。"
     );
   }
+  if (PROCESS_NARRATION_AI_OWNED_DEFERRED_REPORT.test(text)) {
+    reasons.push(
+      "「他（对方）一回复/回过话，我就告诉你」这类承诺，触发源是**对方**、不是住户的新反馈：" +
+        "它不是当前状态，而是尚未发生的将来动作；住户没要求这项通知时，不必在本轮多许一个" +
+        "未来通知动作（明确要求这项通知时例外）。回信只说此刻的事实" +
+        "（已经联系了谁、在等谁回话）就够；" +
+        "只有**由住户新反馈触发**的条件句（「他回复了，你把原话发我，我再帮你看」）才允许留。"
+    );
+  }
   if (reasons.length === 0) return null;
   return { broke: "0", why: reasons.join("\n") };
+}
+
+/**
+ * **这一条回复 / 这一批出站要不要进语义批判器。**
+ *
+ * 老板定的闸：日常审稿只对安全敏感主题升级模型复核，其余非敏感内容一律
+ * 走代码、不进模型。但**一对一传话（relay）是人类沟通质量任务**：rubric
+ * 第 14 条（有没有把一件具体交办改成别的事）和第 15 条（回信有没有只交代
+ * 已经发生的事）说的正是这类失真，而它们**不含任何安全敏感词**——把
+ * 「提醒某人」扩写成全屋规矩、回信复述整条出站，安全正则一条也命不中。
+ * 只靠代码闸，这两条对普通 relay 实际上没有生产门禁（第四轮 relay 报告暴露）。
+ *
+ * 所以：**relay 命中时，非敏感的出站草稿与最终回复也要进默认便宜 critic**
+ * （`critic.ts` 的 `deepseek/deepseek-v4-flash`）；命中安全敏感主题时由
+ * critic 内部照旧升级 sonnet。这里只决定"进不进"，不决定"用哪个模型"、
+ * 不新增工作流。**其他情境的非敏感内容仍然直接 pass**，不因为这条把全部
+ * 对话重新送回 critic。
+ */
+export function needsSemanticCritique(args: {
+  relayActive: boolean;
+  safetySensitive: boolean;
+}): boolean {
+  return args.relayActive || args.safetySensitive;
+}
+
+/**
+ * 交给批判器的**relay 出站任务背景**：AI 是替哪个住户、联系哪个具体对象。
+ *
+ * 第五轮人工复核（021）暴露：同一句话，在普通对话里没问题，放进"代某人联系
+ * 另一个人"的任务里就可能是冒充发信人（rubric 第 14 条）。便宜 critic 当时
+ * 只看到"收信人 + 这一轮已知事实"，不知道这是一次传话、当前发信人是谁，
+ * 于是放行了「我睡得沉…找我」这种第一人称。这里把任务说清楚；**只陈述任务
+ * 关系，不给话术**——怎么措辞仍归 doctrine。
+ *
+ * 后续同类漏判（自动绿、人工红）：便宜 critic 也放行过假匿名主语——该用发信人
+ * 名字时写成「有人/一位室友/同住的人」。rubric 12 已管这件事，但 critic 只拿
+ * 到"收信人+事实"时不去核对来源归属；这里把 doctrine 已有的归属二选一规则
+ * （用名字，或整条就事论事）摆到任务背景里，不新增规则、不改全局隐私口径。
+ */
+export function relayRecipientTaskContext(args: {
+  senderName: string;
+  recipientName: string;
+}): string {
+  return (
+    `这是一次一对一传话：住户${args.senderName}把一件要跟${args.recipientName}` +
+    `说的话或做的事交给 AI，AI 代他联系${args.recipientName}；这条消息的收信人` +
+    `是${args.recipientName}，不是${args.senderName}。AI 是传话人：除非有明确` +
+    `引语或来源归属（「${args.senderName}说/希望……」），不得改用` +
+    `${args.senderName}的第一人称（「找我」「我……」）说话——那会让` +
+    `${args.recipientName}以为这是 AI 自己的事、或以为 AI 在冒充${args.senderName}；` +
+    `发信人说的相对时间也要保持原粒度，不能自己铸成硬门槛。` +
+    `来源归属只有两种写法，**不要停在中间**：` +
+    `需要对方知道是谁（是他自己的决定、请求或边界，不知道是谁就没法理解、` +
+    `没法回应）时，就用发信人名字${args.senderName}说出来；` +
+    `不需要归属（事情本身已经够清楚、不必靠是谁提的才懂）时，就整条` +
+    `就事论事地说这件事本身，例如把影响直接说成「声音影响休息」，` +
+    `可以整条不提是谁。**不得用「有人」「一位室友」「同住的人」这类` +
+    `谁也不是的主语造假匿名**——那既没让对方知道是谁，也没有真正保护谁。` +
+    `（这不是把所有传话都改成实名：该保密时仍整条不提来源，就事论事即可。）`
+  );
+}
+
+/**
+ * 交给批判器的**relay 回信任务背景**：这条是回给发信人（不是收信人）的，
+ * 只该交代"联系了谁 + 当前状态"。同样只陈述任务关系，不给话术。
+ *
+ * **不预设联系已经成功。** relay 出站可能被 critic 拦下（同一轮 facts 里就是
+ * 「被审稿拦下，没有发出去」）。若这里写死"AI 已经代他去联系了"，就会和 facts
+ * 直接冲突、诱导批判器放过一条基于未发生事实的回信。是否实际发出完全以 facts
+ * 为准，本背景只说任务关系与回信对象。
+ */
+export function relaySenderReplyTaskContext(args: { senderName: string }): string {
+  return (
+    `这是一次一对一传话：住户${args.senderName}把一件要跟别人说的话或做的事交给 ` +
+    `AI，这条是回给发信人${args.senderName}的，不是发给收信人的。AI 到底有没有` +
+    `替他联系上、发出去了没有，完全以【这一轮已知的事实】为准——本背景只说明任务` +
+    `与回信对象，不预设联系已经成功。合格的回信只交代"联系了谁 + 当前状态"，` +
+    `不把发出去的内容（包括让对方做什么）再摘要一遍；「对方一回复我就告诉你」` +
+    `不是"在等谁回话"这个当前状态，除非住户明确要这项通知。`
+  );
+}
+
+/**
+ * **最终聚焦修正的第一步该强制调哪个工具**（纯判定，可离线测试）。
+ *
+ * 背景（本轮纠偏）：relay 这一轮若已有出站消息被审稿拦下，回给发信人的那条
+ * 回信会如实说"被拦、没发出去"；但最终聚焦修正（可能已升级强模型）在需要动作时
+ * 把工具全开、`toolChoice` 为 `"required"`，`stopWhen` 又只要一命中 `sendReply`
+ * 就结束——模型可以**先调 `sendReply`** 交出一条改好的回信，被拦的那条联系却
+ * 始终没有重发，收信人根本收不到消息，已授权任务等于没办成。所以这条窄路径
+ * **第一步必须调 `contactPerson` 真正重发**，之后仍给有限步数调 `sendReply`。
+ *
+ * 只在这一种情形下强制，其余最终修正维持现状：
+ *  - 非 relay：不强制（普通对话没有"重发被拦出站"这回事）；
+ *  - relay 但本轮没有 blocked 出站：不强制（没有东西要重发）。
+ */
+export function finalFixForcedFirstTool(args: {
+  relayActive: boolean;
+  hasBlockedOutbound: boolean;
+}): "contactPerson" | null {
+  return args.relayActive && args.hasBlockedOutbound ? "contactPerson" : null;
 }
 
 function isGeneratedResidentName(name: string): boolean {
@@ -3457,6 +3612,13 @@ export async function runColivingTurn(args: {
   // TS 的控制流窄化过不了闭包边界（sender 在函数顶部已经判过非空），
   // 这里显式存一份非空引用给闭包用，不然每处 sender.xxx 都会报"可能为 null"
   const senderName = sender.name;
+  /**
+   * 这一轮是不是**一对一传话**（relay）。是的话，非敏感的出站草稿与最终
+   * 回复也要进批判器——rubric 第 14/15 条（任务忠实、回信只交代动作与状态）
+   * 是 relay 专属的人际质量门禁，安全敏感正则抓不到它们（见
+   * `needsSemanticCritique` 的说明）。
+   */
+  const relayActive = loadedModuleIds.includes("relay");
   async function critiqueAndMarkOutbound(msgs: OutboundMessage[]): Promise<void> {
     const batchSummary = msgs
       .map((message) => {
@@ -3476,9 +3638,11 @@ export async function runColivingTurn(args: {
      *  - `scheduleVerified`：正文由已选候选 + 固定模板生成，结构化核对过，
      *    语言批判器不应反过来把正确数字误判成"锁死了另一个时段" → 直接放行；
      *  - 过早的增容逃逸（未结共享资源冲突但排班器没证明无解）→ 直接打回；
-     *  - 其余非敏感消息（`hasSafetySensitiveTopic(o.text, args.text)` 未命中）
-     *    → 直接 pass，不再调 LLM 批判器；
-     *  - 只有命中安全敏感主题的消息进 `needsCritique`，整批升级 sonnet 复核。
+     *  - 其余非敏感消息（`needsSemanticCritique` 未命中）→ 直接 pass，
+     *    不再调 LLM 批判器；
+     *  - 命中安全敏感主题的消息进 `needsCritique`，整批升级 sonnet 复核；
+     *  - **relay 这一轮**：普通非敏感出站也进 `needsCritique`，走默认便宜
+     *    critic（deepseek），让 rubric 14/15 真正生效（见 needsSemanticCritique）。
      */
     const verdicts: Verdict[] = new Array(msgs.length);
     const needsCritique: Array<{
@@ -3513,10 +3677,16 @@ export async function runColivingTurn(args: {
         };
         continue;
       }
-      // **非敏感出站不进批判器。** 日常只靠上面的确定性检查（scheduleVerified /
-      // 过早增容逃逸）；其余只有命中安全敏感主题（覆盖入站说的和这条正文，
-      // `hasSafetySensitiveTopic` 判）才值得升级 sonnet 复核，否则直接 pass。
-      if (!hasSafetySensitiveTopic(o.text, args.text)) {
+      // **非敏感出站默认不进批判器**，只靠上面的确定性检查（scheduleVerified /
+      // 过早增容逃逸）；但 relay 这一轮例外——非敏感出站也要过默认便宜 critic，
+      // 让 rubric 14/15 生效（见 needsSemanticCritique）。命中安全敏感主题时
+      // 由 critic 内部照旧升级 sonnet。
+      if (
+        !needsSemanticCritique({
+          relayActive,
+          safetySensitive: hasSafetySensitiveTopic(o.text, args.text),
+        })
+      ) {
         verdicts[i] = { verified: true, pass: true, broke: "", why: "" };
         continue;
       }
@@ -3536,6 +3706,17 @@ export async function runColivingTurn(args: {
         msgIndex: i,
         input: {
           to: targetName,
+          // relay 这一轮把"替谁联系谁"的任务背景也交给批判器：让便宜 critic
+          // 知道这不是普通对话，而是代某住户联系一个具体对象（rubric 14）。
+          // 自我介绍（isIntroduction）不是这次交办的转达对象，不套这层背景，
+          // 跟上面 role 的处理保持一致。
+          taskContext:
+            relayActive && !o.isIntroduction
+              ? relayRecipientTaskContext({
+                  senderName,
+                  recipientName: targetName,
+                })
+              : undefined,
           /**
            * 共用者规矩、针对个人的事、中性打招呼，三种判法完全不同。
            * **"被说到的人"这个角色是给纠纷场景准备的**——刚加进系统、
@@ -3834,18 +4015,27 @@ export async function runColivingTurn(args: {
       !toolsUsed.some((toolName) => TURN_ACTION_TOOLS.has(toolName)));
 
   // 老板定的闸：日常审稿只靠代码。`checkFactFidelity` 命中 → 打回重写（确定性，
-  // 保留）；未命中且不落在上面的确定性低风险闸时，只有命中安全敏感主题（非法
-  // 驱逐/自杀自伤/歧视/性骚扰/住房公平，由 hasSafetySensitiveTopic 判，**入站与
-  // 回复正文都覆盖**）才升级 sonnet 批判器复核；其余一律直接 pass，不再调 LLM 批判器。
+  // 保留）；未命中且不落在上面的确定性低风险闸时，只有**需要语义复核**的回复
+  // 才进批判器：命中安全敏感主题（非法驱逐/自杀自伤/歧视/性骚扰/住房公平，由
+  // hasSafetySensitiveTopic 判，**入站与回复正文都覆盖**）升级 sonnet；relay
+  // 这一轮的普通回复也进默认便宜 critic（rubric 14/15，见 needsSemanticCritique）。
+  // 其余一律直接 pass，不重新把所有非敏感对话送回 critic。
   const safetySensitiveReply = hasSafetySensitiveTopic(reply, args.text);
+  const relaySemanticReview = needsSemanticCritique({
+    relayActive,
+    safetySensitive: safetySensitiveReply,
+  });
   const verdict = factFidelityHit
     ? { verified: true, pass: false as const, ...factFidelityHit }
     : deterministicallySafeReply
       ? { verified: true, pass: true as const, broke: "", why: "" }
-    : safetySensitiveReply
+    : relaySemanticReview
       ? await critique({
           to: sender.name,
           role: senderRole,
+          taskContext: relayActive
+            ? relaySenderReplyTaskContext({ senderName })
+            : undefined,
           said: args.text,
           facts: replyFacts,
           draft: reply,
@@ -3961,7 +4151,11 @@ export async function runColivingTurn(args: {
       const outboundLenBeforeRedo = outbound.length;
       const redoResult = await generateText({
         abortSignal: turnAbortSignal(),
-        model: getLanguageModel(modelId),
+        // 第一次重写：一律用默认生产模型。只有 relay 的"最终聚焦修正"
+        // （下面 finalFix）才升级——见 relayRewriteModelId。
+        model: getLanguageModel(
+          relayRewriteModelId({ relayActive, stage: "redo", defaultModelId: modelId })
+        ),
         // 同上：这一轮如果批判器打回，这段会跟主生成调用共享同一份
         // doctrine 内容，缓存能命中主调用已经写入的那份
         system: buildGeneratorSystemMessages({
@@ -4198,13 +4392,20 @@ export async function runColivingTurn(args: {
       // 重写稿必须重新过与首稿完全相同的代码硬闸；只交给语言批判器会让
       // “首稿被确定性拦下、重写原样复读却变绿”成为可能。
       const redoFactFidelityHit = checkFactFidelity(reply);
-      // 重写稿同样只对安全敏感主题升级 sonnet 复核；其余直接 pass，不调 LLM。
+      // 重写稿同样按 needsSemanticCritique 判：安全敏感主题升级 sonnet，
+      // relay 这一轮的普通重写稿也进默认便宜 critic（rubric 14/15）；其余直接 pass。
       const redoVerdict = redoFactFidelityHit
         ? { verified: true, pass: false as const, ...redoFactFidelityHit }
-        : hasSafetySensitiveTopic(reply, args.text)
+        : needsSemanticCritique({
+              relayActive,
+              safetySensitive: hasSafetySensitiveTopic(reply, args.text),
+            })
           ? await critique({
               to: sender.name,
               role: senderRole,
+              taskContext: relayActive
+                ? relaySenderReplyTaskContext({ senderName })
+                : undefined,
               said: args.text,
               facts: renderNewReplyFacts(),
               draft: reply,
@@ -4227,7 +4428,15 @@ export async function runColivingTurn(args: {
           deliveredReply = null;
           // 与首轮 isBrokenPromise 同一份分类：6.5/6.6/6.7 调度正确性打回在
           // 最后一次聚焦修正里同样要给完整工具集，不能只剩 sendReply。
+          // **被拦的 relay 出站必须真正重发。** relay 这一轮已有 blocked 出站时，
+          // 第一步强制 contactPerson，别让强模型先调 sendReply 就绕过重发
+          // （见 finalFixForcedFirstTool）。这个判定同时决定要不要给多步工具集。
+          const forcedFirstTool = finalFixForcedFirstTool({
+            relayActive,
+            hasBlockedOutbound: outbound.some((message) => message.blocked),
+          });
           const finalNeedsAction =
+            forcedFirstTool !== null ||
             redoVerdict.broke.trim() === "7" ||
             redoVerdict.broke.trim() === "0" ||
             ["6.5", "6.6", "6.7"].includes(redoVerdict.broke.trim()) ||
@@ -4245,7 +4454,18 @@ export async function runColivingTurn(args: {
           const finalOutboundLen = outbound.length;
           const finalFix = await generateText({
             abortSignal: turnAbortSignal(),
-            model: getLanguageModel(modelId),
+            // **relay 唯一升级强模型的地方。** 走到这里意味着初稿和第一次重写
+            // 都已被 critic 打回，只剩这最后一次聚焦修正——便宜模型反复重写
+            // 仍改不动的（029 实测只会复述内容），用一次 sonnet 换一次真正
+            // 改对的机会。非 relay、首稿、出站、第一次重写都不升级
+            // （见 relayRewriteModelId 与其离线回归）。
+            model: getLanguageModel(
+              relayRewriteModelId({
+                relayActive,
+                stage: "finalFix",
+                defaultModelId: modelId,
+              })
+            ),
             system: buildGeneratorSystemMessages({
               doctrine,
               runtime,
@@ -4271,6 +4491,22 @@ export async function runColivingTurn(args: {
             toolChoice: finalNeedsAction
               ? "required"
               : { type: "tool", toolName: "sendReply" },
+            // 被拦的 relay 出站：**第一步强制 contactPerson 真正重发**，
+            // 之后（step 1+）放开为 "required"，仍可在有限步数内调 sendReply
+            // 交付回信。不加这段时，强模型可以第一步就 sendReply、绕过重发。
+            ...(forcedFirstTool !== null
+              ? {
+                  prepareStep: ({ stepNumber }: { stepNumber: number }) =>
+                    stepNumber === 0
+                      ? {
+                          toolChoice: {
+                            type: "tool" as const,
+                            toolName: "contactPerson" as const,
+                          },
+                        }
+                      : { toolChoice: "required" as const },
+                }
+              : {}),
             ...(finalNeedsAction
               ? { stopWhen: [hasToolCall("sendReply"), stepCountIs(4)] }
               : {}),
@@ -4295,13 +4531,20 @@ export async function runColivingTurn(args: {
           );
         }
         const finalFactFidelityHit = checkFactFidelity(reply);
-        // 最后一次修正稿同样只对安全敏感主题升级 sonnet 复核；其余直接 pass。
+        // 最后一次修正稿同样按 needsSemanticCritique 判：安全敏感升级 sonnet，
+        // relay 这一轮的普通稿也进默认便宜 critic；其余直接 pass。
         const finalVerdict = finalFactFidelityHit
           ? { verified: true, pass: false as const, ...finalFactFidelityHit }
-          : hasSafetySensitiveTopic(reply, args.text)
+          : needsSemanticCritique({
+                relayActive,
+                safetySensitive: hasSafetySensitiveTopic(reply, args.text),
+              })
             ? await critique({
                 to: sender.name,
                 role: senderRole,
+                taskContext: relayActive
+                  ? relaySenderReplyTaskContext({ senderName })
+                  : undefined,
                 said: args.text,
                 facts: renderNewReplyFacts(),
                 draft: reply,

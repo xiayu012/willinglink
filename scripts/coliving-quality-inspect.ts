@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { config } from "dotenv";
+import { assembleSystemPrompt } from "../lib/ai/brains";
 import { finalizeJudgment, judgeConversation, type JudgeTurn } from "../lib/chat/coliving/evals/judge";
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
 import {
@@ -19,6 +20,7 @@ import {
   extractExplicitFixedStart,
   extractPreferredStart,
   extractSlotFromInquiry,
+  finalFixForcedFirstTool,
   hasDeferredCoordination,
   isLowInformationFollowUp,
   isOpenConflictCase,
@@ -27,6 +29,9 @@ import {
   isScheduleFairnessObjection,
   isScheduleSlotInquiry,
   isSimpleAffirmation,
+  needsSemanticCritique,
+  relayRecipientTaskContext,
+  relaySenderReplyTaskContext,
   scheduleContactTextForAct,
   scheduleInquiryConfirmation,
   scheduleSlotMatchesSelfStatement,
@@ -35,6 +40,11 @@ import {
   criticModelId,
   hasSafetySensitiveTopic,
 } from "../lib/chat/coliving/critic";
+import {
+  COLIVING_DEFAULT_MODEL,
+  RELAY_FINAL_FIX_MODEL,
+  relayRewriteModelId,
+} from "../lib/chat/coliving/model";
 import {
   COLIVING_GUIDANCE_TEXTS,
   isKnownGuidanceId,
@@ -406,6 +416,224 @@ async function main() {
       checkProcessNarration("这个柜子只有你们两个人用，他可能会猜到是你。还要发吗？"),
       null,
       "批准的隐私问句（先问信息所有者）不得被过程播报组误伤"
+    );
+  });
+  check("conditional follow-up support is allowed; unconditional future promises are still caught", () => {
+    // 由住户新反馈触发、直接绑在眼前这件事上的条件句：允许（第四轮 relay 报告暴露）。
+    assert.equal(
+      checkProcessNarration("要是还吵就告诉我，我再找他。"),
+      null,
+      "条件性后续支持不算空承诺"
+    );
+    assert.equal(
+      checkProcessNarration("如果他回复了，你把原话发我，我再帮你看。"),
+      null,
+      "条件性后续支持不算空承诺"
+    );
+    assert.equal(
+      checkProcessNarration("如果还是响，你跟我说一声，我再跟他说。"),
+      null,
+      "条件性后续支持不算空承诺"
+    );
+    // 例外必须窄：无条件将来时动作、空泛延后汇报、只有条件词没有请住户反馈的，仍要拦。
+    assert(checkProcessNarration("我再找他。"), "无条件将来时动作仍必须命中");
+    assert(checkProcessNarration("之后告诉你结果。"), "空泛的延后汇报仍必须命中");
+    assert(checkProcessNarration("有消息我告诉你。"), "空泛的延后汇报仍必须命中");
+    assert(
+      checkProcessNarration("万一还吵，我再找他。"),
+      "只有条件词、没有请住户反馈的空承诺仍必须命中"
+    );
+    // 条件性后续支持 + 同句里另有无关的将来时动作：后者仍要被抓。
+    assert(
+      checkProcessNarration("要是还吵就告诉我，我再找他；另外我会找房东谈。"),
+      "同句里无关的将来时动作仍必须命中"
+    );
+  });
+  check("AI-owned deferred report is caught; resident-triggered support is not", () => {
+    // 第五轮 relay 人工复核（021）：回信承诺"对方一回复我就告诉你"——触发源是对方、
+    // 不是住户的新反馈，而且它**不是"在等谁回话"这种当前状态**；住户没要求这项通知
+    // 时，AI 不必在本轮多许一个未来动作，必须拦。（不再用"AI 控制不了对方何时回"
+    // 当理由：系统的入站将来可能确实能继续处理，限制来自"这不是当前状态 + 住户没要求"。）
+    assert(checkProcessNarration("他一回复我就告诉你。"), "对方触发、AI 自己排期的通知必须命中");
+    assert(checkProcessNarration("他回过话我告诉你。"), "对方触发、AI 自己排期的通知必须命中");
+    assert(checkProcessNarration("他回了话我再告诉你。"), "对方触发、AI 自己排期的通知必须命中");
+    assert(checkProcessNarration("对方有消息我就跟你说一声。"), "对方触发、AI 自己排期的通知必须命中");
+    // 「在等谁回话」是此刻的事实，不是承诺，不得误伤。
+    assert.equal(checkProcessNarration("已经跟他说了，在等他回话。"), null, "在等谁回话是当前状态");
+    assert.equal(checkProcessNarration("问了，等他回复。"), null, "在等谁回话是当前状态");
+    // 由住户新反馈触发的条件句仍允许（第 3 组），不因这一组被误伤。
+    assert.equal(checkProcessNarration("如果他回复了，你把原话发我，我再帮你看。"), null);
+    assert.equal(checkProcessNarration("他回复了，你告诉我一声，我再跟他说。"), null);
+    // 已发生的内容转述（他回复说……）不是在预告未发生的动作。
+    assert.equal(
+      checkProcessNarration("他回复说可以，我把结果跟你说一声。"),
+      null,
+      "已发生的内容转述不是未发生的承诺"
+    );
+  });
+  check("relay task context reaches the critic without changing other roles", () => {
+    const outbound = relayRecipientTaskContext({ senderName: "小夏", recipientName: "小陈" });
+    assert(outbound.includes("小夏") && outbound.includes("小陈"), "任务背景要说清发信人与收信人");
+    assert(outbound.includes("第一人称"), "任务背景要提醒不得用发信人第一人称");
+    // 假匿名（023 连续两次自动绿、人工红）：该用发信人名字时草稿写成
+    // 「这屋有人听到」「有人晚上没睡好」，便宜 critic 连续漏判。rubric 12 已管
+    // 这件事，但 critic 拿到任务背景后不去核对来源归属。任务背景必须把 doctrine
+    // 已有的归属二选一规则说清：需要归属就用发信人名字，不需要归属就整条就事论事，
+    // 不得停在「有人/一位室友/同住的人」这种谁也不是的中间态。
+    assert(
+      outbound.includes("发信人名字") && outbound.includes("就事论事"),
+      "任务背景要说清来源归属二选一：用发信人名字，或整条就事论事"
+    );
+    assert(
+      outbound.includes("有人") &&
+        outbound.includes("一位室友") &&
+        outbound.includes("同住的人"),
+      "任务背景要明确点出「有人/一位室友/同住的人」这类假匿名主语不合格"
+    );
+    // 不因为这一条把所有传话改成实名：该保密时仍整条不提来源、就事论事。
+    assert(
+      outbound.includes("不是把所有传话都改成实名"),
+      "任务背景不得把「必须有来源」变成 relay 的普遍要求"
+    );
+    const reply = relaySenderReplyTaskContext({ senderName: "小夏" });
+    assert(reply.includes("小夏"), "回信任务背景要说清发信人");
+    assert(reply.includes("当前状态"), "回信任务背景要说清动作+当前状态");
+    // 出站可能被 critic 拦下、根本没发出去，同一轮 facts 里就是"被拦、未发"。
+    // 任务背景若写死"已经联系成功"，会和 facts 冲突并诱导假完成——必须只说
+    // 任务关系，是否实际发出以 facts 为准。
+    assert(!reply.includes("已经代他去联系了"), "回信任务背景不得写死联系已成功");
+    assert(reply.includes("已知的事实"), "是否实际发出必须以 facts 为准");
+    // 只对 relay 生效：普通对话不传 taskContext，提示词里就不出现这一段。
+    const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
+    assert(criticSrc.includes("【这一轮的任务】"), "critic 必须渲染任务背景");
+    assert(criticSrc.includes("args.taskContext"), "单条 critic 必须用上 taskContext");
+    assert(criticSrc.includes("e.taskContext"), "批量 critic 必须用上 taskContext");
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(turnSrc.includes("relayRecipientTaskContext({"), "turn.ts 必须接入 relay 出站任务背景");
+    assert(turnSrc.includes("relaySenderReplyTaskContext({"), "turn.ts 必须接入 relay 回信任务背景");
+  });
+  check("只有 relay 的最终聚焦修正升级强模型，其余生成路径一律默认模型", () => {
+    // 唯一升级路径：relay + finalFix（走到这里意味着初稿与第一次重写都已被 critic 打回）。
+    assert.equal(
+      relayRewriteModelId({
+        relayActive: true,
+        stage: "finalFix",
+        defaultModelId: COLIVING_DEFAULT_MODEL,
+      }),
+      RELAY_FINAL_FIX_MODEL,
+      "relay 最终聚焦修正必须升级到强模型"
+    );
+    assert.equal(RELAY_FINAL_FIX_MODEL, "anthropic/claude-sonnet-4.5");
+    // 其余路径一律默认便宜模型，不能顺手放宽到首稿/出站/第一次重写/非 relay。
+    assert.equal(
+      relayRewriteModelId({
+        relayActive: false,
+        stage: "finalFix",
+        defaultModelId: COLIVING_DEFAULT_MODEL,
+      }),
+      COLIVING_DEFAULT_MODEL,
+      "非 relay 不升级"
+    );
+    assert.equal(
+      relayRewriteModelId({
+        relayActive: true,
+        stage: "redo",
+        defaultModelId: COLIVING_DEFAULT_MODEL,
+      }),
+      COLIVING_DEFAULT_MODEL,
+      "relay 第一次重写不升级（首稿/出站同理不变）"
+    );
+    assert.equal(
+      relayRewriteModelId({
+        relayActive: false,
+        stage: "redo",
+        defaultModelId: COLIVING_DEFAULT_MODEL,
+      }),
+      COLIVING_DEFAULT_MODEL,
+      "非 relay 重写不升级"
+    );
+    // 默认模型被 COLIVING_MODEL 覆盖时，非升级路径如实返回它，不偷偷换成强模型。
+    assert.equal(
+      relayRewriteModelId({
+        relayActive: true,
+        stage: "redo",
+        defaultModelId: "some/other-model",
+      }),
+      "some/other-model"
+    );
+    // 接线：只有 finalFix 一处传 stage:"finalFix"；第一次重写必须走 stage:"redo"。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert.equal(
+      turnSrc.split('stage: "finalFix"').length - 1,
+      1,
+      "只有最终聚焦修正这一处走升级选型"
+    );
+    assert.equal(
+      turnSrc.split('stage: "redo"').length - 1,
+      1,
+      "第一次重写必须走默认模型分支"
+    );
+    // 其余生成路径（主生成 / 出站 / fact-fidelity 重试）仍直接使用 modelId。
+    assert(
+      turnSrc.split("getLanguageModel(modelId)").length - 1 >= 4,
+      "其余生成路径仍用默认模型，没有被顺手升级"
+    );
+  });
+  check("blocked relay 的最终聚焦修正第一步强制 contactPerson，其余最终修正不受影响", () => {
+    // 唯一强制路径：relay 这一轮已有 blocked 出站——必须真正重发，不能先 sendReply 绕过。
+    assert.equal(
+      finalFixForcedFirstTool({ relayActive: true, hasBlockedOutbound: true }),
+      "contactPerson",
+      "blocked relay 必须第一步强制 contactPerson"
+    );
+    // 其余三种情形一律不强制（行为保持现状）：
+    assert.equal(
+      finalFixForcedFirstTool({ relayActive: true, hasBlockedOutbound: false }),
+      null,
+      "relay 但没有 blocked 出站：没有东西要重发，不强制"
+    );
+    assert.equal(
+      finalFixForcedFirstTool({ relayActive: false, hasBlockedOutbound: true }),
+      null,
+      "非 relay：普通对话没有重发被拦出站这回事，不强制"
+    );
+    assert.equal(
+      finalFixForcedFirstTool({ relayActive: false, hasBlockedOutbound: false }),
+      null,
+      "非 relay 且无 blocked 出站：不强制"
+    );
+    // 接线：turn.ts 的最终聚焦修正里，只在 forcedFirstTool 非空时才加 prepareStep，
+    // 把第一步钉成 contactPerson；之后放开为 required，仍可调 sendReply 收口。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const forced = turnSrc.indexOf("const forcedFirstTool = finalFixForcedFirstTool({");
+    assert(forced > 0, "turn.ts 必须用 finalFixForcedFirstTool 决定是否强制重发");
+    assert(
+      turnSrc.slice(forced - 220, forced).includes("blocked"),
+      "强制重发只应挂在 blocked relay 出站这条窄路径上"
+    );
+    const prep = turnSrc.indexOf("prepareStep:", forced);
+    assert(prep > forced, "必须把第一步强制工具接进最终聚焦修正调用");
+    const prepBlock = turnSrc.slice(prep, prep + 500);
+    assert(prepBlock.includes('toolName: "contactPerson"'), "第一步必须钉成 contactPerson");
+    assert(prepBlock.includes("stepNumber === 0"), "只强制第一步，之后放开让它调 sendReply");
+    assert(
+      prepBlock.includes('{ toolChoice: "required" as const }'),
+      "第一步之后仍给有限步数调 sendReply（required + stopWhen 收口）"
+    );
+    assert(
+      turnSrc.includes("...(forcedFirstTool !== null"),
+      "只有 forcedFirstTool 非空时才加 prepareStep，其余最终修正不触发"
+    );
+    // 非强制路径（非 relay / 无 blocked 出站）的 base toolChoice 保持原样。
+    const baseIdx = turnSrc.indexOf("toolChoice: finalNeedsAction");
+    assert(baseIdx > 0, "最终修正的 base toolChoice 必须保持");
+    const baseBlock = turnSrc.slice(baseIdx, baseIdx + 140);
+    assert(baseBlock.includes('"required"'), "需要动作时仍为 required");
+    assert(baseBlock.includes('toolName: "sendReply"'), "不需要动作时仍只给 sendReply");
+    // 新增的出站仍按现有 critiqueAndMarkOutbound 复核。
+    assert(
+      turnSrc.includes("await critiqueAndMarkOutbound(finalNewOutbound)"),
+      "最终修正新发的出站仍要过 critiqueAndMarkOutbound"
     );
   });
   check("process-narration gate is wired into checkFactFidelity", () => {
@@ -934,6 +1162,46 @@ async function main() {
     assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.5"'), "升级常量必须在");
     assert(criticSrc.includes('process.env.COLIVING_CRITIC_MODEL?.trim()'), "必须保留 COLIVING_CRITIC_MODEL 覆盖");
   });
+  check("relay turns route non-sensitive outbound/reply into the default critic; other chats still skip it", () => {
+    // 纯判定函数：relay 命中 → 进 critic；非 relay 非敏感 → 不进；安全敏感 → 进。
+    assert.equal(
+      needsSemanticCritique({ relayActive: false, safetySensitive: false }),
+      false,
+      "普通非敏感对话必须继续跳过批判器，不能重新把所有对话送回模型"
+    );
+    assert.equal(
+      needsSemanticCritique({ relayActive: true, safetySensitive: false }),
+      true,
+      "relay 的普通非敏感出站/回复也必须进批判器，rubric 14/15 才有生产门禁"
+    );
+    assert.equal(
+      needsSemanticCritique({ relayActive: false, safetySensitive: true }),
+      true,
+      "安全敏感主题照旧进批判器（critic 内部升级 sonnet）"
+    );
+    assert.equal(needsSemanticCritique({ relayActive: true, safetySensitive: true }), true);
+    // 接线：出站批审 + 首稿/重写稿/最终稿回复三处判定都要走这个纯函数。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes('const relayActive = loadedModuleIds.includes("relay")'),
+      "必须用 loadedModuleIds 判本轮是不是 relay"
+    );
+    const callCount = turnSrc.split("needsSemanticCritique({").length - 1;
+    assert(
+      callCount >= 4,
+      `出站批审 + 回复首稿/重写稿/最终修正稿四处的判定都要接上 needsSemanticCritique（实际 ${callCount}）`
+    );
+    // relay 的非敏感出站不得再被"只安全敏感才审"的老条件挡回：出站判定里
+    // 必须用 needsSemanticCritique，而不是裸的 hasSafetySensitiveTopic 取反。
+    const fnStart = turnSrc.indexOf("async function critiqueAndMarkOutbound(");
+    const fnEnd = turnSrc.indexOf("await critiqueAndMarkOutbound(outbound);");
+    const fnBody = turnSrc.slice(fnStart, fnEnd);
+    assert(fnBody.includes("needsSemanticCritique("), "出站批审必须经 needsSemanticCritique 判定");
+    assert(
+      !fnBody.includes("!hasSafetySensitiveTopic(o.text, args.text)"),
+      "出站批审不得再用「非安全敏感就跳过」的老条件"
+    );
+  });
   check("safety-sensitive keyword matcher hits real probes, not benign chit-chat", () => {
     // 非法驱逐 / 自杀自伤 / 歧视 / 性骚扰 / 住房公平
     assert.equal(hasSafetySensitiveTopic("房东要把我赶出去，说我不交钱就别住了"), true);
@@ -995,19 +1263,22 @@ async function main() {
     assert(block.lastIndexOf(passObj) > block.indexOf("await critique({"),
       "非敏感收尾分支必须直接 pass，不再调 LLM 批判器");
   });
-  check("non-sensitive outbound never enters needsCritique", () => {
+  check("non-relay non-sensitive outbound skips the critic; relay outbound enters it", () => {
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     const fnStart = turnSrc.indexOf("async function critiqueAndMarkOutbound(");
     const fnEnd = turnSrc.indexOf("await critiqueAndMarkOutbound(outbound);");
     assert(fnStart > 0 && fnEnd > fnStart, "critiqueAndMarkOutbound 必须可定位");
     const fnBody = turnSrc.slice(fnStart, fnEnd);
-    const gateIdx = fnBody.indexOf("if (!hasSafetySensitiveTopic(o.text, args.text)) {");
+    const gateIdx = fnBody.indexOf("!needsSemanticCritique({");
     const pushIdx = fnBody.indexOf("needsCritique.push({");
-    assert(gateIdx > 0, "收集需要模型审的消息前必须有安全敏感闸");
-    assert(gateIdx < pushIdx, "安全敏感闸必须早于 needsCritique.push");
+    assert(gateIdx > 0, "收集需要模型审的消息前必须经 needsSemanticCritique 判定");
+    assert(gateIdx < pushIdx, "语义复审判定必须早于 needsCritique.push");
     const gated = fnBody.slice(gateIdx, pushIdx);
     assert(gated.includes("verdicts[i] = { verified: true, pass: true"),
-      "非敏感出站必须直接放行（verdicts[i] = pass），而不是 push 进 needsCritique");
+      "判为不需要语义复审的出站必须直接放行（verdicts[i] = pass），而不是 push 进 needsCritique");
+    assert(gated.includes("relayActive"), "出站判定必须区分 relay（relay 进 critic，非 relay 仍跳过）");
+    assert(gated.includes("hasSafetySensitiveTopic(o.text, args.text)"),
+      "安全敏感仍由 hasSafetySensitiveTopic 判，覆盖 o.text（正文）");
     // 确定性闸不丢：scheduleVerified 直通、过早增容逃逸确定性打回、批量调用仍在
     assert(fnBody.includes("o.scheduleVerified"), "scheduleVerified 直接放行路径必须保留");
     assert(fnBody.includes("isPrematureCapacityEscape"), "过早增容逃逸确定性打回路径必须保留");
@@ -3235,6 +3506,41 @@ async function main() {
       actionPlanCliSrc.includes("ACTION_PLAN_SAMPLES"),
       "CLI 必须从开发者手写样例读期望计划"
     );
+  });
+
+  /**
+   * 一对一传话情境的**路由回归哨兵**。新加的 `relay` 模块只在住户明确把
+   * 一件要跟另一个人说的话/做的事交给你时加载——漏加载，代传话就退回
+   * 通用调解/立规流程（021 真实事故就是"提醒某人别半夜进屋"被写成全屋规则）；
+   * 误加载，则普通求助也会背上传话边界。这里只用确定性文本断言路由，
+   * 不判断措辞好坏（措辞由 doctrine 与 judge 管）。
+   */
+  check("relay 情境：明确的传话表达加载 domain/relay.md，非传话请求不误命中", () => {
+    const shouldLoad = [
+      "你帮我问问他能不能接受？",
+      "你能不能帮我把这个跟他说了？",
+      "你跟他说一声吧，以后有事先敲门",
+      "你赶紧帮我跟他说一声，让他把音量调小",
+      "麻烦你替我转告他一声",
+    ];
+    for (const text of shouldLoad) {
+      assert(
+        assembleSystemPrompt({ brainId: "coliving", routeOn: text }).loadedModuleIds.includes("relay"),
+        `应命中 relay：${text}`
+      );
+    }
+    const shouldNotLoad = [
+      "帮我看看垃圾是周几倒",
+      "帮我安排一下厨房的时段",
+      "我昨天跟他说了，他说知道了",
+      "你到底是房东那边的还是我们租客这边的？",
+    ];
+    for (const text of shouldNotLoad) {
+      assert(
+        !assembleSystemPrompt({ brainId: "coliving", routeOn: text }).loadedModuleIds.includes("relay"),
+        `不该命中 relay：${text}`
+      );
+    }
   });
 
   const previous = process.env.COLIVING_JUDGE_OFF;

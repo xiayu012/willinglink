@@ -125,6 +125,14 @@ export type CriticInput = {
   said: string;
   /** 这一轮还知道些什么，够批判器判断「有没有说没证据的事」 */
   facts: string;
+  /**
+   * **这一轮的任务是什么**（只对 relay 这类"交办型"任务填）。不是事实、
+   * 也不是话术，是让批判器知道"这条消息在什么任务里、收信人和当前发信人
+   * 各是谁"——同一句话在普通对话里没问题，放在"代某人联系另一个人"的
+   * 任务里可能就成了冒充发信人（rubric 第 14 条）。留空时完全不出现在
+   * 提示词里，普通对话行为不变。
+   */
+  taskContext?: string;
   draft: string;
 };
 
@@ -189,6 +197,9 @@ export async function critique(args: CriticInput): Promise<Verdict> {
           content:
             `【收信人】${args.to}\n` +
             `【他在这件事里的角色】${args.role}\n` +
+            (args.taskContext
+              ? `【这一轮的任务】${args.taskContext}\n`
+              : "") +
             `【他刚才说的话】${args.said || "（没说话，是我们主动发的）"}\n` +
             `【这一轮已知的事实】\n${args.facts}\n\n` +
             `【待发出的消息】\n${args.draft}\n\n` +
@@ -349,6 +360,8 @@ export type BatchCritiqueInput = {
   /** 他刚才说了什么。主动发（没回话）就留空 */
   said: string;
   facts: string;
+  /** 见 `CriticInput.taskContext`：这一轮的任务背景（relay 才填） */
+  taskContext?: string;
   draft: string;
 };
 
@@ -382,6 +395,7 @@ export async function critiqueBatch(
         role: entries[0].role,
         said: entries[0].said,
         facts: entries[0].facts,
+        taskContext: entries[0].taskContext,
         draft: entries[0].draft,
       }),
     ];
@@ -417,6 +431,7 @@ export async function critiqueBatch(
                 (e, idx) =>
                   `【消息 ${idx}】\n收信人：${e.to}\n` +
                   `他在这件事里的角色：${e.role}\n` +
+                  (e.taskContext ? `这一轮的任务：${e.taskContext}\n` : "") +
                   `他刚才说的话：${e.said || "（没说话，是我们主动发的）"}\n` +
                   `这一轮已知的事实：\n${e.facts}\n\n` +
                   `待发出的消息：\n${e.draft}`
