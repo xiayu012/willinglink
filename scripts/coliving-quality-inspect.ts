@@ -4405,6 +4405,51 @@ async function main() {
     // 三处生成器调用数量不变（本实验没新增调用路径）。
     assert.equal(turnSrc.split("trackedGatewayCall(").length - 1, 3);
   });
+  check("Gateway 自动缓存：主/forced-sendReply/forced-contact 共用同一请求级 prompt-prefix 缓存策略", () => {
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    // 共享常量本身就是文档化的请求级 gateway caching='auto'，带类型注解。
+    assert(
+      /const GENERATOR_GATEWAY_CACHE_OPTIONS: SharedV3ProviderOptions = \{\s*gateway: \{ caching: "auto" \},\s*\};/.test(
+        turnSrc
+      ),
+      "共享常量必须是请求级 providerOptions.gateway.caching='auto'"
+    );
+    // 恰好三处生成器各用一次，不许顺手加到别的 generateText / embedding 调用上。
+    const refs = [
+      ...turnSrc.matchAll(/providerOptions: GENERATOR_GATEWAY_CACHE_OPTIONS/g),
+    ].map((m) => m.index ?? -1);
+    assert.equal(refs.length, 3, "三处生成器都要启用同一策略，不多不少");
+    // 每一处都必须落在对应 stage 的 generateText options 区间里
+    // （stage 锚点起点 → 下一个 stage 锚点起点）。
+    const anchors = [
+      'trackedGatewayCall("main"',
+      'trackedGatewayCall("forced-sendReply"',
+      'trackedGatewayCall("forced-contact"',
+    ].map((s) => turnSrc.indexOf(s));
+    assert(!anchors.includes(-1), "三个 stage 锚点都要能找到");
+    for (let i = 0; i < anchors.length; i++) {
+      const start = anchors[i];
+      const end = i + 1 < anchors.length ? anchors[i + 1] : turnSrc.length;
+      assert.equal(
+        refs.filter((r) => r > start && r < end).length,
+        1,
+        `stage ${i} 的生成请求必须带上 gateway 自动缓存`
+      );
+    }
+    // 保留 Anthropic 手动断点：自动缓存是补充，不是替换。
+    assert.equal(
+      turnSrc.split('anthropic: { cacheControl: { type: "ephemeral" } }')
+        .length - 1,
+      1,
+      "doctrine system 的 Anthropic cacheControl marker 必须保留"
+    );
+    // 只开 prompt-prefix 缓存，不得引入应用级回复缓存（避免把住户正文/
+    // 运行时状态冻成可复用答案）。
+    assert(
+      !/responseCache|response_cache|cache:\s*true/.test(turnSrc),
+      "只开 prompt-prefix 缓存，不得引入应用级回复缓存"
+    );
+  });
   check("输出上限：coliving-eval 启动即校验变量、非法退出，并把生效值写进报告", () => {
     const src = readFileSync("scripts/coliving-eval.ts", "utf8");
     assert(

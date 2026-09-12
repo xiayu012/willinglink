@@ -2,6 +2,7 @@ import "server-only";
 
 import { generateText, hasToolCall, stepCountIs, tool, type SystemModelMessage } from "ai";
 import { z } from "zod";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import { assembleSystemPrompt } from "@/lib/ai/brains";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { buildContext } from "./context";
@@ -1081,6 +1082,29 @@ function coordinationReplyForSender(
   }
   return state === "gathering" ? `收到，我记下了。` : `收到。`;
 }
+
+/**
+ * 三处生成器共用的**请求层** Gateway 自动缓存开关
+ * （`providerOptions.gateway.caching = "auto"`，见 Vercel 文档
+ * “AI Gateway Automatic Prompt Caching”）。
+ *
+ * 这是 **prompt-prefix cache**，不是应用级回复缓存：对需要显式 marker 的
+ * provider（Anthropic / MiniMax / Alibaba），Gateway 在 prompt 前缀上补
+ * `cache_control` 断点；对隐式缓存的 provider（DeepSeek / OpenAI / Google），
+ * Gateway 不改写请求，缓存照旧自动发生。**请求内容、消息顺序、工具集一律
+ * 不变，也不会把住户正文或运行时状态存成可复用的“答案”缓存。**
+ *
+ * 与 `buildGeneratorSystemMessages` 里 doctrine 段的 Anthropic
+ * `cacheControl: ephemeral` marker **并存**：手动断点仍卡在 doctrine 之后，
+ * Gateway 自动断点覆盖整段 prompt，两者不冲突——所以保留手动 marker，
+ * 不做替换。
+ *
+ * 放在**请求层**（`generateText` 的 options）而不是 system message：Gateway 的
+ * `caching` 按官方文档是请求级选项，message 层只认各自 provider 的 marker。
+ */
+const GENERATOR_GATEWAY_CACHE_OPTIONS: SharedV3ProviderOptions = {
+  gateway: { caching: "auto" },
+};
 
 /**
  * 生成器 system 数组的**唯一构造入口**，各条生成路径（主生成、强制交付、
@@ -3298,6 +3322,8 @@ export async function runColivingTurn(args: {
   generateText({
     abortSignal: turnAbortSignal(),
     model: getLanguageModel(modelId),
+    // 请求层 Gateway 自动缓存（prompt-prefix，不是回复缓存）；三处生成器同一策略
+    providerOptions: GENERATOR_GATEWAY_CACHE_OPTIONS,
     // 顺序：doctrine（缓存）→ 实验 guidance（有才放）→ runtime（当前事实，最后）
     system: buildGeneratorSystemMessages({
       doctrine,
@@ -3351,6 +3377,7 @@ export async function runColivingTurn(args: {
       generateText({
         abortSignal: turnAbortSignal(),
         model: getLanguageModel(modelId),
+        providerOptions: GENERATOR_GATEWAY_CACHE_OPTIONS,
         system: buildGeneratorSystemMessages({
           doctrine,
           runtime,
@@ -3462,6 +3489,8 @@ export async function runColivingTurn(args: {
         generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
+          // 跟主生成、forced-sendReply 同一份请求层 Gateway 自动缓存策略
+          providerOptions: GENERATOR_GATEWAY_CACHE_OPTIONS,
           // 跟主生成调用、下面的force-sendReply同一个道理：这段一轮里可能被
           // 重发好几次，doctrine 逐字不变，由构造器统一开缓存
           system: buildGeneratorSystemMessages({
