@@ -880,6 +880,39 @@ export type ReplyReview = {
   why: string;
 };
 
+/**
+ * 一轮系统提示词的**组成观测**：只记长度和名称，**绝不记正文**。
+ *
+ * 用途：让评测报告能解释"这一轮 prompt 由什么构成"（doctrine 占多少、
+ * 运行时状态占多少、加载了哪些情境模块、主生成摆了哪些工具），
+ * 避免以后凭感觉删 doctrine。
+ *
+ * ⚠️ 这是观测，不是结论。它单独**不能**证明某段 doctrine 可以删——
+ * 只能说明它的体量。删之前仍要看真实失败证据和语义验收。
+ *
+ * **不保存任何提示词正文、运行时正文、住户原话、电话号码或工具 schema
+ * 正文**；也没有新增数据库字段——这只是内存返回值，只有评测 runner 会
+ * 把它写进 tests/coliving-eval/reports/ 的 JSON。
+ */
+export type PromptComposition = {
+  /** 常驻 + 命中情境模块拼接后的字符数（缓存前缀那一段）。 */
+  doctrineChars: number;
+  /** 本轮运行时状态那一段的字符数（缓存断点之后的当前事实）。 */
+  runtimeChars: number;
+  /**
+   * 组装出来送进模型的 system 总字符数。**略大于** doctrineChars +
+   * runtimeChars——两者之间还有一个固定的分隔符（`\n\n---\n\n`）。
+   * **不含**评测 guidance（那一层是 `--guidance` 实验专用，生产不传）。
+   */
+  systemChars: number;
+  /** 本轮实际加载的 doctrine 模块 id（不是正文）。 */
+  moduleIds: string[];
+  /** 本轮主生成暴露给模型的工具名（不是 schema 正文）。 */
+  toolNames: string[];
+  /** 暴露的工具数量 = toolNames.length；单列出来报告读起来直观。 */
+  toolCount: number;
+};
+
 export type TurnOutcome = {
   reply: string;
   /** 送到住户手里那句话最后一次核对的结论，见 `ReplyReview` */
@@ -902,6 +935,12 @@ export type TurnOutcome = {
   decisionId: string | null;
   modules: string[];
   promptChars: number;
+  /**
+   * 本轮系统提示词组成观测（只记长度/名称，不记正文），见 `PromptComposition`。
+   * `null` = 这一轮**没走模型**（未知号码 / 简单肯定短路 / coordination 接管），
+   * 没有构建提示词——那几个数字不是 0，是"没有这一层"。
+   */
+  promptComposition: PromptComposition | null;
   toolsUsed: string[];
   /** 认不出这个号码时为 true，调用方应当只回一句而不做任何记录 */
   unknownSender: boolean;
@@ -1026,6 +1065,7 @@ async function maybeCoordinationReply(args: {
       decisionId,
       modules: [],
       promptChars: 0,
+      promptComposition: null,
       toolsUsed: [],
       unknownSender: false,
       usage: {
@@ -1207,6 +1247,7 @@ export async function runColivingTurn(args: {
       decisionId: null,
       modules: [],
       promptChars: 0,
+      promptComposition: null,
       toolsUsed: [],
       unknownSender: true,
       usage: {
@@ -1374,6 +1415,7 @@ export async function runColivingTurn(args: {
       decisionId: shortDecisionId,
       modules: [],
       promptChars: 0,
+      promptComposition: null,
       toolsUsed: [],
       unknownSender: false,
       usage: {
@@ -3311,6 +3353,14 @@ export async function runColivingTurn(args: {
   }
 
   /**
+   * 本轮**主生成**实际暴露给模型的工具名（只记名字，不记 schema 正文）。
+   * 这里读一次就固定下来——主生成是决定成本的那一次调用。后面
+   * 强制补回复/补联系用的是更窄的一次性工具集（单摆一个工具），
+   * 不在这个观测里统计，免得把兜底路径和主生成混为一谈。
+   */
+  const exposedToolNames = Object.keys(activeTools);
+
+  /**
    * 系统提示词拆成两条，**缓存断点卡在中间**。
    *
    * 这是本模块最大的一笔省钱：带工具的一轮对话不是一次调用，而是每调一次工具
@@ -3915,6 +3965,14 @@ export async function runColivingTurn(args: {
     decisionId,
     modules: loadedModuleIds,
     promptChars: chars,
+    promptComposition: {
+      doctrineChars: doctrine.length,
+      runtimeChars: runtime.length,
+      systemChars: chars,
+      moduleIds: loadedModuleIds,
+      toolNames: exposedToolNames,
+      toolCount: exposedToolNames.length,
+    },
     toolsUsed,
     unknownSender: false,
     usage: sumUsage(result.steps),

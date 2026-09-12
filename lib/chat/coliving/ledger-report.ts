@@ -308,3 +308,109 @@ export function renderLedgerPanelHtml(
     `</div></details>`
   );
 }
+
+// ── 提示词组成观测（观察层，不是计费层） ─────────────────────────────────
+//
+// 每轮 prompt 由什么构成：doctrine 多长、运行时状态多长、加载了哪些情境
+// 模块、主生成摆了哪些工具。**只记长度和名称，不含任何提示词正文**。
+// 和计费面板同一套纪律：未知一律显示"未知"，**绝不显示成 0/NaN**；
+// 旧报告没有这个字段就不展示，不猜。
+
+/** 归一化后的观测；每个字段都可能"未知"（null），不是 0。 */
+export type NormalizedPromptComposition = {
+  doctrineChars: number | null;
+  runtimeChars: number | null;
+  systemChars: number | null;
+  moduleIds: string[] | null;
+  toolNames: string[] | null;
+  toolCount: number | null;
+};
+
+const PCOMP_UNKNOWN = "未知";
+
+/** 只接受有限、非负的数字；其余（NaN/Infinity/负数/字符串）一律当未知。 */
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+function stringArrayOrNull(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? (value as string[])
+    : null;
+}
+
+/**
+ * 把报告里原始的观测字段归一化成可展示的三态：
+ * - `undefined`：**旧报告没有这个字段** → 调用方不展示（不猜、不补 0）；
+ * - `null`：这一轮没走模型（未知号码/短路/接管），**不是 0 字符**；
+ * - 对象：逐字段归一化，坏字段记 null → 显示"未知"。
+ *
+ * 形状完全不认识的对象也当 `undefined`（不展示），避免把别的东西渲染成观测。
+ */
+export function normalizePromptComposition(
+  raw: unknown
+): NormalizedPromptComposition | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const toolNames = stringArrayOrNull(o.toolNames);
+  const moduleIds = stringArrayOrNull(o.moduleIds);
+  return {
+    doctrineChars: finiteNonNegative(o.doctrineChars),
+    runtimeChars: finiteNonNegative(o.runtimeChars),
+    systemChars: finiteNonNegative(o.systemChars),
+    moduleIds,
+    toolNames,
+    // 优先用实际报上来的数量；缺了就用工具名数组长度兜底；都没有=未知。
+    toolCount: finiteNonNegative(o.toolCount) ?? (toolNames ? toolNames.length : null),
+  };
+}
+
+/**
+ * 渲染一轮的「提示词组成观测」块。
+ *
+ * **仅用于解释每轮 prompt 由什么构成，不构成删除/精简 doctrine 的依据**——
+ * 报告里的抬头明说这一点，避免后人拿一个体量数字当"这段可以删"的证明。
+ * 旧报告（字段缺席）返回空串；`null` 明说"本轮未调用模型"。
+ */
+export function renderPromptCompositionHtml(raw: unknown): string {
+  const comp = normalizePromptComposition(raw);
+  if (comp === undefined) return "";
+  if (comp === null) {
+    return (
+      `<details class="cost pcomp"><summary>提示词组成观测</summary>` +
+      `<div class="cost-body"><div class="cost-note">` +
+      `本轮未调用模型（未构建提示词）——未知号码、简单肯定短路或状态机接管等` +
+      `确定性路径。这里不是"0 字符"，是"没有这一层"。` +
+      `</div></div></details>`
+    );
+  }
+  const num = (v: number | null) => (v === null ? PCOMP_UNKNOWN : String(v));
+  const list = (v: string[] | null) =>
+    v === null ? PCOMP_UNKNOWN : v.length > 0 ? v.join("、") : "（无）";
+  const items = [
+    cell("常驻 + 情境 doctrine 字符", num(comp.doctrineChars)),
+    cell("运行时状态字符", num(comp.runtimeChars)),
+    cell("system 总字符", num(comp.systemChars)),
+    cell("已加载 doctrine 模块", list(comp.moduleIds)),
+    cell(
+      "暴露给模型的工具数",
+      comp.toolCount === null ? PCOMP_UNKNOWN : String(comp.toolCount)
+    ),
+  ].join("");
+  return (
+    `<details class="cost pcomp">` +
+    `<summary>提示词组成观测（只记长度与名称，不含提示词正文）</summary>` +
+    `<div class="cost-body">` +
+    `<div class="cost-grid">${items}</div>` +
+    `<div class="cost-note">暴露给模型的工具：${escapeHtml(list(comp.toolNames))}</div>` +
+    `<div class="cost-note">system 总字符 ≈ doctrine + runtime（还含两者之间的` +
+    `固定分隔符）；不含评测 guidance（--guidance 实验专用，生产不传）。</div>` +
+    `<div class="cost-note">这是观测：只用于解释每轮 prompt 由什么构成，` +
+    `单独不构成删除或精简 doctrine 的依据。</div>` +
+    `</div></details>`
+  );
+}

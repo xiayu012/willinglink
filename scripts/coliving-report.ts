@@ -18,6 +18,9 @@
  *   这是审稿系统真的起作用的证据，用户要能直接看到，不能藏起来。
  * - **judge 的问题锚定到轮次里**：写在对应那一轮下面，而不是堆在场景末尾。
  *   评语离原话越近，越容易判断这条评语本身是不是对的。
+ * - **提示词组成单独成一个观测块**：每轮显示 doctrine/runtime/system 字符数、
+ *   已加载模块 id 与主生成暴露的工具名，并明说"只用于解释、单独不构成删
+ *   doctrine 的依据"。旧报告没这个字段就不显示，不补 0、不显示 NaN。
  * - **失败的排前面、默认展开；通过的折叠**：用户时间宝贵，先看有问题的。
  * - 纯字符串拼 HTML，不引模板引擎；CSS 内联、不引外部字体/CDN，
  *   一个文件双击就能看，也不会被 CSP 拦。
@@ -27,7 +30,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "
 import path from "node:path";
 // 计费面板是**纯函数模块**（只用 `import type` 引 gateway-ledger，运行时不
 // 依赖 server-only 的台账），所以普通 tsx 脚本也能安全 import。
-import { renderLedgerPanelHtml } from "../lib/chat/coliving/ledger-report";
+import { renderLedgerPanelHtml, renderPromptCompositionHtml } from "../lib/chat/coliving/ledger-report";
 import type { LedgerSnapshot } from "../lib/chat/coliving/gateway-ledger";
 
 // ── 输入数据契约（由 coliving-eval 产出，本脚本只读不改） ────────────────
@@ -43,6 +46,12 @@ type TurnRecord = {
     blocked: boolean;
     blockReason?: string;
   }>;
+  /**
+   * 提示词组成观测（只记长度/模块 id/工具名，不含正文），由 coliving-eval
+   * 写入。**可选**：旧报告没有这个字段 → 不展示；`null` = 本轮没走模型。
+   * 渲染前一律走 `normalizePromptComposition` 防御，坏字段显示"未知"，不会 NaN。
+   */
+  promptComposition?: unknown;
 };
 
 type JudgeFinding = {
@@ -158,6 +167,9 @@ function loadReport(file: string): ScenarioResult[] {
         said: t?.said ?? "",
         reply: t?.reply ?? "",
         toolsUsed: Array.isArray(t?.toolsUsed) ? t.toolsUsed : [],
+        // 观测字段原样透传，由 renderPromptCompositionHtml 自己兼容三态
+        // （缺席=旧报告不展示 / null=本轮没走模型 / 对象=归一化展示）。
+        promptComposition: t?.promptComposition,
         outbound: Array.isArray(t?.outbound)
           ? t.outbound.map((m) => ({
               toName: m?.toName ?? "（未知）",
@@ -311,6 +323,7 @@ function renderTurn(t: TurnRecord, index: number, findings: JudgeFinding[]): str
       ${said}
       ${reply}
       ${outbound}
+      ${renderPromptCompositionHtml(t.promptComposition)}
       ${findingsHtml}
     </div>`;
 }

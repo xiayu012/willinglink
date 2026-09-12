@@ -106,6 +106,10 @@ import {
 } from "../lib/chat/coliving/evals/action-plan";
 import { findUnknownActionPlanFlags } from "../lib/chat/coliving/evals/action-plan-args";
 import {
+  normalizePromptComposition,
+  renderPromptCompositionHtml,
+} from "../lib/chat/coliving/ledger-report";
+import {
   ACTION_PLAN_SAMPLES,
   SIMPLE_GREEN_SAMPLE,
 } from "../lib/chat/coliving/evals/action-plan-samples";
@@ -4533,6 +4537,93 @@ async function main() {
       judgeSrc.split("trackedGatewayCall(").length - 1,
       1,
       "judge.ts 判定调用要过计费台账"
+    );
+  });
+
+  check("提示词组成观测：turn/eval 只记长度与名称，报告安全兼容旧 JSON", () => {
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes("export type PromptComposition = {"),
+      "观测类型必须导出，供评测 runner 复用"
+    );
+    assert(
+      turnSrc.includes("promptComposition: PromptComposition | null;"),
+      "TurnOutcome 必须带可空观测字段（null=本轮没走模型）"
+    );
+    // 四个 TurnOutcome 返回点都要显式给出：三条不调模型的路径显式 null
+    // （不是 0），主生成路径给真实长度/名称。少一个就会出现字段缺失。
+    assert.equal(
+      turnSrc.split("promptComposition: null,").length - 1,
+      3,
+      "三条不走模型的返回路径（未知号码/短路/接管）都要显式 null"
+    );
+    assert(
+      turnSrc.includes("doctrineChars: doctrine.length") &&
+        turnSrc.includes("runtimeChars: runtime.length") &&
+        turnSrc.includes("systemChars: chars") &&
+        turnSrc.includes("moduleIds: loadedModuleIds") &&
+        turnSrc.includes("toolNames: exposedToolNames"),
+      "主生成返回点必须记 doctrine/runtime/system 字符数与模块/工具名，不是正文"
+    );
+    // 只记名字/长度：观测里不得出现运行时正文变量或住户原话变量。
+    assert(
+      !/promptComposition[\s\S]{0,400}(ctx\.text|args\.text|runtimeContext)/.test(
+        turnSrc
+      ),
+      "观测里不得出现运行时正文或住户原话"
+    );
+
+    const evalSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
+    assert(
+      evalSrc.includes("promptComposition: last.promptComposition"),
+      "逐轮记录必须把观测带进报告 JSON"
+    );
+
+    // 报告侧纯函数：三态防御，不 NaN、不为旧报告补 0。
+    assert.equal(
+      normalizePromptComposition(undefined),
+      undefined,
+      "旧报告字段缺席 → 不展示，不补 0"
+    );
+    assert.equal(
+      normalizePromptComposition(null),
+      null,
+      "null = 本轮没走模型，不是 0 字符"
+    );
+    const badComp = normalizePromptComposition({
+      doctrineChars: Number.NaN,
+      runtimeChars: "x",
+      systemChars: -1,
+      moduleIds: [1, 2],
+      toolNames: ["sendReply", "contactPerson"],
+      toolCount: Number.POSITIVE_INFINITY,
+    });
+    if (!badComp) throw new Error("形状认识的对象要归一化");
+    assert.equal(badComp.doctrineChars, null, "NaN → 未知");
+    assert.equal(badComp.runtimeChars, null, "非数字 → 未知");
+    assert.equal(badComp.systemChars, null, "负数 → 未知");
+    assert.equal(badComp.moduleIds, null, "非字符串数组 → 未知");
+    assert.equal(badComp.toolCount, 2, "数量坏值时用工具名数量兜底");
+
+    assert.equal(
+      renderPromptCompositionHtml(undefined),
+      "",
+      "旧报告不渲染观测块"
+    );
+    const rendered = [
+      renderPromptCompositionHtml(null),
+      renderPromptCompositionHtml(badComp),
+      renderPromptCompositionHtml({}),
+    ];
+    for (const html of rendered) {
+      assert(!html.includes("NaN"), "观测块绝不能渲染出 NaN");
+      assert(!html.includes("undefined"), "观测块绝不能渲染出 undefined");
+    }
+    assert(
+      renderPromptCompositionHtml(badComp).includes(
+        "不构成删除或精简 doctrine 的依据"
+      ),
+      "报告必须明说这只是观测，不构成删 doctrine 的依据"
     );
   });
 

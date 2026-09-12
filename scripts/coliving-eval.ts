@@ -28,6 +28,12 @@
  * 预算中途触限也会把已花的钱和已跑完的轮次写进报告，并附上整批共享预算的
  * 停止原因。
  *
+ * 每轮还写一份**提示词组成观测**进逐轮记录与报告：doctrine/runtime/system
+ * 字符数、已加载的 doctrine 模块 id、主生成暴露的工具名与数量。**只记长度和
+ * 名称，不记任何正文**（不含提示词/运行时正文、住户原话、号码、schema）；
+ * 生产路径不落这份数据。报告里明确标注它只是观测，**单独不构成删 doctrine
+ * 的依据**。
+ *
  * `--guidance` 默认不启用；只接受 `lib/chat/coliving/evals/guidance.ts` 里
  * 已登记的 id，未知 id 立即报错。报告会记录本次用的是哪个 guidance id
  * （没启用记 null），基线和实验结果不会混淆。
@@ -71,7 +77,10 @@ import {
   evaluateTurnReplyReviews,
   validateScenario,
 } from "../lib/chat/coliving/evals/schema";
-import type { ReplyReview } from "../lib/chat/coliving/turn";
+import type {
+  PromptComposition,
+  ReplyReview,
+} from "../lib/chat/coliving/turn";
 import {
   isMissingGuidanceArg,
   knownGuidanceIds,
@@ -282,6 +291,12 @@ type TurnRecord = {
   said: string;
   reply: string;
   replyReview: ReplyReview;
+  /**
+   * 这一轮系统提示词的**组成观测**（只记长度/模块 id/工具名，不记正文），
+   * 供报告解释 prompt 由什么构成、避免盲目删 doctrine。`null` = 这一轮
+   * 没走模型（短路/接管/未知号码），不是 0 字符。生产路径不落这份数据。
+   */
+  promptComposition: PromptComposition | null;
   toolsUsed: string[];
   scheduleFacts: string[];
   outbound: Array<{
@@ -508,6 +523,7 @@ async function runScenario(
       said,
       reply: last.reply,
       replyReview: last.replyReview,
+      promptComposition: last.promptComposition,
       toolsUsed: last.toolsUsed,
       scheduleFacts: last.scheduleFacts,
       // 用 allOutbound 而不是 outbound：被审稿拦下的那些也要进文字稿，
