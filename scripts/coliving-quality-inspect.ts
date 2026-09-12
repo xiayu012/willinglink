@@ -39,10 +39,17 @@ import {
   isSimpleAffirmation,
   isUnsolicitedContactClaim,
   uncoveredBlockedPersonIds,
-  scheduleContactTextForAct,
   scheduleInquiryConfirmation,
-  scheduleSlotMatchesSelfStatement,
 } from "../lib/chat/coliving/turn";
+// 严格口径后唯一保留的受约束第三方出站：只测其确定性解析/固定文本/收据，
+// 不涉及任何模型调用，也不触发任何写入。
+import {
+  looksLikePersonalItemReminder,
+  PERSONAL_ITEM_REMINDER_FORM,
+  PERSONAL_ITEM_REMINDER_TEXT,
+  personalItemReminderReceipt,
+  recognizePersonalItemReminder,
+} from "../lib/chat/coliving/personal-item-reminder";
 // 只留离线视图选择器：生产已只生成，quality 脚本不再断言批判器生产接线/选型。
 import { selectCriticRubric } from "../lib/chat/coliving/critic";
 import {
@@ -1144,22 +1151,23 @@ async function main() {
         !turnSrc.includes('trackedGatewayCall("redo"'),
       "turn.ts 不得再有任何打回/最终修正的计费调用"
     );
-    // 生产只剩三处模型调用，且都用同一个默认生成模型：主生成 + 两处确定性兜底
-    // （强制 sendReply / relay 被拦时强制 contactPerson）。
+    // 生产只剩两处模型调用，且都用同一个默认生成模型：主生成 + 一处确定性兜底
+    // （模型没按工具约定走时强制 sendReply）。第三方强制联系（forced-contact）
+    // 已随严格口径撤掉，不再有第二处兜底。
     assert.equal(
       turnSrc.split("generateText(").length - 1,
-      3,
-      "生产只应有主生成与两处强制兜底共三处模型调用"
+      2,
+      "生产只应有主生成与一处强制兜底共两处模型调用"
     );
     assert.equal(
       turnSrc.split("trackedGatewayCall(").length - 1,
-      3,
-      "三处模型调用都必须过计费台账"
+      2,
+      "两处模型调用都必须过计费台账"
     );
     assert.equal(
       turnSrc.split("getLanguageModel(modelId)").length - 1,
-      3,
-      "三处调用都必须用同一个默认生成模型"
+      2,
+      "两处调用都必须用同一个默认生成模型"
     );
     assert(
       turnSrc.includes("const modelId = args.modelId ?? colivingModelId();"),
@@ -1180,8 +1188,56 @@ async function main() {
     assert(turnSrc.includes("function checkFactFidelity("), "代码可证的事实核对必须保留");
     assert(turnSrc.includes("uncoveredBlockedPersonIds(outbound)"), "被拦出站结构事实必须保留");
     assert(turnSrc.includes("claimsContactCompletion(text)"), "确定性假完成判定必须保留");
-    assert(turnSrc.includes("await repo.hasNewInboundSince("), "发送前竞态门禁必须保留");
-    assert(turnSrc.includes("const targetHasNewInbound"), "竞态门禁的跳过路径必须保留");
+    // 严格口径（老板 2026-09-12）之后，普通对话不再有任何第三方出站能力：
+    // 旧 contactPerson 工具的发送前竞态门禁随工具一起撤掉，取而代之的是
+    // 「没真的发出去就不许说已经联系」的真相保护，以及唯一受约束的个人物品提醒。
+    assert(
+      turnSrc.includes("claimsUnsentThirdPartyContact(reply)"),
+      "普通回复的假完成真相保护必须保留"
+    );
+    assert(turnSrc.includes("TRUTHFUL_UNSENT_REPLY"), "假完成必须替换成真话未发送说明");
+    assert(
+      !/contactPerson:\s*tool\(/.test(turnSrc),
+      "生产不得再定义泛用 contactPerson 工具"
+    );
+    assert(
+      !turnSrc.includes("enqueueScheduleContact("),
+      "排班自动补发征询（自由第三方出站）必须删除"
+    );
+    assert(
+      !turnSrc.includes('trackedGatewayCall("forced-contact"'),
+      "forced-contact 强制补联系分支必须删除"
+    );
+
+    // ③c 发送前竞态门禁的最终保护点在「最终投递路由」，不在生成层。
+    // 泛化的 contactPerson 生成路径已删除，所以不再断言 turn.ts 里出现该门禁；
+    // 但只要还有任何一条已授权 queued outbound（含后续新加的受限功能，如个人物品
+    // 提醒）要发出去，就必须在最终投递路由再查一次「生成期间是否已有新入站」——
+    // 这是对全部 queued outbound 的最后一道投递保护，防止用过期上下文发出的消息
+    // 覆盖住户最新一句。谁产生 queued outbound 都不能绕过这两个出口。
+    const twilioDeliverySrc = readFileSync("app/api/twilio/messages/route.ts", "utf8");
+    const wecomDeliverySrc = readFileSync("app/api/wecom/messages/route.ts", "utf8");
+    for (const [label, deliverySrc] of [
+      ["twilio", twilioDeliverySrc],
+      ["wecom", wecomDeliverySrc],
+    ] as const) {
+      assert(
+        deliverySrc.includes("hasNewInboundSince("),
+        `${label} 最终投递路由必须调用 hasNewInboundSince`
+      );
+      assert(
+        deliverySrc.includes("deliverWithGate"),
+        `${label} 最终投递路由必须经 deliverWithGate`
+      );
+      assert(
+        deliverySrc.includes("outcome.turnStartedAt"),
+        `${label} 竞态门禁必须以本 turn 开始时间为基准`
+      );
+      assert(
+        deliverySrc.includes('status: "skipped"'),
+        `${label} 竞态命中必须把 outbound 标记 skipped`
+      );
+    }
 
     // ④ 离线 judge 仍可选、且与生产隔离：turn.ts 不依赖它，还能用环境变量关掉。
     assert(
@@ -1241,27 +1297,23 @@ async function main() {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     assert(!src.includes("function checkScheduleHardRule("));
     assert(!src.includes("const pullBackMinutes"));
-    // 确定性出站硬闸仍在：被拦草稿不能占住本轮重发资格。
-    assert(src.includes("contacted.delete(o.personId)"));
     assert(src.includes("bestSchedulePlans(windowStartMinutes, constraints, 5)"));
     assert(src.includes('position.kind !== "commitment"'));
     assert(src.includes("ctx.openCases.some(isOpenConflictCase)"));
     assert(!src.includes("!topicHitsConflict ||\n      !toolsUsed.includes(\"recordPosition\")"));
-    assert(src.includes("isGeneratedResidentName(target.name)"));
-    assert(src.includes("function checkUnconsultedSelectedSchedule()"));
-    assert(src.includes("const unconsultedSchedule = checkUnconsultedSelectedSchedule()"));
+    // 严格口径（老板 2026-09-12）后，排班的「选定后必联系参与者」自动收口、
+    // 以及旧 contactPerson 路径的「谁已经被联系过」记账集合一并撤掉——
+    // 普通对话没有任何第三方出站，留一个永远为空的 `contacted` 集合，
+    // 读者会误以为代码还具备联系能力。这里反向断言它不再存在。
+    assert(!src.includes("const contacted = new Set"), "旧联系记账集合必须删除");
+    assert(!src.includes("contacted.has("), "不得残留 contacted 集合的读引用");
+    assert(!src.includes("contacted.delete("), "不得残留 contacted 集合的写引用");
+    assert(
+      !src.includes("isGeneratedResidentName"),
+      "旧第三方出站专用称呼助手必须删除"
+    );
+    // 出站结构里保留的确定性放行标志仍在（不再有生成方设置它）。
     assert(src.includes("if (o.scheduleVerified)"));
-  });
-  check("contactPerson skips duplicate open messages across turns", () => {
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
-    assert(repo.includes("export async function findRecentOpenCommunication"));
-    assert(repo.includes("status in ('queued', 'sent')"));
-    assert(repo.includes("responded_at is null"));
-    assert(src.includes("const recentlyCovered = new Map"));
-    assert(src.includes("await repo.findRecentOpenCommunication"));
-    assert(src.includes("这次不重复发送"));
-    assert(src.includes("for (const covered of recentlyCovered.values())"));
   });
   check("sent communications retain provider message ids", () => {
     const twilioRoute = readFileSync("app/api/twilio/messages/route.ts", "utf8");
@@ -1272,51 +1324,6 @@ async function main() {
     assert(cronRoute.includes("externalMessageId: outcome.ok ? outcome.externalMessageId : null"));
   });
 
-  // ── 并发竞态门禁 ────────────────────────────────────────────────────────────
-  check("stale-context gate: repo has hasNewInboundSince, turn.ts calls it before send", () => {
-    const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // repo 必须有这个函数
-    assert(repo.includes("export async function hasNewInboundSince"));
-    assert(repo.includes("m.direction = 'inbound'"));
-    assert(repo.includes("m.sent_at > ${since}"));
-    // turn.ts 必须在 contacted.add 之前调用它
-    assert(src.includes("await repo.hasNewInboundSince("));
-    assert(src.includes("turnStartedAt"));
-    assert(src.includes("stale: true"));
-    // 跳过的消息不能加进 outbound（stale gate 里没有 outbound.push）
-    const staleBlock = src.slice(
-      src.indexOf("const targetHasNewInbound"),
-      src.indexOf("contacted.add(target.personId)")
-    );
-    assert(!staleBlock.includes("outbound.push"), "stale-skipped message must not enter outbound");
-  });
-
-  // ── 自报精确时段不再征询 ────────────────────────────────────────────────────
-  check("saidExactSlot schema exists in pickSchedule people and selfStatedSlotsByWindow is tracked", () => {
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(src.includes("saidExactSlot"));
-    assert(src.includes("selfStatedSlotsByWindow"));
-    // 自报时段立即 return skipped:true，不发任何消息（不用通知语气，也不用征询语气）
-    assert(src.includes("preConsented: true") && src.includes("skipped: true"), "self-stated slot must return preConsented+skipped");
-    // 预同意分支不能调用 queueCommunication——限定在 enqueueScheduleContact 内断言：
-    // 两个 preConsented return（自报精确时段 / 持久已确认同一 slot）都必须先于
-    // 该函数的发送 queueCommunication（不能只靠全文件前缀——短路分支也含
-    // queueCommunication，但那是对住户本人的回复落库，与预同意跳过无关）。
-    const enqueueStartIdx = src.indexOf("async function enqueueScheduleContact(");
-    const preConsentedIdx = src.indexOf("preConsented: true", enqueueStartIdx);
-    const enqueueSendQueueIdx = src.indexOf(
-      "const communicationId = await repo.queueCommunication(",
-      enqueueStartIdx
-    );
-    assert(enqueueStartIdx > 0, "enqueueScheduleContact 必须存在");
-    assert(preConsentedIdx > enqueueStartIdx, "preConsented return 必须在 enqueueScheduleContact 内");
-    assert(enqueueSendQueueIdx > 0, "enqueueScheduleContact 的发送 queueCommunication 必须存在");
-    assert(preConsentedIdx < enqueueSendQueueIdx,
-      `preConsented return（@${preConsentedIdx}）必须先于发送 queueCommunication（@${enqueueSendQueueIdx}）`);
-    // 非自报时段仍走征询
-    assert(src.includes("你愿意吗"), "non-self-stated slot still asks for confirmation");
-  });
   check("isSimpleAffirmation detects yes-words only, not compound messages", () => {
     assert.equal(isSimpleAffirmation("愿意"), true);
     assert.equal(isSimpleAffirmation("行"), true);
@@ -1365,64 +1372,6 @@ async function main() {
     assert.equal(extractSlotFromInquiry(askInquiry.body), "07:15-07:25");
     // 非排班内容不触发（act 对，body 错）
     assert.equal(isScheduleSlotInquiry({ act: "ask", body: "今天吃什么？" }), false);
-  });
-  check("scheduleSlotMatchesSelfStatement: exact match is preconsented, any mismatch is not", () => {
-    // 自报时段与选定时段完全相等 → 视为预先同意，不再发征询。
-    assert.equal(
-      scheduleSlotMatchesSelfStatement({ start: "07:15", end: "07:25" }, { start: "07:15", end: "07:25" }),
-      true,
-      "完全相同应返回 true"
-    );
-    // start 不同（算法把开始时间挪晚了）→ 不命中
-    assert.equal(
-      scheduleSlotMatchesSelfStatement({ start: "07:30", end: "07:40" }, { start: "07:15", end: "07:40" }),
-      false,
-      "start 不同应返回 false"
-    );
-    // end 不同（时长被改了）→ 不命中
-    assert.equal(
-      scheduleSlotMatchesSelfStatement({ start: "07:15", end: "07:25" }, { start: "07:15", end: "07:35" }),
-      false,
-      "end 不同应返回 false"
-    );
-    // 没有自报记录（undefined）→ 不命中
-    assert.equal(
-      scheduleSlotMatchesSelfStatement(undefined, { start: "07:15", end: "07:25" }),
-      false,
-      "没有自报记录应返回 false"
-    );
-  });
-  check("preconsent branch returns before queueCommunication in contactPerson source", () => {
-    // 结构断言：确保 preConsentedForSchedule.add 和 return {preConsented:true, skipped:true}
-    // 出现在 queueCommunication 之前，防止预同意分支悄悄走漏到发送流程。
-    // 限定在 enqueueScheduleContact 内比较——文件前面还有短路分支的
-    // repo.queueCommunication（那是对住户本人的回复落库，与预同意跳过无关）。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const enqueueStartIdx = turnSrc.indexOf("async function enqueueScheduleContact(");
-    const preconsentIdx = turnSrc.indexOf(
-      "preConsentedForSchedule.add(target.personId)",
-      enqueueStartIdx
-    );
-    // Find the preConsented return block within enqueueScheduleContact
-    const returnPreconsentedIdx = turnSrc.indexOf("preConsented: true,", enqueueStartIdx);
-    const queueIdx = turnSrc.indexOf("queueCommunication({", enqueueStartIdx);
-    assert(enqueueStartIdx > 0, "enqueueScheduleContact 必须存在");
-    assert(preconsentIdx > enqueueStartIdx, "preConsentedForSchedule.add 必须存在（enqueueScheduleContact 内）");
-    assert(returnPreconsentedIdx > enqueueStartIdx, "preConsented:true return 必须存在（enqueueScheduleContact 内）");
-    // 预同意的 return 必须在 queueCommunication 之前（在源码里 index 更小）
-    assert(
-      returnPreconsentedIdx < queueIdx,
-      `预同意 return（@${returnPreconsentedIdx}）必须早于 queueCommunication（@${queueIdx}）`
-    );
-  });
-  check("productionContactPerson calls scheduleSlotMatchesSelfStatement (not inline logic)", () => {
-    // Fix 1: 生产 contactPerson 必须调用纯函数，不能复制一份内联判断。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(turnSrc.includes("scheduleSlotMatchesSelfStatement(selfStatedEntry, scheduleSlot)"),
-      "contactPerson 必须调用 scheduleSlotMatchesSelfStatement 而不是内联三条件");
-    // 内联旧写法不应出现（selfStated.start === scheduleSlot.start 直接比较）
-    assert(!turnSrc.includes("selfStatedEntry.start === scheduleSlot.start"),
-      "不应出现内联 start 比较，应改为调用 scheduleSlotMatchesSelfStatement");
   });
   check("simpleScheduleConfirmationText is applied last before appendMessage/queueCommunication", () => {
     // Fix 2: 短回复确认文本必须在最终收口（入库之前）最后覆盖，防止审稿/重写路径把它改长。
@@ -1531,9 +1480,13 @@ async function main() {
     for (const t of ["noteObservation", "recall", "lookupHistory", "findSimilarCases", "checkEnvironment"]) {
       assert(!init.includes(`tools.${t}`), `${t} 不得无条件进入 activeTools 初始集`);
     }
-    for (const t of ["decide", "sendReply", "logEvent", "contactPerson", "remember", "addResident"]) {
+    for (const t of ["decide", "sendReply", "logEvent", "remember", "addResident"]) {
       assert(init.includes(`tools.${t}`), `${t} 必须保留在常驻初始集`);
     }
+    // 严格口径后，泛用 contactPerson 不得再出现在 activeTools 的任何一支。
+    assert(!src.includes("activeTools.contactPerson"), "contactPerson 不得进入 activeTools 条件集");
+    assert(!init.includes("contactPerson"), "contactPerson 不得出现在 activeTools 常驻初始集");
+    assert(!/contactPerson:\s*tool\(/.test(src), "生产不得再定义泛用 contactPerson 工具");
     // 按需暴露的信号必须真实存在并驱动 activeTools 的条件赋值
     assert(src.includes("const environmentSignal ="), "环境信号判定必须存在");
     assert(src.includes("const historySignal ="), "历史/反复信号判定必须存在");
@@ -1552,7 +1505,9 @@ async function main() {
   check("运行时上下文不再预先宣传默认未暴露的查询工具", () => {
     const ctx = readFileSync("lib/chat/coliving/context.ts", "utf8");
     assert(!ctx.includes("你还能查什么"), "查询工具默认不暴露后，上下文不应再宣传它们");
-    assert(ctx.includes("你可以主动联系这屋里的其他人"), "主动联系人的硬事实要保留");
+    // 严格口径后不再有泛用主动联系人；上下文只保留「个人物品提醒」这一种受约束功能。
+    assert(!ctx.includes("你可以主动联系这屋里的其他人"), "撤掉泛用主动联系人后不得再宣传它");
+    assert(ctx.includes("个人物品使用提醒"), "唯一受约束的第三方功能必须在上下文里如实陈述");
   });
   check("stale-skipped contactPerson outbound does not count as contacted in judge trace", () => {
     // 旧回合跳过的消息不能出现在 outbound 里；judge 不会看到"已联系"
@@ -1569,77 +1524,6 @@ async function main() {
     assert.equal(r.pass, true);
     assert.deepEqual(r.findings, []);
   });
-  check("scheduleContactTextForAct: every act returns the inquiry text, never a final notice", () => {
-    // act 分支已回退（Codex Sonnet-4.5 全量回归结论）：act 字段不可靠，
-    // 常还在征询时就填 inform。任何 act 都必须返回「待确认安排」征询正文。
-    const salutation = "老孙，";
-    const slot = { start: "17:30", end: "18:00" };
-    for (const act of ["inform", "remind", "propose", "confirm", "ask"] as const) {
-      const text = scheduleContactTextForAct({ act, salutation, windowLabel: "傍晚厨房灶台时段", scheduleSlot: slot });
-      assert(text.includes("你愿意吗") && text.includes("这不是定案"),
-        `${act} 也应返回征询正文，不得出定案通知：${text}`);
-      assert(text.includes("17:30-18:00"), `${act} 正文应带时段`);
-      assert(!text.includes("就这样定了"), `${act} 正文不得含「就这样定了」：${text}`);
-    }
-  });
-  check("contactPerson builds schedule text via scheduleContactTextForAct (no inline duplicate, no act branch)", () => {
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(src.includes("scheduleContactTextForAct("), "contactPerson 必须调用 scheduleContactTextForAct");
-    // 定案正文分支必须整体不存在（连「就这样定了，有变动随时说。」这句也不能复辟）
-    assert(!src.includes("就这样定了，有变动随时说。"),
-      "scheduleContactTextForAct 不得再含 inform/remind 定案正文分支");
-    const contactCallIdx = src.indexOf("message = scheduleContactTextForAct(");
-    assert(contactCallIdx > 0, "contactPerson 的 message 赋值必须来自 scheduleContactTextForAct");
-    // 内联征询模板只能在纯函数里以 args.scheduleSlot 出现一次；contactPerson 直接拼
-    // 「你用 ${scheduleSlot.start}-…」的旧写法不应再存在。
-    assert(src.indexOf("你用 ${scheduleSlot.start}-${scheduleSlot.end}。这不是定案") === -1,
-      "contactPerson 不应再内联征询模板");
-  });
-  check("selected-schedule auto-funnel deterministically enqueues every still-missing participant", () => {
-    // 治本（Codex 全量回归实测）：选定多人排班后"逐个向漏掉的人征询到位"由代码
-    // 确定性完成，不再靠模型记得逐个 contactPerson——模型单轮里既要 pickSchedule
-    // → chooseSchedule → 逐个 contactPerson → sendReply 经常漏人，打回重写仍漏。
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // 1) 只有一个入队函数定义；contactPerson 排班分支与最终收口都委托它，不复制两份。
-    const enqueueDefs = src.match(/async function enqueueScheduleContact\(/g) ?? [];
-    assert.equal(enqueueDefs.length, 1, "enqueueScheduleContact 只能定义一次（不允许复制两份发送逻辑）");
-    assert(src.includes("return enqueueScheduleContact(name, scheduleWindowLabel, scheduleSlot);"),
-      "contactPerson 排班分支必须委托 enqueueScheduleContact");
-    assert(src.includes("const message = scheduleContactTextForAct({"),
-      "征询正文必须由固定模板 scheduleContactTextForAct 生成（不按模型 act 分支）");
-    // 2) 最终收口循环真实存在：遍历 missingSelectedScheduleParticipants() 返回值，
-    //    逐个按其在选定方案里的 assignment 调 enqueueScheduleContact。
-    const finalOverrideIdx = src.lastIndexOf("最终落锤：简单肯定覆盖");
-    const loopStart = src.indexOf("for (const name of missingSelectedScheduleParticipants())");
-    assert(loopStart > 0, "必须存在遍历 missingSelectedScheduleParticipants 的确定性循环");
-    assert(finalOverrideIdx > 0, "最终落锤注释必须存在");
-    assert(loopStart < finalOverrideIdx,
-      `补发循环（@${loopStart}）必须早于最终落锤收口（@${finalOverrideIdx}）`);
-    const funnelBlock = src.slice(loopStart, finalOverrideIdx);
-    assert(funnelBlock.includes("await enqueueScheduleContact("),
-      "循环必须逐个调 enqueueScheduleContact");
-    assert(funnelBlock.includes("selectedWindowLabel"),
-      "循环必须把选中方案的 window label 传给入队函数");
-    assert(funnelBlock.includes("assignmentSlot"),
-      "循环必须按参与者在选定方案里的 assignment slot 调入队函数");
-    assert(funnelBlock.includes("if (!assignmentSlot) continue"),
-      "名册里没有该名字 assignment 的参与者必须安全跳过");
-    // 3) 收口循环不得自己复制发送逻辑——共用 enqueueScheduleContact 才会走全部门禁。
-    assert(!funnelBlock.includes("queueCommunication({"), "收口循环不得再直接 queueCommunication");
-    assert(!funnelBlock.includes("outbound.push({"), "收口循环不得再直接入 outbound");
-  });
-  check("durable confirmation: repo exposes responded schedule inquiries, turn skips confirmed slots", () => {
-    const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(repo.includes("export async function listScheduleInquiryConfirmations"));
-    assert(repo.includes("c.response_message_id"), "必须 join 回复消息确认 responded 状态");
-    assert(repo.includes("responded_at is not null"));
-    assert(repo.includes("c.act in ('ask', 'propose', 'confirm')"));
-    assert(src.includes("await repo.listScheduleInquiryConfirmations(sender.householdId)"));
-    assert(src.includes("hasDurableConfirmedSlot("), "contactPerson/门禁必须用持久确认判断");
-    assert(src.includes("之前已确认过 ${scheduleSlot.start}-${scheduleSlot.end} 这个时段"), "持久确认的跳过返回必须带明确原因");
-    assert(src.includes("preConsentedForSchedule.add(target.personId)"), "持久确认跳过必须计入 preConsented");
-  });
   check("scheduleInquiryConfirmation parses yes-only responses to real slot inquiries", () => {
     assert.deepEqual(
       scheduleInquiryConfirmation({
@@ -1652,6 +1536,299 @@ async function main() {
     assert.equal(scheduleInquiryConfirmation({ inquiryBody: "你用 17:30-18:00，愿意吗？", responseBody: "愿意，但为什么我最后用？" }), null);
     assert.equal(scheduleInquiryConfirmation({ inquiryBody: "今天吃什么？", responseBody: "愿意" }), null);
     assert.equal(scheduleInquiryConfirmation({ inquiryBody: "你用 17:30-18:00，愿意吗？", responseBody: "不行" }), null);
+  });
+
+  /**
+   * ── 唯一保留的受约束第三方出站：个人物品使用提醒（2026-09-12 严格口径）──
+   *
+   * 泛用 contactPerson 与 outreach / kickoff / cron / enroll 的自由文本出站都已
+   * 撤掉，只剩这一条：识别纯正则、正文写死常量、不过模型。这里只测确定性的
+   * 解析与固定文本，不写库、不调模型、不触发任何投递。
+   */
+  check("个人物品提醒：精确命令识别出唯一收件人（含礼貌前缀变体）", () => {
+    assert.deepEqual(
+      recognizePersonalItemReminder("提醒 阿川：使用我的个人物品前先问我"),
+      { recipientName: "阿川" }
+    );
+    // 允许标点与礼貌前缀的细微变体
+    assert.deepEqual(
+      recognizePersonalItemReminder("麻烦提醒一下 阿川：用我的东西之前先问我。"),
+      { recipientName: "阿川" }
+    );
+    // 宽松线索命中：这是这一族功能的请求（形式不合规时调用方回短指引、绝不外发）
+    assert.equal(
+      looksLikePersonalItemReminder("提醒 阿川：使用我的个人物品前先问我"),
+      true
+    );
+  });
+  check("个人物品提醒：命令体夹带附加内容（头发/费用/规则等）一律不识别", () => {
+    for (const smuggled of [
+      "提醒 阿川：使用我的个人物品前先问我，顺便把地漏的头发清理了",
+      "提醒 阿川：使用我的个人物品前先问我，这个月水费也分摊一下",
+      "提醒 阿川：使用我的个人物品前先问我，以后这是全屋的规矩",
+      "提醒 阿川：使用我的个人物品前先问我，别再用我的洗衣机",
+    ]) {
+      assert.equal(
+        recognizePersonalItemReminder(smuggled),
+        null,
+        `命令体夹带附加内容必须不识别：${smuggled}`
+      );
+    }
+  });
+  check("个人物品提醒：错误对象/格式一律不识别", () => {
+    for (const wrong of [
+      // 对象不是「我的个人物品」：洗衣机 / 深夜安静 / 清理头发
+      "提醒 阿川：用我的洗衣机之前先问我",
+      "提醒 阿川：晚上十一点后不要用洗衣机",
+      "提醒 阿川：把地漏里的头发清理一下",
+      // 格式不对：缺收件人分隔符 / 缺「提醒」前缀 / 收件人为空
+      "提醒阿川使用我的个人物品前先问我",
+      "阿川：使用我的个人物品前先问我",
+      "提醒 ：使用我的个人物品前先问我",
+    ]) {
+      assert.equal(
+        recognizePersonalItemReminder(wrong),
+        null,
+        `错误对象/格式必须不识别：${wrong}`
+      );
+    }
+  });
+  check("个人物品提醒：固定第三方正文不含收件人名字或任何夹带内容", () => {
+    // 收件人文案是写死的常量，不含来源、用户原话、物品名、理由或额外要求。
+    assert.equal(
+      PERSONAL_ITEM_REMINDER_TEXT,
+      "使用室友的个人物品前，请先征得对方同意。"
+    );
+    for (const forbidden of ["阿川", "小禾", "地漏", "头发", "费用", "规则", "提醒"]) {
+      assert(
+        !PERSONAL_ITEM_REMINDER_TEXT.includes(forbidden),
+        `固定第三方正文不得含「${forbidden}」：${PERSONAL_ITEM_REMINDER_TEXT}`
+      );
+    }
+    // 给住户的指引用占位符，不把模板读成"必须提醒某个真实姓名的人"。
+    assert.equal(
+      PERSONAL_ITEM_REMINDER_FORM,
+      "提醒 <室友名字>：使用我的个人物品前先问我"
+    );
+    // 回给发起人的收据是固定真话：只说做成了什么，不复述内部过程。
+    const receipt = personalItemReminderReceipt("阿川");
+    assert(receipt.includes("阿川") && receipt.includes("个人物品") && receipt.includes("先问你"),
+      `收据必须点名收件人并复述固定功能：${receipt}`);
+  });
+  check("个人物品提醒：可回放场景 JSON 结构自洽（无模型确定性路径）", () => {
+    // 这条场景是「具体功能逐项开放」后唯一受约束第三方出站的可回放证据：
+    // 只查结构（谁能收到、正文是不是常量、回执是不是固定真话、有没有额外第三方），
+    // 不跑模型、不写库，也不证明正文读起来自然——那留给人工与语义判定。
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/personal-item-reminder-2026-09-12.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(
+      raw,
+      "personal-item-reminder-2026-09-12.json"
+    );
+    // 两个同屋测试住户：发信人小禾、被提醒人阿川（只有两人，天然排除第三方）。
+    assert.deepEqual(
+      scenario.people?.map((p) => p.name),
+      ["小禾", "阿川"],
+      "场景只应有两个同屋住户"
+    );
+    assert.equal(scenario.turns.length, 1, "只应有一条精确命令");
+    const turn = scenario.turns[0];
+    // 当前人发的这句话必须被确定性识别器认成「提醒阿川」——认不出就走不到无模型路径。
+    assert.deepEqual(
+      recognizePersonalItemReminder(turn.text),
+      { recipientName: "阿川" },
+      `场景命令必须被确定性识别为提醒阿川：${turn.text}`
+    );
+    const expect = scenario.expect ?? {};
+    // 无模型路径：不得要求 contactPerson；命中 personalItemReminder 这条代码路径。
+    assert.deepEqual(
+      expect.mustUseTools,
+      ["personalItemReminder"],
+      "无模型路径必须命中 personalItemReminder"
+    );
+    assert.deepEqual(expect.mustNotUseTools, ["contactPerson"], "不得要求 contactPerson");
+    assert.deepEqual(expect.mustContactNames, ["阿川"], "必须有一条通过审稿的出站发给阿川");
+    assert.deepEqual(expect.mustNotContactNames, ["小禾"], "不得产生发给当前人小禾的第三方出站");
+    // 出站正文必须逐字等于模块常量（用常量构造锚定正则，场景写漂就会红）。
+    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const exactBody = `^${escapeRegExp(PERSONAL_ITEM_REMINDER_TEXT)}$`;
+    assert.deepEqual(
+      expect.outboundMustMatch,
+      [exactBody],
+      "出站正文锚定正则必须逐字来自 PERSONAL_ITEM_REMINDER_TEXT"
+    );
+    assert(new RegExp(exactBody).test(PERSONAL_ITEM_REMINDER_TEXT));
+    // 回给当前人的收据是固定真话（每条 replyMustMatch 都要命中 personalItemReminderReceipt）。
+    const receipt = personalItemReminderReceipt("阿川");
+    assert((expect.replyMustMatch ?? []).length > 0, "必须断言回给当前人的收据");
+    for (const p of expect.replyMustMatch ?? []) {
+      assert(new RegExp(p).test(receipt), `收据断言必须命中固定收据：${p} → ${receipt}`);
+    }
+    // 无模型路径的正确结果：一条发给阿川的固定正文出站 + 一句固定收据 → 场景 expect 全过。
+    assert.deepEqual(
+      evaluateTurnExpectation(expect, {
+        toolsUsed: ["personalItemReminder"],
+        reply: receipt,
+        outbound: [{ toName: "阿川", text: PERSONAL_ITEM_REMINDER_TEXT, blocked: false }],
+      }),
+      [],
+      "确定性路径的实际结果必须通过场景 expect"
+    );
+    // 反向：把出站发给当前人小禾（越权/额外第三方）、或正文被夹带改动 → 必须红灯。
+    assert(
+      evaluateTurnExpectation(expect, {
+        toolsUsed: ["personalItemReminder"],
+        reply: receipt,
+        outbound: [{ toName: "小禾", text: PERSONAL_ITEM_REMINDER_TEXT, blocked: false }],
+      }).length > 0,
+      "出站发给当前人小禾必须判失败"
+    );
+    assert(
+      evaluateTurnExpectation(expect, {
+        toolsUsed: ["personalItemReminder"],
+        reply: receipt,
+        outbound: [
+          { toName: "阿川", text: `${PERSONAL_ITEM_REMINDER_TEXT}顺便把地漏头发清了`, blocked: false },
+        ],
+      }).length > 0,
+      "出站正文被夹带、不再逐字等于常量必须判失败"
+    );
+  });
+  check("严格口径源码闸：activeTools 无 contactPerson、无 forced-contact 调用、outreach 不生成不入队", () => {
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    // 剥掉注释后再查，只认真正的运行调用/接线，注释里解释历史不算残留。
+    const turnCode = turnSrc
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    assert(!turnCode.includes("contactPerson"), "生产代码不得再出现泛用 contactPerson（注释除外）");
+    assert(!turnCode.includes("forced-contact"), "不得残留任何 forced-contact 运行调用");
+    assert(!/contactPerson:\s*tool\(/.test(turnSrc), "生产不得再定义泛用 contactPerson 工具");
+    assert(!turnSrc.includes("activeTools.contactPerson"), "activeTools 不得再挂 contactPerson");
+
+    const outreachSrc = readFileSync("lib/chat/coliving/outreach.ts", "utf8");
+    const outreachCode = outreachSrc
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    assert(!outreachCode.includes("generateText"), "outreach.ts 不得再有生成调用");
+    assert(!outreachCode.includes("queueCommunication"), "outreach.ts 不得再入队任何消息");
+  });
+  check("corpus-033 严格口径：只有合规个人物品提醒出站，其余一律零第三方", () => {
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/corpus-033-personal-item-reminder-2026-09-12.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(raw, "corpus-033.json");
+    assert.equal(scenario.turns.length, 4, "corpus-033 应有四轮：合规/夹带/深夜洗衣/浴室头发");
+
+    // 第 1 轮：合规命令 → 唯一固定出站 + 真话收据。
+    const t1 = scenario.turns[0];
+    assert.deepEqual(t1.expect?.mustUseTools, ["personalItemReminder"]);
+    assert.deepEqual(t1.expect?.mustContactNames, ["阿川"]);
+    assert.deepEqual(t1.expect?.mustNotContactNames, ["小禾"]);
+    assert.equal(
+      recognizePersonalItemReminder(t1.text)?.recipientName,
+      "阿川",
+      "第 1 轮必须能被确定性识别为发给阿川的个人物品提醒"
+    );
+    // 场景里的出站正向哨兵必须真的命中写死的固定正文——把离线断言和常量绑在一起，
+    // 常量一改，这条哨兵立刻失效报警，不会静静漂移。
+    for (const pattern of t1.expect?.outboundMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(PERSONAL_ITEM_REMINDER_TEXT),
+        `第 1 轮正向哨兵「${pattern}」必须命中固定正文：${PERSONAL_ITEM_REMINDER_TEXT}`
+      );
+    }
+    // 反向哨兵（不得含收件人姓名或夹带内容）必须被固定正文通过。
+    for (const pattern of t1.expect?.outboundMustNotMatch ?? []) {
+      assert(
+        !new RegExp(pattern).test(PERSONAL_ITEM_REMINDER_TEXT),
+        `固定正文不得命中第 1 轮反向哨兵「${pattern}」`
+      );
+    }
+    // 回给发起人的收据必须点名收件人并复述固定功能。
+    const receipt = personalItemReminderReceipt("阿川");
+    for (const pattern of t1.expect?.replyMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(receipt),
+        `第 1 轮收据必须命中「${pattern}」：${receipt}`
+      );
+    }
+
+    // 第 2 轮：命令体夹带 → 识别整体失败（走短指引），零第三方出站。
+    const t2 = scenario.turns[1];
+    assert(
+      looksLikePersonalItemReminder(t2.text),
+      "第 2 轮带着「提醒」与「我的个人物品」，仍属这一族请求"
+    );
+    assert.equal(
+      recognizePersonalItemReminder(t2.text),
+      null,
+      "夹带头发/水费/全屋规矩的命令体必须整体不识别"
+    );
+    assert.deepEqual(t2.expect?.mustContactNames, undefined);
+    assert.deepEqual(t2.expect?.mustNotContactNames, ["阿川", "小禾"]);
+    assert(
+      (t2.expect?.mustNotUseTools ?? []).includes("personalItemReminder") &&
+        (t2.expect?.mustNotUseTools ?? []).includes("contactPerson"),
+      "夹带轮不得走任何第三方出站工具"
+    );
+    // 指引句里嵌的是带占位符的固定句式，因此必然命中「个人物品」正向哨兵。
+    assert(PERSONAL_ITEM_REMINDER_FORM.includes("个人物品"));
+
+    // 第 3、4 轮：未开放的深夜洗衣 / 浴室头发 → 落回普通对话，零第三方出站。
+    for (const [i, turn] of scenario.turns.slice(2).entries()) {
+      assert.equal(
+        looksLikePersonalItemReminder(turn.text),
+        false,
+        `第${i + 3}轮不是个人物品提醒，必须落回普通对话`
+      );
+      assert.deepEqual(
+        turn.expect?.mustNotContactNames,
+        ["阿川", "小禾"],
+        `第${i + 3}轮不得产生任何第三方出站`
+      );
+      assert(
+        (turn.expect?.mustNotUseTools ?? []).includes("contactPerson") &&
+          (turn.expect?.mustNotUseTools ?? []).includes("personalItemReminder"),
+        `第${i + 3}轮不得调用任何第三方出站工具`
+      );
+    }
+
+    // 判法自检：固定正文作为唯一出站时，第 1 轮应判过；同一条哨兵也能抓住
+    // "把收件人姓名写进第三方正文" 这种泄漏。
+    assert.deepEqual(
+      evaluateTurnExpectation(t1.expect, {
+        toolsUsed: ["personalItemReminder"],
+        reply: receipt,
+        outbound: [{ toName: "阿川", text: PERSONAL_ITEM_REMINDER_TEXT }],
+      }),
+      [],
+      "合规个人物品提醒出站不该被判失败"
+    );
+    assert(
+      evaluateTurnExpectation(t1.expect, {
+        toolsUsed: ["personalItemReminder"],
+        reply: receipt,
+        outbound: [
+          { toName: "阿川", text: `${PERSONAL_ITEM_REMINDER_TEXT}阿川` },
+        ],
+      }).length > 0,
+      "第三方正文里出现收件人姓名必须被哨兵抓住"
+    );
+    assert(
+      evaluateTurnExpectation(scenario.turns[2].expect, {
+        toolsUsed: [],
+        reply: "好的。",
+        outbound: [{ toName: "阿川", text: "已经跟他说了。" }],
+      }).length > 0,
+      "未开放功能若产生任何第三方出站，必须判失败"
+    );
   });
 
   // ── 文本链路统一 V4.1 Flash（2026-09-11 老板决定）─────────────────────────
@@ -1799,13 +1976,12 @@ async function main() {
       "doctrine 段必须带 prompt cache 断点"
     );
     assert(!noGuidance.some((m) => m.content === "G"), "无 guidance 时数组里没有实验附件");
-    // 三处生成器调用共用 turn.ts 里的同一个构造器（`({` 只命中调用点，不含定义行）：
-    // 主生成、强制投递（forced-sendReply）、强制补发（forced-contact）；
-    // 不再各复制条件展开。批判器不走这里。
+    // 两处生成器调用共用 turn.ts 里的同一个构造器（`({` 只命中调用点，不含定义行）：
+    // 主生成、强制投递（forced-sendReply）；不再各复制条件展开。批判器不走这里。
     assert.equal(
       turnGuidanceSrc.split("buildGeneratorSystemMessages({").length - 1,
-      3,
-      "三处生成器 system 都必须走共享构造器"
+      2,
+      "两处生成器 system 都必须走共享构造器"
     );
     assert(
       !turnGuidanceSrc.includes("content: args.guidance },"),
@@ -4406,10 +4582,10 @@ async function main() {
       mainIdx >= 0 && capIdx > mainIdx && capIdx < forcedReplyIdx,
       "cap 必须在主生成的 options 里（且在兜底生成之前）"
     );
-    // 三处生成器调用数量不变（本实验没新增调用路径）。
-    assert.equal(turnSrc.split("trackedGatewayCall(").length - 1, 3);
+    // 两处生成器调用数量不变（本实验没新增调用路径）。
+    assert.equal(turnSrc.split("trackedGatewayCall(").length - 1, 2);
   });
-  check("Gateway 自动缓存：主/forced-sendReply/forced-contact 共用同一请求级 prompt-prefix 缓存策略", () => {
+  check("Gateway 自动缓存：主/forced-sendReply 共用同一请求级 prompt-prefix 缓存策略", () => {
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     // 共享常量本身就是文档化的请求级 gateway caching='auto'，带类型注解。
     assert(
@@ -4418,19 +4594,18 @@ async function main() {
       ),
       "共享常量必须是请求级 providerOptions.gateway.caching='auto'"
     );
-    // 恰好三处生成器各用一次，不许顺手加到别的 generateText / embedding 调用上。
+    // 恰好两处生成器各用一次，不许顺手加到别的 generateText / embedding 调用上。
     const refs = [
       ...turnSrc.matchAll(/providerOptions: GENERATOR_GATEWAY_CACHE_OPTIONS/g),
     ].map((m) => m.index ?? -1);
-    assert.equal(refs.length, 3, "三处生成器都要启用同一策略，不多不少");
+    assert.equal(refs.length, 2, "两处生成器都要启用同一策略，不多不少");
     // 每一处都必须落在对应 stage 的 generateText options 区间里
     // （stage 锚点起点 → 下一个 stage 锚点起点）。
     const anchors = [
       'trackedGatewayCall("main"',
       'trackedGatewayCall("forced-sendReply"',
-      'trackedGatewayCall("forced-contact"',
     ].map((s) => turnSrc.indexOf(s));
-    assert(!anchors.includes(-1), "三个 stage 锚点都要能找到");
+    assert(!anchors.includes(-1), "两个 stage 锚点都要能找到");
     for (let i = 0; i < anchors.length; i++) {
       const start = anchors[i];
       const end = i + 1 < anchors.length ? anchors[i + 1] : turnSrc.length;
@@ -4518,13 +4693,13 @@ async function main() {
     );
     // 不改生产：只有 turn/critic/judge 的 generateText 走包装，生产无台账即透传。
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // 生产只剩三处生成器 Gateway 调用，都要过计费台账：
-    // 主生成（"main"），以及模型没按工具约定走时被拦下的两处确定性兜底
-    // ——强制 sendReply（"forced-sendReply"）与强制 contactPerson（"forced-contact"）。
+    // 生产只剩两处生成器 Gateway 调用，都要过计费台账：
+    // 主生成（"main"），以及模型没按工具约定走时被拦下的一处确定性兜底
+    // ——强制 sendReply（"forced-sendReply"）。
     assert.equal(
       turnSrc.split("trackedGatewayCall(").length - 1,
-      3,
-      "turn.ts 三处生成器 Gateway 调用（main / forced-sendReply / forced-contact）都要过计费台账"
+      2,
+      "turn.ts 两处生成器 Gateway 调用（main / forced-sendReply）都要过计费台账"
     );
     const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
     assert.equal(
@@ -4550,12 +4725,13 @@ async function main() {
       turnSrc.includes("promptComposition: PromptComposition | null;"),
       "TurnOutcome 必须带可空观测字段（null=本轮没走模型）"
     );
-    // 四个 TurnOutcome 返回点都要显式给出：三条不调模型的路径显式 null
-    // （不是 0），主生成路径给真实长度/名称。少一个就会出现字段缺失。
+    // 五个 TurnOutcome 返回点都要显式给出：四条不调模型的路径显式 null
+    // （未知号码/接管/短路/已开放的个人物品使用提醒程序化早返回，不是 0），
+    // 主生成路径给真实长度/名称。少一个就会出现字段缺失。
     assert.equal(
       turnSrc.split("promptComposition: null,").length - 1,
-      3,
-      "三条不走模型的返回路径（未知号码/短路/接管）都要显式 null"
+      4,
+      "四条不走模型的返回路径（未知号码/接管/短路/已开放的个人物品使用提醒程序化早返回）都要显式 null"
     );
     assert(
       turnSrc.includes("doctrineChars: doctrine.length") &&

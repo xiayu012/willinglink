@@ -8,8 +8,9 @@ import { enrollLandlord, markCommunication } from "@/lib/chat/coliving/repo";
  *
  * 用户先认识房东、先拿到房东的手机号，写进本地那个 csv；
  * `pnpm coliving:watch` 监听文件保存，把号码 POST 到这里。
- * 这里建房子 + 建房东，然后**主动给房东发第一条消息**
- * （内容由准则决定，不是这里写的 —— 见 CLAUDE.md「不要替大脑写话术」）。
+ * 这里建房子 + 建房东。**不再主动发第一条消息**——严格口径（2026-09-12）
+ * 收回了自由文本的第三方出站，`kickoffLandlord` 现在返回空，这条路由里
+ * 的投递循环因此空转（见 outreach.ts 开头）。房东有事自己来问。
  *
  * 其余住户的号码由 AI 在跟房东的对话里问出来，用 addResident 加进去。
  * **没有加入码、没有表格、没有注册。**
@@ -55,7 +56,9 @@ export async function POST(request: Request) {
       });
       results.push({ phone, created: r.created });
 
-      // 新建的才打招呼；已经在库里的不要重复骚扰
+      // 新建的才走开张流程；已经在库里的不要重复处理。
+      // kickoffLandlord 现在返回空，这个循环不会投递任何东西——保留结构，
+      // 是为了让「重新开放主动发起」时改动只落在 outreach.ts 一个文件里。
       if (r.created) {
         after(async () => {
           const messages = await kickoffLandlord({

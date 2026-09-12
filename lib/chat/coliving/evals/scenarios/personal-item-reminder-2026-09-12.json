@@ -1,0 +1,27 @@
+{
+  "id": "personal-item-reminder-2026-09-12",
+  "source": "严格口径（2026-09-12 老板拍板「具体功能逐项开放」）后唯一保留的受约束第三方出站：个人物品使用提醒。本场景回放的是这条**不调用任何模型**的确定性路径——当前人（小禾）精确发送固定句式『提醒 阿川：使用我的个人物品前先问我』，由 lib/chat/coliving/personal-item-reminder.ts 纯正则识别 + 名册校验后，写死一条发给阿川的第三方出站，并回小禾一句真话收据。机械断言边界（全部只查确定性事实，不证明自然度）：确有且仅有发给阿川的一条通过审稿的出站；出站正文逐字等于模块常量、不得含收件人之外的任何夹带；回给当前人小禾的 reply 必须是固定收据；不得产生发给小禾的第三方出站（本题只有两名住户，覆盖『无额外第三方』）；本路径不调用 contactPerson（也不调用任何模型工具），必须命中 personalItemReminder 这条代码路径。已预置两人确认姓名，隔离姓名确认变量。",
+  "household": { "label": "评测-个人物品提醒（确定性无模型路径）" },
+  "people": [
+    { "phone": "+15550400001", "name": "小禾", "role": "tenant" },
+    { "phone": "+15550400002", "name": "阿川", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["小禾", "阿川"]
+  },
+  "turns": [
+    {
+      "from": "+15550400001",
+      "text": "提醒 阿川：使用我的个人物品前先问我"
+    }
+  ],
+  "expect": {
+    "minAcceptedOutbound": 1,
+    "mustUseTools": ["personalItemReminder"],
+    "mustNotUseTools": ["contactPerson"],
+    "mustContactNames": ["阿川"],
+    "mustNotContactNames": ["小禾"],
+    "outboundMustMatch": ["^使用室友的个人物品前，请先征得对方同意。$"],
+    "replyMustMatch": ["已经提醒阿川", "先问你"]
+  }
+}

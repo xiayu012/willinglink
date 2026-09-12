@@ -1,27 +1,33 @@
 import "server-only";
 
-import { assembleSystemPrompt } from "@/lib/ai/brains";
-import { generateText } from "ai";
-import { getLanguageModel } from "@/lib/ai/providers";
-import { buildContext } from "./context";
-import { assertCanWrite } from "./guard";
-import { colivingModelId } from "./model";
-import * as repo from "./repo";
-
 /**
- * 主动发起。**这是「管理员」和「客服」的分界线**——
- * 客服等人来问，管理员自己知道该回头看什么。
+ * 主动发起 —— **已按老板 2026-09-12「严格口径」整体停用。**
  *
- * 三条铁律（来自轻管理十条，违反就变成骚扰）：
- *   · 可以不回，不产生任何后果。**绝不追问、绝不设期限。**
- *   · 主动关怀可以关掉（person.proactive_ok）。不能关的关心是骚扰。
- *   · 频率有硬上限：同一个人两天内不主动找第二次，同一件事最多回访三次。
+ * 这一整条链路原本是「管理员」和「客服」的分界线：cron 自己回头看有没有
+ * 该回访的事、该问全的规则、该接触的新人，然后**由模型自由写一条短信**
+ * 发给某个住户。
  *
- * 每一条主动消息仍然走 Decision → Communication，跟被动回复同一条链路，
- * 这样以后能一起复盘「有没有过度介入」。
+ * 严格口径要求：**立刻收回所有自由文本的第三方出站能力**，只保留
+ * `personal-item-reminder.ts` 那一个程序化受约束的功能。主动发起写的
+ * 正是自由文本（`compose()` 里一次 `generateText`，措辞全交给大脑），
+ * 属于被收回的那一类，因此这里不再生成任何文本、不再入队任何消息。
+ *
+ * 三条不可放宽的性质：
+ *
+ * 1. **不调模型。** 本模块不 import AI SDK —— 不是「生成了但不发」，
+ *    而是根本不生成。留着生成调用本身就是一条可被重新打开的自由文本
+ *    出站路径。
+ * 2. **不留待发消息。** 所有入口返回空结果，调用方（cron / enroll 路由）
+ *    的投递循环自然空转，不会碰 Twilio / 企业微信 —— 那是已授权排队消息
+ *    的投递路由，本次不改。
+ * 3. **保留签名。** `kickoffLandlord` / `runOutreachForHousehold` /
+ *    `runOutreach` 与返回类型原样保留，路由不改；要走回来必须显式改这个
+ *    文件并重新过一遍「谁允许往别的住户发自由文本」这个决定。
+ *
+ * 注意：`repo` 里的 `canReachProactively` / `markOutreach` /
+ * `startOutreachRun` / `finishOutreachRun` 暂时没有调用方。**保留勿删**——
+ * 它们是回退路径的一部分，重新开放主动发起时要接着用（见 AGENT_LOG）。
  */
-
-const OUTREACH_MODEL = colivingModelId;
 
 export type OutreachMessage = {
   to: string;
@@ -36,351 +42,37 @@ export type OutreachResult = {
   messages: OutreachMessage[];
 };
 
-/** 让模型按一个具体目的写一条短信。共用同一份准则，语气才一致。 */
-async function compose(args: {
-  householdId: string;
-  person: repo.Member;
-  purpose: string;
-  brief: string;
-}): Promise<string> {
-  // 这个 sender 只是为了拼上下文，不代表真有人在说话。
-  // isTest 在这里没有意义——真正的闸门在 send() 里，那才是会写库的地方。
-  const sender: repo.Sender = {
-    personId: args.person.personId,
-    name: args.person.name,
-    role: args.person.role,
-    householdId: args.householdId,
-    householdLabel: "",
-    dwellingId: "",
-    isTest: false,
-  };
-  const ctx = await buildContext(sender);
-  const { doctrine, runtime } = assembleSystemPrompt({
-    brainId: "coliving",
-    routeOn: args.brief,
-    runtimeContext: ctx.text,
-  });
-
-  const result = await generateText({
-    model: getLanguageModel(OUTREACH_MODEL()),
-    system: [
-      {
-        role: "system" as const,
-        content: doctrine,
-        providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
-      },
-      { role: "system" as const, content: runtime },
-    ],
-    messages: [
-      {
-        role: "user" as const,
-        content:
-          `【这不是住户发来的消息，是你自己要主动发一条短信】\n` +
-          `收件人：${args.person.name}\n` +
-          `目的：${args.purpose}\n` +
-          `背景：${args.brief}\n\n` +
-          `只输出要发出去的短信正文，不要解释、不要加引号。\n` +
-          `记住：他可以不回，不回没有任何后果——所以不要写「请回复」「麻烦确认一下」，` +
-          `也不要写期限。一条消息只说一件事。`,
-      },
-    ],
-  });
-  return result.text.trim();
-}
-
-async function send(args: {
-  householdId: string;
-  person: repo.Member;
-  purpose: string;
-  brief: string;
-  caseId?: string | null;
-  decisionKind: string;
-  rationale: string;
-  out: OutreachMessage[];
-}): Promise<boolean> {
-  if (!args.person.address) {
-    return false;
-  }
-  // 本地脚本不许往真人住的房子里发东西（见 guard.ts 那次事故）
-  assertCanWrite({
-    isTestHousehold: await repo.isTestHousehold(args.householdId),
-    what: "主动发起",
-  });
-  if (!(await repo.canReachProactively(args.person.personId))) {
-    return false;
-  }
-  // 批量作业里，一个人写不出来不该让整轮 cron 崩掉
-  let text: string;
-  try {
-    text = await compose({
-      householdId: args.householdId,
-      person: args.person,
-      purpose: args.purpose,
-      brief: args.brief,
-    });
-  } catch (error) {
-    console.log(
-      "[outreach] 生成失败，跳过这一条：",
-      error instanceof Error ? error.message : String(error)
-    );
-    return false;
-  }
-  if (!text) {
-    return false;
-  }
-  const decisionId = await repo.recordDecision({
-    householdId: args.householdId,
-    caseId: args.caseId ?? null,
-    kind: args.decisionKind,
-    targetPersonIds: [args.person.personId],
-    intent: args.purpose,
-    rationale: args.rationale,
-    modelId: OUTREACH_MODEL(),
-  });
-  const communicationId = await repo.queueCommunication({
-    householdId: args.householdId,
-    decisionId,
-    caseId: args.caseId ?? null,
-    toPersonId: args.person.personId,
-    channel: "sms",
-    purpose: args.purpose,
-    body: text,
-  });
-  const conversationId = await repo.getOrCreateConversation({
-    personId: args.person.personId,
-    householdId: args.householdId,
-    channel: "sms",
-  });
-  await repo.appendMessage({
-    conversationId,
-    personId: args.person.personId,
-    direction: "outbound",
-    channel: "sms",
-    body: text,
-    communicationId,
-  });
-  await repo.markOutreach(args.person.personId);
-  args.out.push({
-    to: args.person.address,
-    personId: args.person.personId,
-    text,
-    communicationId,
-  });
-  return true;
-}
-
 /**
- * 开张第一条：房东刚进库，主动联系他。
+ * 开张第一条：原本是房东刚进库时主动联系他、拿到住户号码。
  *
- * **这条消息的措辞完全由准则决定**（tenancy.md〈开张〉），这里只给事实和目标：
- * 他是谁、系统还不知道什么、这一轮要拿到什么。
- * 见 CLAUDE.md「不要替大脑写话术」——出过事，别再犯。
+ * 现在**不发**：那是自由文本第三方出站。房东入库仍然建房子、建人，
+ * 只是不再主动开口——他知道房子的事时自己来问，走普通对话链路。
  */
-export async function kickoffLandlord(args: {
+export async function kickoffLandlord(_args: {
   householdId: string;
   personId: string;
 }): Promise<OutreachMessage[]> {
-  const members = await repo.getMembers(args.householdId);
-  const who = members.find((m) => m.personId === args.personId);
-  if (!who) {
-    return [];
-  }
-  const messages: OutreachMessage[] = [];
-  const runId = await repo.startOutreachRun({
-    householdId: args.householdId,
-    job: "kickoff",
-  });
-  const ok = await send({
-    householdId: args.householdId,
-    person: who,
-    purpose: "开张：第一次联系房东，拿到住户号码",
-    brief:
-      "他是这栋房子的业主，刚被录入系统，之前从没收到过你的消息。" +
-      "**这栋房子目前只有他一个人在库里**，其他住户你一个都联系不上，" +
-      "在拿到号码之前你做不了任何协调工作。" +
-      "这一轮的目标：拿到住在这里的其他人的手机号。",
-    decisionKind: "contact_one",
-    rationale: "房东刚入库，系统里还没有任何住户，必须先拿到号码才能开始工作",
-    out: messages,
-  });
-  await repo.finishOutreachRun({
-    runId,
-    considered: 1,
-    acted: ok ? 1 : 0,
-  });
-  return messages;
+  void _args;
+  return [];
 }
 
+/**
+ * 原本跑四类主动作业：回访冷掉的事 / 问全共同规则 / 接触新住户 / 到期提醒。
+ *
+ * 现在**全部停用**，一栋房子都不产生消息。保留函数与返回结构，路由照旧。
+ */
 export async function runOutreachForHousehold(
   householdId: string,
   label: string
 ): Promise<OutreachResult> {
-  const members = await repo.getMembers(householdId);
-  const residents = members.filter((m) => m.resides);
-  const messages: OutreachMessage[] = [];
-  const jobs: OutreachResult["jobs"] = [];
-
-  // ── 1. 冷掉的事要回访 ──────────────────────────────────────────────
-  {
-    const runId = await repo.startOutreachRun({ householdId, job: "case_followup" });
-    const stale = await repo.casesNeedingFollowup({ householdId });
-    let acted = 0;
-    for (const c of stale) {
-      // 回访谁：报过这件事的人。没有就跳过，不要群发
-      const [reporter] = await repo.lookupEvents({
-        householdId,
-        kind: c.kind,
-        limit: 1,
-      });
-      const who = residents.find((m) => m.name === reporter?.reportedBy);
-      if (!who) {
-        continue;
-      }
-      const ok = await send({
-        householdId,
-        person: who,
-        purpose: "回访：之前那件事后来怎么样了",
-        brief:
-          `${c.lastActivityAt.toISOString().slice(0, 10)} 起没有新进展的一件事：${c.title}（${c.kind}）。` +
-          `目的：了解现在的情况有没有变化。`,
-        caseId: c.id,
-        decisionKind: "observe",
-        rationale: `Case 已 ${Math.round((Date.now() - c.lastActivityAt.getTime()) / 86400000)} 天无动静，按流程回访一次`,
-        out: messages,
-      });
-      if (ok) {
-        await repo.markFollowedUp(c.id);
-        acted++;
-      }
-    }
-    await repo.finishOutreachRun({ runId, considered: stale.length, acted });
-    jobs.push({ job: "case_followup", considered: stale.length, acted });
-  }
-
-  // ── 2. 共同规则还没问全 —— 去问剩下的人 ────────────────────────────
-  {
-    const runId = await repo.startOutreachRun({ householdId, job: "rule_consult" });
-    const pending = await repo.rulesNeedingConsult(householdId);
-    let acted = 0;
-    let considered = 0;
-    for (const rule of pending) {
-      const asked = new Set([...rule.consulted, ...rule.agreedBy, ...rule.objected]);
-      const todo = residents.filter((m) => !asked.has(m.personId));
-      considered += todo.length;
-      if (todo.length === 0) {
-        // 所有住在这里的人都表过态了 —— 这条规则才算真正成立
-        await repo.closeConsultation(rule.id);
-        continue;
-      }
-      // 一次只问一个人，不要同一轮把全屋都轰一遍
-      const who = todo[0];
-      const ok = await send({
-        householdId,
-        person: who,
-        purpose: "征询他对一条共同规则的意见",
-        brief:
-          `这栋房子现在按这条在跑：「${rule.statement}」。\n` +
-          `**这是默认方案，不是定论**——住在这里的人一起说了算，他有一票。\n` +
-          `目的：拿到他对这条规则的态度。不回就照现在这样跑。`,
-        decisionKind: "propose_rule",
-        rationale: `规则 ${rule.kind} 尚未征询 ${who.name}，共同生活的规则要问过每个住的人`,
-        out: messages,
-      });
-      if (ok) {
-        await repo.recordConsultation({
-          ruleId: rule.id,
-          personId: who.personId,
-          stance: "asked",
-        });
-        acted++;
-      }
-    }
-    await repo.finishOutreachRun({ runId, considered, acted });
-    jobs.push({ job: "rule_consult", considered, acted });
-  }
-
-  // ── 3. 刚录入系统的人 —— 注意：是我们刚认识他，不是他刚搬来 ──────────
-  {
-    const runId = await repo.startOutreachRun({ householdId, job: "onboarding" });
-    const fresh = await repo.recentlyAdded(householdId);
-    let acted = 0;
-    for (const who of fresh) {
-      const ok = await send({
-        householdId,
-        person: who,
-        purpose: "刚拿到他的联系方式，第一次接触",
-        brief:
-          "他刚被录入系统，之前没跟你说过话。" +
-          "**你不知道他住了多久**——可能昨天搬来，也可能住了三年。" +
-          (who.movedInAt
-            ? `已知入住时间：${who.movedInAt.toISOString().slice(0, 10)}。`
-            : "入住时间未知。") +
-          (who.notes.length
-            ? `关于他已经知道的：${who.notes.join("；")}`
-            : "关于他还什么都不知道。"),
-        decisionKind: "observe",
-        rationale: "刚录入系统，第一次主动接触",
-        out: messages,
-      });
-      if (ok) {
-        acted++;
-      }
-    }
-    await repo.finishOutreachRun({ runId, considered: fresh.length, acted });
-    jobs.push({ job: "onboarding", considered: fresh.length, acted });
-  }
-
-  // ── 4. 到期的提醒 —— scheduleReminder 存的、时间到了要主动开口的事 ─────
-  {
-    const runId = await repo.startOutreachRun({ householdId, job: "obligation_due" });
-    const due = await repo.dueObligations(householdId);
-    let acted = 0;
-    for (const o of due) {
-      // 有指定人就找他，没指定就找房东（这件事是整栋房子的，房东是默认联系人，
-      // 跟"房东是权威"无关——只是找不到更具体的人时，总要有个收件人）
-      const who = o.personId
-        ? residents.find((m) => m.personId === o.personId)
-        : residents.find((m) => m.role === "landlord");
-      if (!who) {
-        continue;
-      }
-      const ok = await send({
-        householdId,
-        person: who,
-        purpose: "到了之前约好要主动提醒的时间点",
-        brief:
-          `之前记下的一件事，到了该开口的时间：${o.description}。` +
-          `目的：按这件事本来的意图，现在主动联系他。`,
-        decisionKind: "observe",
-        rationale: `obligation ${o.id} 到期（${o.dueAt?.toISOString().slice(0, 10) ?? "未知"}）`,
-        out: messages,
-      });
-      if (ok) {
-        await repo.markObligationDone(o.id);
-        acted++;
-      }
-    }
-    await repo.finishOutreachRun({ runId, considered: due.length, acted });
-    jobs.push({ job: "obligation_due", considered: due.length, acted });
-  }
-
-  return { household: label, jobs, messages };
+  void householdId;
+  return { household: label, jobs: [], messages: [] };
 }
 
+/**
+ * 原本遍历所有房子跑主动发起。现在**一栋都不跑**，直接返回空数组——
+ * 连房子都不查，确保没有任何一条自由文本出站路径残留。
+ */
 export async function runOutreach(): Promise<OutreachResult[]> {
-  const households = await repo.listHouseholds();
-  const out: OutreachResult[] = [];
-  for (const h of households) {
-    // 一栋房子出问题不该拖垮其余的
-    try {
-      out.push(await runOutreachForHousehold(h.id, h.label));
-    } catch (error) {
-      console.log(
-        `[outreach] ${h.label} 这一轮失败：`,
-        error instanceof Error ? error.message : String(error)
-      );
-      out.push({ household: h.label, jobs: [], messages: [] });
-    }
-  }
-  return out;
+  return [];
 }

@@ -2,14 +2,15 @@ import { runOutreach } from "@/lib/chat/coliving/outreach";
 import { markCommunication, sendSmsOrSkip } from "@/lib/chat/coliving/deliver";
 
 /**
- * 合租房管理员的主动发起。**这条路由是「管理员」和「客服」的分界线**——
- * 客服等人来问，管理员自己知道该回头看什么。
+ * 合租房管理员的主动发起。**严格口径（2026-09-12）起已停用出站。**
  *
- * 做三件事：回访冷掉的事 · 把还没问全的共同规则问完 · 新住户头两周的接触。
+ * 原本做四件事：回访冷掉的事 · 问全共同规则 · 接触新住户 · 到期提醒，
+ * 每一件都由模型自由写一条短信发给住户。严格口径要求收回所有自由文本的
+ * 第三方出站，只保留 `personal-item-reminder.ts` 那一个程序化受约束的
+ * 功能，因此 `runOutreach()` 现在直接返回空数组，下方投递循环空转。
  *
- * 频率控制在 outreach.ts 里（同一个人两天内不主动找第二次，同一件事最多回访
- * 三次，`person.proactive_ok=false` 直接跳过）。**cron 跑得勤没关系，
- * 真正决定发不发的是那些闸门，不是 cron 的频率。**
+ * **保留这条路由与投递结构**：投递写的仍是已授权排队消息的既有链路
+ * （Twilio / 企业微信），本次不改。要重新开放主动发起，改 outreach.ts。
  *
  * 认证：Vercel Cron 会带 `Authorization: Bearer $CRON_SECRET`。
  * 没设 CRON_SECRET 时只允许本机调用，避免裸奔。
