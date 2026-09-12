@@ -2,6 +2,10 @@ import "server-only";
 
 import { assertCanWrite } from "./guard";
 import * as repo from "./repo";
+import {
+  hasRelayedReminderAskSignal,
+  looksLikeRelayedReminderAsk,
+} from "./reminder-ask";
 
 /**
  * **已开放的具体功能：夜间洗衣提醒（第二项受约束第三方出站）。**
@@ -38,6 +42,13 @@ export const NIGHT_LAUNDRY_REMINDER_TEXT =
  */
 export const NIGHT_LAUNDRY_REMINDER_FORM =
   "提醒 <室友名字>：深夜别开洗衣机或烘干机";
+
+/**
+ * 近似请求（不是窄命令形态，但明确让 AI 提醒某位指定室友、主题是深夜洗衣）
+ * 统一回这句短指引：如实说**没有发送**，并给出这唯一一种固定说法。零第三方
+ * 出站、不过模型。见 `hasNightLaundryAskSignal` / `looksLikeApproximateNightLaundryAsk`。
+ */
+export const NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE = `我没有把这条发给对方。夜间洗衣提醒只能按固定说法发：「${NIGHT_LAUNDRY_REMINDER_FORM}」。`;
 
 /** 回给发起人的真话收据：只说做成了什么，不复述内部过程。 */
 export function nightLaundryReminderReceipt(recipientName: string): string {
@@ -106,6 +117,44 @@ export function looksLikeNightLaundryReminder(text: string): boolean {
   return (
     LOOSE_LEAD.test(t) && LOOSE_NIGHT.test(t) && LOOSE_LAUNDRY.test(t)
   );
+}
+
+/**
+ * 明确属于**其它未开放能力 / 混合议题**的信号。命中即不吞，落回普通对话：
+ * 一般噪音、卫生/头发、费用分摊、规则制定、去留协调，以及混进来的个人物品
+ * 诉求（那一件另有它自己的模块）。这是「宁可漏掉，不吞普通谈话」的关键闸。
+ */
+const NIGHT_APPROX_FOREIGN =
+  /(?:头发|地漏|卫生|水费|电费|分摊|摊钱|公用|公摊|规矩|规则|全屋|大家都|大家也|换住|搬走|退租|押金|访客|过夜|厨房|做饭|垃圾|音乐|电视|外放|音量|搬家具|清洁|打扫|轮值|值日|宠物|抽烟|个人物品|私人物品|我(?:的)?东西)/;
+
+/** 深夜时段 + 洗衣设备：这一项功能的独有主题。 */
+function isNightLaundryTopic(t: string): boolean {
+  return LOOSE_NIGHT.test(t) && LOOSE_LAUNDRY.test(t);
+}
+
+/**
+ * 近似请求的**便宜预筛**（不查名册）：主题 + 请求语气 + 非讨论/非混合。
+ * 先跑它，只有疑似才去读成员表。
+ */
+export function hasNightLaundryAskSignal(text: string): boolean {
+  return hasRelayedReminderAskSignal(text, {
+    topicCue: isNightLaundryTopic,
+    foreignCue: NIGHT_APPROX_FOREIGN,
+  });
+}
+
+/**
+ * 完整判定：见 `looksLikeRelayedReminderAsk`。`memberNames` 传的是**除当前
+ * 说话人以外**的名册姓名（判定「指定室友」用）。
+ */
+export function looksLikeApproximateNightLaundryAsk(
+  text: string,
+  memberNames: readonly string[]
+): boolean {
+  return looksLikeRelayedReminderAsk(text, memberNames, {
+    topicCue: isNightLaundryTopic,
+    foreignCue: NIGHT_APPROX_FOREIGN,
+  });
 }
 
 /**
@@ -180,6 +229,22 @@ export async function deliverNightLaundryReminder(args: {
   text: string;
 }): Promise<NightLaundryReminderOutcome> {
   if (!looksLikeNightLaundryReminder(args.text)) {
+    // 不是窄命令形态，但可能是「明确让 AI 提醒某位指定室友」的近似自然语言
+    // 请求：只回一句未发送指引，零第三方出站、不过模型。先做不查名册的预筛，
+    // 只有疑似才读成员表，避免每条无关消息都查一次。
+    if (hasNightLaundryAskSignal(args.text)) {
+      const others = (
+        await repo.getMembers(args.householdId, args.channel)
+      )
+        .filter((m) => m.personId !== args.senderPersonId)
+        .map((m) => m.name);
+      if (looksLikeApproximateNightLaundryAsk(args.text, others)) {
+        return {
+          kind: "guidance",
+          reply: NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE,
+        };
+      }
+    }
     return { kind: "none" };
   }
 
