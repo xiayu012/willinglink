@@ -89,20 +89,16 @@ const NOT_JUDGED: JudgeResult = { pass: false, verified: false, findings: [] };
 /**
  * 判定器用哪个模型。
  *
- * 生成侧用便宜模型（`model.ts` 的 DeepSeek V4 Flash）是因为每条真实短信都
- * 要过一遍，单价乘以流量。**判定器只在跑批时按场景调用一次**，一次全量
- * `coliving-eval` 也就几次调用，聪明程度换钱是绝对划算的——跟 critic.ts
- * 选 sonnet 是同一笔账，而这里要做的推断（"这些线索合起来够不够指认出
- * 投诉人"）比审一条草稿更吃推理。
- *
- * 便宜模型在这类任务上的典型退化是**只会复述表面措辞**：看见"另一位"就说
- * 隐私没问题，看不出上一轮刚说过"只有你楼下那位养猫"。那正好是这层要抓的
- * 东西，省这笔钱等于这层白建。
+ * 2026-09-11 老板决定把合租房文本链路统一到 `deepseek/deepseek-v4.1-flash`，
+ * 判定器也换到这个 slug。**判定器只在跑批时按场景调用一次**，一次全量
+ * `coliving-eval` 也就几次调用，这里要做的推断（"这些线索合起来够不够指认出
+ * 投诉人"）比审一条草稿更吃推理；当前默认选型统一到 V4.1，保留
+ * `COLIVING_JUDGE_MODEL` 逃生舱口以便按需换更强的模型做对照。
  */
-function judgeModelId(): string {
-  return (
-    process.env.COLIVING_JUDGE_MODEL?.trim() || "anthropic/claude-sonnet-4.5"
-  );
+export const JUDGE_DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash";
+
+export function judgeModelId(): string {
+  return process.env.COLIVING_JUDGE_MODEL?.trim() || JUDGE_DEFAULT_MODEL;
 }
 
 const JUDGE_TIMEOUT_MS = Number(process.env.COLIVING_JUDGE_TIMEOUT_MS ?? 120_000);

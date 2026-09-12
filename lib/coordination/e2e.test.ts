@@ -2,7 +2,7 @@
  * 协商状态机端到端验证（真实 LLM 意图解析 + 确定性状态机）。
  *
  * 运行：`pnpm.cmd exec tsx lib/coordination/e2e.test.ts`
- * （会真实调用 `deepseek/deepseek-v4-flash` 做意图解析，耗一点 gateway 额度，
+ * （会真实调用 `deepseek/deepseek-v4.1-flash` 做意图解析，耗一点 gateway 额度，
  * 但每条消息的解析都很短、很便宜。不连数据库、不跑 Twilio。）
  *
  * 结构：5 条真实排班分支，每条都跑两遍——

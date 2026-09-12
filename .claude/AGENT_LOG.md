@@ -12,6 +12,14 @@
 
 ---
 
+## 2026-09-11 · 合租房文本 LLM 统一 V4.1 Flash，免审稿实验否决
+
+- 老板验收前一轮 V4.1 reviewer 后，决定把排班协商意图解析、主生成/outreach、普通 critic、安全/relay 强审稿、relay 最终修正、eval judge 默认统一为 `deepseek/deepseek-v4.1-flash`；三条环境覆盖与强/弱分支结构保留。
+- Codex 用 V4.1 主模型、关闭生产 critic、保留 V4.1 独立 judge，各跑一次 corpus-001/019/021/023/029/031。前五条人工可接受；031 第 7 轮出站写「我们几个想跟你聊聊」，让 AI 混入住户第一人称，judge 仍放行。故证据不支持删 reviewer，实验不得报成通过；实现保留 review/repair/deterministic/safety 全链路。
+- Claude Code 实际修改 `model.ts`、`critic.ts`、`evals/judge.ts`、`turn.ts` 与离线断言；Codex 审完整 diff。免费质量闸 142/142、diff check 通过；tsc 仅有未改动语音组件的两条既有 TS2717。本轮六条实际已知费用约 `$0.275663`，未写库、未真实发送、未动 `public/sw.js`。
+
+---
+
 ## 2026-09-11 · Astra 成本架构审查与后续 5.6 交接（仅文档）
 
 - 老板要求审实际代码、参考但不照信外部 AI 建议，把工作长期交给后续 5.6。新增 `.claude/AI_COST_ENGINEERING_REVIEW.md` 并接入状态、任务入口、路线图、Doctrine 地图；未改生产代码/提示词。

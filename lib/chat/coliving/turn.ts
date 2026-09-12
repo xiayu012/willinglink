@@ -300,9 +300,9 @@ export function checkProcessNarration(
  * 「提醒某人」扩写成全屋规矩、回信复述整条出站，安全正则一条也命不中。
  * 只靠代码闸，这两条对普通 relay 实际上没有生产门禁（第四轮 relay 报告暴露）。
  *
- * 所以：**relay 命中时，非敏感的出站草稿与最终回复也要进默认便宜 critic**
- * （`critic.ts` 的 `deepseek/deepseek-v4-flash`）；命中安全敏感主题时由
- * critic 内部照旧升级 sonnet。这里只决定"进不进"，不决定"用哪个模型"、
+ * 所以：**relay 命中时，非敏感的出站草稿与最终回复也要进默认 critic**
+ * （`critic.ts` 的 `deepseek/deepseek-v4.1-flash`）；命中安全敏感主题时由
+ * critic 内部照旧走强审稿分支。这里只决定"进不进"，不决定"用哪个模型"、
  * 不新增工作流。**其他情境的非敏感内容仍然直接 pass**，不因为这条把全部
  * 对话重新送回 critic。
  */
@@ -3789,9 +3789,9 @@ export async function runColivingTurn(args: {
      *  - 过早的增容逃逸（未结共享资源冲突但排班器没证明无解）→ 直接打回；
      *  - 其余非敏感消息（`needsSemanticCritique` 未命中）→ 直接 pass，
      *    不再调 LLM 批判器；
-     *  - 命中安全敏感主题的消息进 `needsCritique`，整批升级 sonnet 复核；
-     *  - **relay 这一轮**：普通非敏感出站也进 `needsCritique`，走默认便宜
-     *    critic（deepseek），让 rubric 14/15 真正生效（见 needsSemanticCritique）。
+     *  - 命中安全敏感主题的消息进 `needsCritique`，整批走强审稿分支复核；
+     *  - **relay 这一轮**：普通非敏感出站也进 `needsCritique`，走默认
+     *    critic（deepseek-v4.1-flash），让 rubric 14/15 真正生效（见 needsSemanticCritique）。
      */
     const verdicts: Verdict[] = new Array(msgs.length);
     const needsCritique: Array<{
@@ -3827,9 +3827,9 @@ export async function runColivingTurn(args: {
         continue;
       }
       // **非敏感出站默认不进批判器**，只靠上面的确定性检查（scheduleVerified /
-      // 过早增容逃逸）；但 relay 这一轮例外——非敏感出站也要过默认便宜 critic，
+      // 过早增容逃逸）；但 relay 这一轮例外——非敏感出站也要过默认 critic，
       // 让 rubric 14/15 生效（见 needsSemanticCritique）。命中安全敏感主题时
-      // 由 critic 内部照旧升级 sonnet。
+      // 由 critic 内部照旧走强审稿分支。
       if (
         !needsSemanticCritique({
           relayActive,
@@ -4209,8 +4209,8 @@ export async function runColivingTurn(args: {
   // 老板定的闸：日常审稿只靠代码。`checkFactFidelity` 命中 → 打回重写（确定性，
   // 保留）；未命中且不落在上面的确定性低风险闸时，只有**需要语义复核**的回复
   // 才进批判器：命中安全敏感主题（非法驱逐/自杀自伤/歧视/性骚扰/住房公平，由
-  // hasSafetySensitiveTopic 判，**入站与回复正文都覆盖**）升级 sonnet；relay
-  // 这一轮的普通回复也进默认便宜 critic（rubric 14/15，见 needsSemanticCritique）。
+  // hasSafetySensitiveTopic 判，**入站与回复正文都覆盖**）走强审稿分支；relay
+  // 这一轮的普通回复也进默认 critic（rubric 14/15，见 needsSemanticCritique）。
   // 其余一律直接 pass，不重新把所有非敏感对话送回 critic。
   const safetySensitiveReply = hasSafetySensitiveTopic(reply, args.text);
   const relaySemanticReview = needsSemanticCritique({
@@ -4604,8 +4604,8 @@ export async function runColivingTurn(args: {
       // 重写稿必须重新过与首稿完全相同的代码硬闸；只交给语言批判器会让
       // “首稿被确定性拦下、重写原样复读却变绿”成为可能。
       const redoFactFidelityHit = checkFactFidelity(reply);
-      // 重写稿同样按 needsSemanticCritique 判：安全敏感主题升级 sonnet，
-      // relay 这一轮的普通重写稿也进默认便宜 critic（rubric 14/15）；其余直接 pass。
+      // 重写稿同样按 needsSemanticCritique 判：安全敏感主题走强审稿分支，
+      // relay 这一轮的普通重写稿也进默认 critic（rubric 14/15）；其余直接 pass。
       const redoVerdict = redoFactFidelityHit
         ? { verified: true, pass: false as const, ...redoFactFidelityHit }
         : needsSemanticCritique({
@@ -4703,8 +4703,8 @@ export async function runColivingTurn(args: {
             generateText({
               abortSignal: turnAbortSignal(),
               // **relay 最终聚焦修正升级强模型的地方。** 走到这里意味着初稿和
-              // 第一次重写都已被 critic 打回——便宜模型反复重写仍改不动的
-              // （029 实测只会复述内容），用一次 sonnet 换一次真正改对的机会。
+              // 第一次重写都已被 critic 打回——默认模型反复重写仍改不动的
+              // （029 实测只会复述内容），用一次强模型换一次真正改对的机会。
               // 非 relay、首稿、出站、第一次重写都不升级（见 relayRewriteModelId）。
               model: getLanguageModel(finalFixModelId),
               system: buildGeneratorSystemMessages({
@@ -4775,8 +4775,8 @@ export async function runColivingTurn(args: {
             );
           }
           const finalFactFidelityHit = checkFactFidelity(reply);
-          // 修正稿同样按 needsSemanticCritique 判：安全敏感升级 sonnet，
-          // relay 这一轮的普通稿也进默认便宜 critic；其余直接 pass。
+          // 修正稿同样按 needsSemanticCritique 判：安全敏感走强审稿分支，
+          // relay 这一轮的普通稿也进默认 critic；其余直接 pass。
           lastFinalVerdict = finalFactFidelityHit
             ? { verified: true, pass: false as const, ...finalFactFidelityHit }
             : needsSemanticCritique({

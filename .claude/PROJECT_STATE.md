@@ -21,6 +21,12 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 
 ## 当前工作线（倒序）
 
+### 最新决定：合租房文本链路统一 V4.1 Flash，保留审稿（2026-09-11）
+
+- 老板批准把合租房文本 LLM 默认统一为 `deepseek/deepseek-v4.1-flash`：排班协商意图解析、主生成/outreach、普通 critic、安全敏感与 relay 强审稿 critic、relay 最终聚焦修正、评测语义判定均已切换；`COLIVING_MODEL` / `COLIVING_CRITIC_MODEL` / `COLIVING_JUDGE_MODEL` 覆盖仍保留。
+- 六条虚构 relay 免审稿实验中，前五条可接受；corpus-031 第 7 轮却把代传者写成「我们几个想跟你聊聊」，且 V4.1 judge 仍判通过。因此本轮**否决只生成不复审**，保留审稿、确定性闸、重写/最终修正、安全路由与独立评测 judge；强/弱分支当前虽为同一 slug，结构仍保留。
+- 证据：六份报告时间戳为 05-33-07、05-33-44、05-35-55、05-37-25、05-38-39、05-46-55；实际已知总费用约 `$0.275663`。免费闸 142/142、`git diff --check` 通过；全库 tsc 仍被未改动的 `components/ai-elements/speech-input.tsx` 两条既有 TS2717 拦住。本轮未写数据库、未真实发送、未动 `public/sw.js`。
+
 ### 当前优先：AI 成本工程 A 已验收，后续候选动态选择（2026-09-11）
 
 - 已完成只读架构与八份历史费用报告审查，持久交接见 `.claude/AI_COST_ENGINEERING_REVIEW.md`；这是开发文档，不加载到生产大脑。

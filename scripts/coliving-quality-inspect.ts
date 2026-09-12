@@ -6,7 +6,14 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { config } from "dotenv";
 import { assembleSystemPrompt } from "../lib/ai/brains";
-import { finalizeJudgment, judgeConversation, judgeGuideText, type JudgeTurn } from "../lib/chat/coliving/evals/judge";
+import {
+  finalizeJudgment,
+  JUDGE_DEFAULT_MODEL,
+  judgeConversation,
+  judgeGuideText,
+  judgeModelId,
+  type JudgeTurn,
+} from "../lib/chat/coliving/evals/judge";
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
 import {
   countAcceptedOutbound,
@@ -43,16 +50,21 @@ import {
   scheduleSlotMatchesSelfStatement,
 } from "../lib/chat/coliving/turn";
 import {
+  criticEnabled,
   criticModelId,
+  DEFAULT_CRITIC_MODEL,
   hasSafetySensitiveTopic,
+  SENSITIVE_CRITIC_MODEL,
   selectCriticRubric,
 } from "../lib/chat/coliving/critic";
 import {
   COLIVING_DEFAULT_MODEL,
+  colivingModelId,
   RELAY_FINAL_FIX_MODEL,
   relayReviewNeedsStrong,
   relayRewriteModelId,
 } from "../lib/chat/coliving/model";
+import { COORDINATION_INTENT_MODEL } from "../lib/coordination/llm";
 import {
   BatchBudget,
   currentEvalLedger,
@@ -1030,7 +1042,7 @@ async function main() {
       RELAY_FINAL_FIX_MODEL,
       "relay 最终聚焦修正必须升级到强模型"
     );
-    assert.equal(RELAY_FINAL_FIX_MODEL, "anthropic/claude-sonnet-4.6");
+    assert.equal(RELAY_FINAL_FIX_MODEL, "deepseek/deepseek-v4.1-flash");
     // 其余路径一律默认便宜模型，不能顺手放宽到首稿/出站/第一次重写/非 relay。
     assert.equal(
       relayRewriteModelId({
@@ -1150,9 +1162,9 @@ async function main() {
     const prev = process.env.COLIVING_CRITIC_MODEL;
     delete process.env.COLIVING_CRITIC_MODEL;
     try {
-      assert.equal(criticModelId(false, true), "anthropic/claude-sonnet-4.6");
+      assert.equal(criticModelId(false, true), "deepseek/deepseek-v4.1-flash");
       assert.equal(criticModelId(false, true), criticModelId(true));
-      assert.equal(criticModelId(false, false), "deepseek/deepseek-v4-flash");
+      assert.equal(criticModelId(false, false), "deepseek/deepseek-v4.1-flash");
     } finally {
       if (prev === undefined) delete process.env.COLIVING_CRITIC_MODEL;
       else process.env.COLIVING_CRITIC_MODEL = prev;
@@ -1805,14 +1817,14 @@ async function main() {
     assert.equal(scheduleInquiryConfirmation({ inquiryBody: "你用 17:30-18:00，愿意吗？", responseBody: "不行" }), null);
   });
 
-  // ── 批判器省钱改造（2026-09-07）：默认降级 deepseek + 安全主题升级 sonnet ───
-  check("critic default model is cheap deepseek; safety-sensitive topics escalate to sonnet", () => {
+  // ── 批判器省钱改造（2026-09-07）/ 文本链路统一 V4.1（2026-09-11）──────
+  check("critic default model is V4.1 Flash; safety-sensitive topics use the strong branch", () => {
     const prev = process.env.COLIVING_CRITIC_MODEL;
     delete process.env.COLIVING_CRITIC_MODEL;
     try {
-      assert.equal(criticModelId(), "deepseek/deepseek-v4-flash", "默认必须降级成跟大脑同源的便宜模型");
-      assert.equal(criticModelId(false), "deepseek/deepseek-v4-flash");
-      assert.equal(criticModelId(true), "anthropic/claude-sonnet-4.6", "安全敏感主题必须程序化升级到 sonnet");
+      assert.equal(criticModelId(), "deepseek/deepseek-v4.1-flash", "默认批判器必须用统一后的 V4.1 Flash");
+      assert.equal(criticModelId(false), "deepseek/deepseek-v4.1-flash");
+      assert.equal(criticModelId(true), "deepseek/deepseek-v4.1-flash", "安全敏感主题走强审稿分支（当前同 slug）");
     } finally {
       if (prev === undefined) delete process.env.COLIVING_CRITIC_MODEL;
       else process.env.COLIVING_CRITIC_MODEL = prev;
@@ -1822,9 +1834,77 @@ async function main() {
       "critique 必须用入站正文 + 待发消息判安全敏感主题");
     assert(criticSrc.includes("criticModelId(forceSensitive, args.forceStrong)"),
       "critique 必须把敏感判定结果 + relay 选择性强审稿喂给模型选型");
-    assert(criticSrc.includes('DEFAULT_CRITIC_MODEL = "deepseek/deepseek-v4-flash"'), "默认降级常量必须在");
-    assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.6"'), "升级常量必须在");
+    assert.equal(DEFAULT_CRITIC_MODEL, "deepseek/deepseek-v4.1-flash", "默认批判器常量必须是 V4.1 Flash");
+    assert.equal(SENSITIVE_CRITIC_MODEL, "deepseek/deepseek-v4.1-flash", "强审稿分支常量必须是 V4.1 Flash");
     assert(criticSrc.includes('process.env.COLIVING_CRITIC_MODEL?.trim()'), "必须保留 COLIVING_CRITIC_MODEL 覆盖");
+  });
+
+  // ── 文本链路统一 V4.1 Flash（2026-09-11 老板决定）─────────────────────────
+  check("all coliving text roles default to V4.1 Flash; escape hatches and review workflow intact", () => {
+    // 六个角色（主生成 / 普通 critic / 安全+强审稿 critic / relay 最终聚焦修正 /
+    // 评测语义判定 / 排班协商意图解析）默认值统一为 V4.1 Flash。
+    const saved = {
+      COLIVING_MODEL: process.env.COLIVING_MODEL,
+      COLIVING_CRITIC_MODEL: process.env.COLIVING_CRITIC_MODEL,
+      COLIVING_JUDGE_MODEL: process.env.COLIVING_JUDGE_MODEL,
+      COLIVING_CRITIC_OFF: process.env.COLIVING_CRITIC_OFF,
+    };
+    delete process.env.COLIVING_MODEL;
+    delete process.env.COLIVING_CRITIC_MODEL;
+    delete process.env.COLIVING_JUDGE_MODEL;
+    delete process.env.COLIVING_CRITIC_OFF;
+    try {
+      const v41 = "deepseek/deepseek-v4.1-flash";
+      assert.equal(COLIVING_DEFAULT_MODEL, v41, "主生成默认必须是 V4.1 Flash");
+      assert.equal(colivingModelId(), v41, "未设覆盖时主生成必须用 V4.1 Flash");
+      assert.equal(criticModelId(false, false), v41, "普通 critic 默认必须是 V4.1 Flash");
+      assert.equal(criticModelId(true), v41, "安全敏感 critic 默认必须是 V4.1 Flash");
+      assert.equal(criticModelId(false, true), v41, "relay 强审稿 critic 默认必须是 V4.1 Flash");
+      assert.equal(RELAY_FINAL_FIX_MODEL, v41, "relay 最终聚焦修正默认必须是 V4.1 Flash");
+      assert.equal(
+        relayRewriteModelId({
+          relayActive: true,
+          stage: "finalFix",
+          defaultModelId: COLIVING_DEFAULT_MODEL,
+        }),
+        v41,
+        "relay 最终聚焦修正选型必须落到 V4.1 Flash"
+      );
+      assert.equal(JUDGE_DEFAULT_MODEL, v41, "评测语义判定默认必须是 V4.1 Flash");
+      assert.equal(judgeModelId(), v41, "未设覆盖时语义判定必须用 V4.1 Flash");
+      assert.equal(
+        COORDINATION_INTENT_MODEL,
+        v41,
+        "排班协商意图解析（coordination-bridge/session 依赖）默认必须是 V4.1 Flash"
+      );
+      // 审稿默认仍然开着：COLIVING_CRITIC_OFF 只是显式逃生舱口，不是新默认。
+      assert.equal(criticEnabled(), true, "未设 COLIVING_CRITIC_OFF 时审稿必须默认开启");
+      assert.equal(
+        needsSemanticCritique({ relayActive: true, safetySensitive: false }),
+        true,
+        "relay 非敏感出站/回信默认仍进 critic"
+      );
+      // 三条显式覆盖（逃生舱口）仍生效。
+      process.env.COLIVING_MODEL = "some/override-main";
+      process.env.COLIVING_CRITIC_MODEL = "some/override-critic";
+      process.env.COLIVING_JUDGE_MODEL = "some/override-judge";
+      assert.equal(colivingModelId(), "some/override-main", "COLIVING_MODEL 覆盖必须仍生效");
+      assert.equal(criticModelId(false, false), "some/override-critic", "COLIVING_CRITIC_MODEL 覆盖必须仍生效");
+      assert.equal(criticModelId(true), "some/override-critic", "强审稿分支也必须尊重覆盖");
+      assert.equal(judgeModelId(), "some/override-judge", "COLIVING_JUDGE_MODEL 覆盖必须仍生效");
+      // 只有显式设 1 才关审稿。
+      process.env.COLIVING_CRITIC_OFF = "1";
+      assert.equal(criticEnabled(), false, "COLIVING_CRITIC_OFF=1 是显式逃生舱口");
+    } finally {
+      const restore = (key: keyof typeof saved) => {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      };
+      restore("COLIVING_MODEL");
+      restore("COLIVING_CRITIC_MODEL");
+      restore("COLIVING_JUDGE_MODEL");
+      restore("COLIVING_CRITIC_OFF");
+    }
   });
   check("relay turns route non-sensitive outbound/reply into the default critic; other chats still skip it", () => {
     // 纯判定函数：relay 命中 → 进 critic；非 relay 非敏感 → 不进；安全敏感 → 进。
@@ -1948,7 +2028,7 @@ async function main() {
     assert(fnBody.includes("isPrematureCapacityEscape"), "过早增容逃逸确定性打回路径必须保留");
     assert(fnBody.includes("critiqueBatch("), "敏感消息仍走单次批量 critiqueBatch");
   });
-  check("whole-turn safety upgrade intact: reply/redo/final/outbound all sonnet-gated", () => {
+  check("whole-turn safety upgrade intact: reply/redo/final/outbound all strong-branch gated", () => {
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
     // 1) 回复链三处 critique 调用都在（主/重写/最终修正），数量没因改动被删
@@ -1974,9 +2054,9 @@ async function main() {
     assert(outboundStart > 0 && outboundEnd > outboundStart, "出站审稿函数必须可定位");
     const outboundSeg = turnSrc.slice(outboundStart, outboundEnd);
     assert(outboundSeg.includes("hasSafetySensitiveTopic(o.text, args.text)"), "出站守卫必须覆盖 o.text（正文）");
-    // 4) 升级在 critic 内部：安全敏感命中 → forceSensitive → criticModelId(true)=sonnet
-    assert(criticSrc.includes("criticModelId(forceSensitive"), "critic 内仍按 forceSensitive 升级模型");
-    assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.6"'), "升级常量必须在");
+    // 4) 升级在 critic 内部：安全敏感命中 → forceSensitive → 走强审稿分支
+    assert(criticSrc.includes("criticModelId(forceSensitive"), "critic 内仍按 forceSensitive 走强审稿分支");
+    assert.equal(SENSITIVE_CRITIC_MODEL, "deepseek/deepseek-v4.1-flash", "强审稿分支常量必须在且为 V4.1 Flash");
   });
 
   /**

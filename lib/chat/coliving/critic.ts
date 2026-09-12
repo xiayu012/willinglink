@@ -28,12 +28,12 @@ import { isEvalBudgetExceeded, trackedGatewayCall } from "./gateway-ledger";
  *
  * ## 用哪个模型
  *
- * 默认跟大脑同源用便宜的 `deepseek/deepseek-v4-flash`（约 18 倍差价，见
- * `model.ts` 的选型记录）。但批判器是**出口安全闸**，安全敏感主题上不能赌
+ * 默认跟大脑同源，2026-09-11 起统一到 `deepseek/deepseek-v4.1-flash`（见
+ * `model.ts` 的选型记录）。批判器是**出口安全闸**，安全敏感主题上不能赌
  * 便宜模型的判断力——**命中非法驱逐 / 自杀自伤 / 歧视 / 性骚扰 / 住房公平
- * 陷阱任一关键词时，程序化升级到 `anthropic/claude-sonnet-4.6`**。关键词
- * 匹配放代码里、不靠 LLM 判断：宁可多升级一次（多花一点 sonnet 的钱），
- * 也不要漏升级（弱模型复核高风险内容）。
+ * 陷阱任一关键词时，程序化走强审稿分支**。关键词匹配放代码里、不靠 LLM
+ * 判断：宁可多升级一次，也不要漏升级。当前强审稿分支的默认 slug 与普通分支
+ * 相同（都是 V4.1），但**分支结构保留**，以后拉开差价只改常量。
  * `COLIVING_CRITIC_MODEL` 可覆盖全部（逃生舱口），默认如上。
  *
  * ## 三条兜底
@@ -66,16 +66,23 @@ function normalizeRuleId(value: unknown): string {
   return raw.match(/\d+(?:\.\d+)?/)?.[0] ?? raw.replace(/^第|条$/g, "");
 }
 
-/** 批判器默认模型：跟大脑同源（deepseek/deepseek-v4-flash），便宜约 18 倍。 */
-const DEFAULT_CRITIC_MODEL = "deepseek/deepseek-v4-flash";
-/** 安全敏感主题上强制升级到的模型（见 hasSafetySensitiveTopic 的说明）。 */
-const SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.6";
+/**
+ * 批判器默认模型：跟大脑同源，2026-09-11 起统一到 V4.1 Flash。
+ * **导出供离线检查断言默认值**，生产调用仍走 `criticModelId()`。
+ */
+export const DEFAULT_CRITIC_MODEL = "deepseek/deepseek-v4.1-flash";
+/**
+ * 安全敏感主题 / relay 选择性强审稿走的强审稿分支（见 hasSafetySensitiveTopic
+ * 与 relayReviewNeedsStrong 的说明）。当前默认 slug 与普通分支相同（统一到
+ * V4.1），保留独立常量是为了以后能只改这里重新拉开强/弱差价。
+ */
+export const SENSITIVE_CRITIC_MODEL = "deepseek/deepseek-v4.1-flash";
 
 /**
- * 命中任一安全敏感主题时，这一轮批判器强制用 sonnet。关键词匹配放代码里、
+ * 命中任一安全敏感主题时，这一轮批判器强制走强审稿分支。关键词匹配放代码里、
  * 不靠 LLM 判断——**不能用模型的随机性来决定"高风险内容由哪个模型复核"**。
  *
- * 宁可多触发（顶多多付一次 sonnet 的钱），也不要漏触发（弱模型复核
+ * 宁可多触发（顶多多花一次强审稿的钱），也不要漏触发（弱模型复核
  * 非法驱逐 / 自杀自伤 / 歧视 / 性骚扰 / 住房公平）。注意：此正则只决定
  * "用哪个模型复核"，不改变任何行为。
  */
@@ -90,11 +97,11 @@ export function hasSafetySensitiveTopic(...texts: string[]): boolean {
 /**
  * 这一轮批判器该用哪个模型。
  * `forceSensitive` 由调用方用 `hasSafetySensitiveTopic` 算好传入，
- * 命中安全敏感主题时用 sonnet；否则用便宜的默认模型。
+ * 命中安全敏感主题时走强审稿分支；否则用默认模型（当前两者同 slug）。
  *
  * `forceStrong` 是 relay 的**选择性强审稿**：调用方用结构事实（同一收件人
  * 的连续关系、本轮多个收件人）判断"这不是首次简单交办"时置位，用同一个
- * 强模型复核；安全敏感升级语义不变。两者任一为真都升级。
+ * 强审稿分支复核；安全敏感升级语义不变。两者任一为真都走强分支。
  * `COLIVING_CRITIC_MODEL` 显式设置时完全接管（逃生舱口 / 测试覆盖）。
  */
 export function criticModelId(
@@ -306,7 +313,7 @@ export async function critique(args: CriticInput): Promise<Verdict> {
     return UNVERIFIED_PASS;
   }
 
-  // 安全敏感主题（非法驱逐/自杀自伤/歧视/性骚扰/住房公平）升级到 sonnet 复核。
+  // 安全敏感主题（非法驱逐/自杀自伤/歧视/性骚扰/住房公平）走强审稿分支复核。
   // facts 也扫一遍：出站审稿里"命中敏感是来自入站 args.text"的消息，收信人
   // said 为空、draft 又不带关键词，敏感上下文只落在 facts 里（"起因是…"那行），
   // 不扫 facts 会把这类整轮敏感的复核漏降级回便宜模型。
@@ -526,7 +533,7 @@ export type BatchCritiqueInput = {
  * 收信人/角色/事实，提示词要求逐条独立、按数组下标对齐。
  *
  * 安全语义与单条 `critique` 完全一致：
- *  - 命中安全敏感主题 → 整批升级 sonnet；任一条带 `forceStrong`（relay 选择性强审稿）
+ *  - 命中安全敏感主题 → 整批走强审稿分支；任一条带 `forceStrong`（relay 选择性强审稿）
  *    也整批升级同一个强模型（整批只调一次模型，没法逐条换模型）；
  *  - 解析失败 / 某一条没给 verdict → 该条按 UNVERIFIED_PASS（默认放行）兜底，
  *    绝不因合并批量让一条本来会被拦的消息"漏拦"，也不让一条解析失败的把整批拖垮。

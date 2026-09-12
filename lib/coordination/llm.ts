@@ -52,8 +52,15 @@ import { getLanguageModel } from "@/lib/ai/providers";
 import type { StateSnapshot } from "./machine";
 import type { Intent } from "./types";
 
-/** 意图解析用哪个模型：便宜、快、听话，只做翻译不做推理。 */
-export const COORDINATION_INTENT_MODEL = "deepseek/deepseek-v4-flash";
+/**
+ * 意图解析用哪个模型：便宜、快、听话，只做翻译不做推理。
+ *
+ * 这是合租房文本链路的一环（由 `lib/chat/coliving/coordination-bridge.ts` /
+ * `coordination-session.ts` 调用），2026-09-11 老板决定把整条文本链路统一到
+ * `deepseek/deepseek-v4.1-flash`，因此这里跟 `lib/chat/coliving/model.ts` 的
+ * `COLIVING_DEFAULT_MODEL` 保持同一个 slug。它不含环境覆盖，改默认即改此常量。
+ */
+export const COORDINATION_INTENT_MODEL = "deepseek/deepseek-v4.1-flash";
 
 /** 消息里没写时长、且快照里这个人也从没报过时长时的默认值（分钟）。 */
 const DEFAULT_DURATION_MINUTES = 30;

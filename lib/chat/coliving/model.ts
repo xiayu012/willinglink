@@ -6,19 +6,20 @@
  *   · 小红书私信    `lib/chat/xhs-dm.ts` 的 XHS_DM_MODEL
  *   · 合租房管理员  这里
  *
- * 默认 `deepseek/deepseek-v4-flash`（老板 2026-09-07 拍板：**不上 opus、保持
- * 便宜**）。同一条真实投诉它 $0.004–0.011 一轮、sonnet-4.5 $0.127，便宜约 18 倍，
- * 三个安全探针（非法驱逐 / 自杀信号 / 住房公平陷阱）全过（见 AGENT_LOG 2026-08-30）。
- * 它在多轮冲突协调上的不可靠（跨轮忘偏好 / 编时段 / 慢到撞 gateway 超时）已由
+ * 默认 `deepseek/deepseek-v4.1-flash`（老板 2026-09-11 拍板：**全链路统一到
+ * V4.1 Flash、不上 opus**）。在此之前默认是 `deepseek/deepseek-v4-flash`
+ * （2026-09-07 拍板，见 AGENT_LOG 2026-08-30 的成本与安全探针记录），
+ * 现在生成、审稿、修正、语义判定四条文本链路全部换到 V4.1。
+ * 它在多轮冲突协调上的不可靠（跨轮忘偏好 / 编时段 / 慢到撞 gateway 超时）仍由
  * **确定性代码**兜底：软偏好注入、自动补发漏人、6.x 打回重算、简单肯定短路等，
- * 不再靠换贵模型硬扛。
+ * 不靠换贵模型硬扛。
  *
- * 想临时换更强模型验一把：设 `COLIVING_MODEL=anthropic/claude-sonnet-4.5`。
+ * 想临时换更强模型验一把：设 `COLIVING_MODEL=anthropic/claude-sonnet-4.6`。
  * 同在 gateway 上、值得一试的还有 `deepseek/deepseek-v4-pro`、
  * `minimax/minimax-m3`、`zai/glm-5.3`。
  * **注意 `zai/glm-5.3-flash` 试过，不行**——它反问问题、一个工具都不调。
  */
-export const COLIVING_DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
+export const COLIVING_DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash";
 
 export function colivingModelId(): string {
   return process.env.COLIVING_MODEL?.trim() || COLIVING_DEFAULT_MODEL;
@@ -27,13 +28,17 @@ export function colivingModelId(): string {
 /**
  * relay「回给发信人的最终聚焦修正」这一条窄路径升级到的强模型。
  *
- * 背景（第六轮 relay 人工复核 029）：relay 回信的初稿先过便宜 critic，被打回后
- * 用默认模型重写；重写稿再被 critic 打回时，只剩最后一次聚焦修正机会。实测便宜
+ * 背景（第六轮 relay 人工复核 029）：relay 回信的初稿先过 critic，被打回后
+ * 用默认模型重写；重写稿再被 critic 打回时，只剩最后一次聚焦修正机会。实测默认
  * 模型这时只会复述内容、改不动，最终仍被拦——门禁判断是对的，缺的是最后这次
- * 生成的能力。**只把这最后一次生成升级到 sonnet**，用一次贵调用换一次真正改对
- * 的机会；其余生成路径（首稿、第一次重写、出站、非 relay）保持默认便宜模型。
+ * 生成的能力。**只把这最后一次生成升级到强模型**，用一次贵调用换一次真正改对
+ * 的机会；其余生成路径（首稿、第一次重写、出站、非 relay）保持默认生成模型。
+ *
+ * 2026-09-11 老板决定把文本链路统一到 V4.1 Flash，所以这个常量当前跟
+ * `COLIVING_DEFAULT_MODEL` 是同一个 slug；但**保留独立的选型常量与升级分支**，
+ * 以后要重新拉开强/弱差价时只改这里，不用动调用点结构。
  */
-export const RELAY_FINAL_FIX_MODEL = "anthropic/claude-sonnet-4.6";
+export const RELAY_FINAL_FIX_MODEL = "deepseek/deepseek-v4.1-flash";
 
 /**
  * relay 回复重写路径该用哪个模型。

@@ -178,8 +178,9 @@ Twilio 打裸域会吃到跳转，而 **`X-Twilio-Signature` 是按原始 URL �
 `TWILIO_MESSAGING_SERVICE_SID`、`TWILIO_WEBHOOK_URL`、`POSTGRES_URL`、
 `CHANNEL_ADAPTERS_ENABLED=1`。
 
-可选：`COLIVING_MODEL` 覆盖模型，默认 `deepseek/deepseek-v4-flash`
-（实测比 sonnet-4.5 便宜约 18 倍且更好，见 AGENT_LOG 2026-08-30 第七轮）。
+可选：`COLIVING_MODEL` 覆盖模型，默认 `deepseek/deepseek-v4.1-flash`
+（2026-09-11 起合租房文本链路统一到 V4.1 Flash，见 AGENT_LOG 该日条目；
+早期便宜模型与 sonnet-4.5 的成本对比见 AGENT_LOG 2026-08-30 第七轮）。
 
 **线上没有配 API Key**，出站走 `AccountSid:AuthToken` 回落路径（见 `sendSms`）。
 日志里会打 `[twilio] 出站认证方式：auth-token` 便于确认。
