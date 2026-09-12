@@ -10,8 +10,13 @@ import { advanceCoordinationSession } from "./coordination-session";
 import type { OutboundAction, State } from "../../coordination/types";
 import { critique, critiqueBatch, hasSafetySensitiveTopic } from "./critic";
 import type { Verdict } from "./critic";
+import { isEvalBudgetExceeded, trackedGatewayCall } from "./gateway-ledger";
 import { assertCanWrite } from "./guard";
-import { colivingModelId, relayRewriteModelId } from "./model";
+import {
+  colivingModelId,
+  relayReviewNeedsStrong,
+  relayRewriteModelId,
+} from "./model";
 import { embedOne } from "./embedding";
 import * as repo from "./repo";
 import {
@@ -65,12 +70,32 @@ export function hasDeferredCoordination(text: string): boolean {
  * 对方的联系若被审稿拦下、实际没发出去，就不能用任何时态说成已联系/
  * 正在联系。跟 `会/稍后/回头` 这类真正面向未来、还没开始的措辞区分开——
  * 那些不在这个标记列表里，保留原样，不算这里要拦的"误导性在途声称"。
+ *
+ * 中文回信常**省掉主语**，直接写「跟小浩说了，在等他回话」——没有「我/已经」
+ * 这类标记，前两支都抓不到（2026-09-11 corpus-031 第 4 轮：出站被审稿拦下、
+ * 回信仍写「跟小浩说了」，判定漏过、`replyReview` 误绿）。末支补这种无主语
+ * 完成式；`(?!我|您|你)` 把「小浩跟我说了」这类**对方对我说**的相反方向排除。
  */
 const CLAIMED_CONTACT_COMPLETION_PATTERN =
-  /(?:(?:我|这边|马上|现在)?(?:正|正在|已经|这就|刚刚?|刚才|还在)(?:跟|和|给|去跟|去和|去给)?.{0,6}(?:发|说|商量|联系|问|通知|沟通|确认|谈|提|讲|劝|催|提醒|追)|(?:我|这边)[^。！？!?\n]{0,12}(?:问|联系|找|催|追|跟[^。！？!?\n]{0,6}(?:说|确认|核实|商量))[^。！？!?\n]{0,6}了)/;
+  /(?:(?:我|这边|马上|现在)?(?:正|正在|已经|这就|刚刚?|刚才|还在)(?:跟|和|给|去跟|去和|去给)?.{0,6}(?:发|说|商量|联系|问|通知|沟通|确认|谈|提|讲|劝|催|提醒|追)|(?:我|这边)[^。！？!?\n]{0,12}(?:问|联系|找|催|追|跟[^。！？!?\n]{0,6}(?:说|确认|核实|商量))[^。！？!?\n]{0,6}了|(?:跟|和|向|对)(?!我|您|你)[^。！？!?\n]{0,8}(?:说|讲|提|转达|传达|商量|联系|沟通|通知|确认|问|催|提醒)(?:了|过))/;
 
 export function claimsContactCompletion(text: string): boolean {
   return CLAIMED_CONTACT_COMPLETION_PATTERN.test(text);
+}
+
+/**
+ * **relay 这一轮一条出站都没有，回复却说已经联系上了。** 纯判定：只看结构
+ * 事实——relay 是否命中、本轮出站条数、回复是否在声称联系完成——**不猜目标人**。
+ * 真联系过会在 `outbound` 里留下记录，所以只可能是"没做却说做了"
+ * （2026-09-11 corpus-031 第 6 轮：只调 `sendReply`、`contactPerson` 没调）。
+ * 由 `checkFalseContactClaim` 复用，抽出来是为了可离线测试。非 relay 恒 false。
+ */
+export function isUnsolicitedContactClaim(args: {
+  relayActive: boolean;
+  outboundCount: number;
+  claimsCompletion: boolean;
+}): boolean {
+  return args.relayActive && args.outboundCount === 0 && args.claimsCompletion;
 }
 
 /** case.kind 是开放文本；只有明确属于同住人或共享资源争用的未结事项才算。 */
@@ -194,8 +219,26 @@ export function stripConditionalFollowUp(text: string): string {
 const PROCESS_NARRATION_AI_OWNED_DEFERRED_REPORT =
   /(?:他|她|对方|那边|人家|那人)[^。！？!?\n]{0,6}(?:一(?:回复|回话|回信|有消息|有回复|有回音)|回过话|回了话|回过消息|回了消息|(?:回复|回话|回信|答复|回音|消息)(?:了)?|回你|回我|有(?:消息|回复|回音))(?!说|道|称|表示)[^。！？!?\n你您]{0,10}(?:我|这边)[^。！？!?\n]{0,4}(?:就|再|会|马上|立刻|第一时间|到时候)?[^。！？!?\n]{0,6}(?:告诉你|告诉您|跟你说|通知你|发给你|跟你讲|给你说)/;
 
+/**
+ * 第 6 组：**本轮已经成功联系过的人，回复里不能再用将来时说"还要去找他"**。
+ * 第 3 组的将来时动作组**故意不含「说/讲」**——为了保留"我会跟大家讲"这类
+ * 全屋口径——所以这里单独补。名字必须落在"我/这边 + 将来标记 + 联系动词"里、
+ * 且属于本轮真正联系上的人：没联系过的人不命中，尚未执行或住户触发的合法后续
+ * 不受影响；完成时（"已经跟他说了"）不含将来标记，也不命中。
+ */
+function futureContactClaim(text: string, contactedNames: string[]): boolean {
+  const alt = contactedNames.filter(Boolean).map(escapeRegExp).join("|");
+  if (!alt) return false;
+  return new RegExp(
+    `(?:我|这边)\\s*(?:这就|马上|现在|立刻|立马|待会|待会儿|等下|回头|稍后|再|去|会|要)(?:去)?\\s*` +
+      `(?:跟|和|给|向)?\\s*(?:${alt})\\s*` +
+      `(?:说|讲|提|转达|传达|联系|问|提醒|商量|沟通|确认|核实|催)(?!过)`
+  ).test(stripConditionalFollowUp(text));
+}
+
 export function checkProcessNarration(
-  text: string
+  text: string,
+  contactedNames: string[] = []
 ): { broke: "0"; why: string } | null {
   const reasons: string[] = [];
   if (PROCESS_NARRATION_SOURCE_SECRECY.test(text)) {
@@ -236,6 +279,13 @@ export function checkProcessNarration(
         "只有**由住户新反馈触发**的条件句（「他回复了，你把原话发我，我再帮你看」）才允许留。"
     );
   }
+  if (futureContactClaim(text, contactedNames)) {
+    reasons.push(
+      "「我这就去跟他说一声」「我再跟他说一声」——这一轮**已经成功联系过**这个人，" +
+        "回信却把已经发生的事写成还没做。已经发生就写完成时" +
+        "（「已经跟他说了，在等他回话」）；真没发出去，也不该写成发出去了。"
+    );
+  }
   if (reasons.length === 0) return null;
   return { broke: "0", why: reasons.join("\n") };
 }
@@ -264,60 +314,59 @@ export function needsSemanticCritique(args: {
 }
 
 /**
- * 交给批判器的**relay 出站任务背景**：AI 是替哪个住户、联系哪个具体对象。
+ * 交给批判器的 **relay 出站任务背景**：AI 是替哪个住户、联系哪个具体对象。
  *
- * 第五轮人工复核（021）暴露：同一句话，在普通对话里没问题，放进"代某人联系
- * 另一个人"的任务里就可能是冒充发信人（rubric 第 14 条）。便宜 critic 当时
- * 只看到"收信人 + 这一轮已知事实"，不知道这是一次传话、当前发信人是谁，
- * 于是放行了「我睡得沉…找我」这种第一人称。这里把任务说清楚；**只陈述任务
- * 关系，不给话术**——怎么措辞仍归 doctrine。
- *
- * 后续同类漏判（自动绿、人工红）：便宜 critic 也放行过假匿名主语——该用发信人
- * 名字时写成「有人/一位室友/同住的人」。rubric 12 已管这件事，但 critic 只拿
- * 到"收信人+事实"时不去核对来源归属；这里把 doctrine 已有的归属二选一规则
- * （用名字，或整条就事论事）摆到任务背景里，不新增规则、不改全局隐私口径。
+ * 只给动态的人名与任务关系；具体的审稿条款已抽到 `critic.ts` 的
+ * `relay-recipient` 短专属视图（从 doctrine、rubric 与这段背景提炼），随 `view`
+ * 标记整份装载，不再夹在通用 rubric 里。这里不再重复那些检查点。
  */
 export function relayRecipientTaskContext(args: {
   senderName: string;
   recipientName: string;
 }): string {
   return (
-    `这是一次一对一传话：住户${args.senderName}把一件要跟${args.recipientName}` +
-    `说的话或做的事交给 AI，AI 代他联系${args.recipientName}；这条消息的收信人` +
-    `是${args.recipientName}，不是${args.senderName}。AI 是传话人：除非有明确` +
-    `引语或来源归属（「${args.senderName}说/希望……」），不得改用` +
-    `${args.senderName}的第一人称（「找我」「我……」）说话——那会让` +
-    `${args.recipientName}以为这是 AI 自己的事、或以为 AI 在冒充${args.senderName}；` +
-    `发信人说的相对时间也要保持原粒度，不能自己铸成硬门槛。` +
-    `来源归属只有两种写法，**不要停在中间**：` +
-    `需要对方知道是谁（是他自己的决定、请求或边界，不知道是谁就没法理解、` +
-    `没法回应）时，就用发信人名字${args.senderName}说出来；` +
-    `不需要归属（事情本身已经够清楚、不必靠是谁提的才懂）时，就整条` +
-    `就事论事地说这件事本身，例如把影响直接说成「声音影响休息」，` +
-    `可以整条不提是谁。**不得用「有人」「一位室友」「同住的人」这类` +
-    `谁也不是的主语造假匿名**——那既没让对方知道是谁，也没有真正保护谁。` +
-    `（这不是把所有传话都改成实名：该保密时仍整条不提来源，就事论事即可。）`
+    `住户${args.senderName}把一件要跟${args.recipientName}说的话或做的事交给 AI，` +
+    `AI 代他联系${args.recipientName}——这条出站发给的是收信人${args.recipientName}，` +
+    `不是发信人${args.senderName}。`
   );
 }
 
 /**
- * 交给批判器的**relay 回信任务背景**：这条是回给发信人（不是收信人）的，
- * 只该交代"联系了谁 + 当前状态"。同样只陈述任务关系，不给话术。
- *
- * **不预设联系已经成功。** relay 出站可能被 critic 拦下（同一轮 facts 里就是
- * 「被审稿拦下，没有发出去」）。若这里写死"AI 已经代他去联系了"，就会和 facts
- * 直接冲突、诱导批判器放过一条基于未发生事实的回信。是否实际发出完全以 facts
- * 为准，本背景只说任务关系与回信对象。
+ * 交给批判器的 **relay 回信任务背景**：这条是回给发信人（不是收信人）的。
+ * 只给动态人名与任务关系；具体的审稿条款见 `critic.ts` 的 `relay-sender-reply`
+ * 短专属视图。是否实际发出仍以 facts 为准，本背景不预设联系已经成功。
  */
 export function relaySenderReplyTaskContext(args: { senderName: string }): string {
   return (
-    `这是一次一对一传话：住户${args.senderName}把一件要跟别人说的话或做的事交给 ` +
-    `AI，这条是回给发信人${args.senderName}的，不是发给收信人的。AI 到底有没有` +
-    `替他联系上、发出去了没有，完全以【这一轮已知的事实】为准——本背景只说明任务` +
-    `与回信对象，不预设联系已经成功。合格的回信只交代"联系了谁 + 当前状态"，` +
-    `不把发出去的内容（包括让对方做什么）再摘要一遍；「对方一回复我就告诉你」` +
-    `不是"在等谁回话"这个当前状态，除非住户明确要这项通知。`
+    `住户${args.senderName}把一件要跟别人说的话交给 AI；这条是回给发信人` +
+    `${args.senderName}的，不是发给收信人的。`
   );
+}
+
+/**
+ * **本轮仍未被合格出站覆盖的"被拦联系人"（纯结构判定，可离线测试）。**
+ *
+ * 只看每条出站的 `personId` 与 `blocked`：同一 `personId` 只要有**任意一条**
+ * `blocked:false` 的出站，就算这一步已经真正做成，不再因为这个人早先那条被拦
+ * 而要求重发；不同 `personId` 的合格出站**不能**覆盖另一个人的被拦目标。返回
+ * 去重后的 personId 列表（空集 = 没有需要重发的目标）。
+ *
+ * 两处共用同一份事实，避免各写一遍：
+ *  - `checkFalseContactClaim`：判断回信是否在谎称"已经联系上"（本轮仍有被拦出站）；
+ *  - 最终聚焦修正的有界循环：**每次迭代**按当前最终状态重算。只有这里非空才
+ *    强制 `contactPerson` 重发；若只剩回信问题（空集），只能用 `sendReply`
+ *    改回信，不能再重复联系同一个人（2026-09-12 Codex 控制流退回）。
+ */
+export function uncoveredBlockedPersonIds(
+  outbound: ReadonlyArray<{ personId: string; blocked?: boolean }>
+): string[] {
+  const accepted = new Set<string>();
+  const blocked = new Set<string>();
+  for (const message of outbound) {
+    if (message.blocked) blocked.add(message.personId);
+    else accepted.add(message.personId);
+  }
+  return [...blocked].filter((personId) => !accepted.has(personId));
 }
 
 /**
@@ -339,6 +388,55 @@ export function finalFixForcedFirstTool(args: {
   hasBlockedOutbound: boolean;
 }): "contactPerson" | null {
   return args.relayActive && args.hasBlockedOutbound ? "contactPerson" : null;
+}
+
+/**
+ * **最终强修正的有界预算（纯判定，可离线测试）。**
+ *
+ * 背景（2026-09-12 corpus-031 第九次）：最后这一稿一次只够消掉一个 violation——
+ * 删掉了第三人的行踪，却又残留一句当前交办未要求的扩展义务，第三稿仍被专属审稿
+ * 拦下。一次预算不够，给一次额外的；但**只在 relay 且本轮仍有被拦出站**这条窄路径
+ * 上加（那次修正本来就要重发被拦的联系），其余一律仍是 1 次：
+ *  - 普通非 relay：1 次，不增加调用；
+ *  - relay 但本轮没有 blocked 出站：1 次；
+ *  - relay 且有 blocked 出站：最多 2 次。
+ * 调用方据此做**有界循环**：每次只在前一次仍失败时发生，成功立即 `break`，绝不无限循环。
+ */
+export function finalFixBudget(args: {
+  relayActive: boolean;
+  hasBlockedOutbound: boolean;
+}): number {
+  return finalFixForcedFirstTool(args) !== null ? 2 : 1;
+}
+
+/** 名字进正则前先转义，避免名字里的正则元字符（`(`、`.` 等）把模式撑破。 */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * **同一段草稿的判重 key 只做最小归一：去空白 + 中英文标点折成同一个。**
+ *
+ * 2026-09-11 实测（corpus-031 第 7 轮）：同一句话第三次只是把全角逗号换成半角，
+ * 就被当成新草稿重新抽签，前两次判不合格、第三次反判通过——同文本判出相反结论。
+ * 这里把有直接对应关系的全角标点折成半角、去掉所有空白，让"只换标点"不再触发重抽。
+ *
+ * **不做同义词或业务内容归一**——那会把真正改过的稿也锁进旧结论。
+ * 只缓存不合格结论（见调用处），通过的不锁死。
+ */
+export function normalizeDraftKeyText(text: string): string {
+  return text
+    .replace(/\s+/g, "")
+    .replace(/[，、]/g, ",")
+    .replace(/。/g, ".")
+    .replace(/？/g, "?")
+    .replace(/！/g, "!")
+    .replace(/；/g, ";")
+    .replace(/：/g, ":")
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'");
 }
 
 function isGeneratedResidentName(name: string): boolean {
@@ -1450,6 +1548,14 @@ export async function runColivingTurn(args: {
   });
   const conflictContextActive =
     hasOpenConflictCase || loadedModuleIds.includes("conflict");
+
+  /**
+   * 这一轮是不是**一对一传话**（relay）。是的话，非敏感的出站草稿与最终
+   * 回复也要进批判器——rubric 第 14/15 条（任务忠实、回信只交代动作与状态）
+   * 是 relay 专属的人际质量门禁，安全敏感正则抓不到它们（见
+   * `needsSemanticCritique` 的说明）。
+   */
+  const relayActive = loadedModuleIds.includes("relay");
 
   // ── 本轮累积的状态 ──
   let decisionId: string | null = null;
@@ -3320,7 +3426,8 @@ export async function runColivingTurn(args: {
    * 准则那一段逐字不变，可以缓存（写入 1.25 倍价，命中 0.1 倍价）；
    * 运行时状态每轮都变，留在断点之外，否则一变就整段落空。
    */
-  const result = await generateText({
+  const result = await trackedGatewayCall("main", modelId, () =>
+  generateText({
     abortSignal: turnAbortSignal(),
     model: getLanguageModel(modelId),
     // 顺序：doctrine（缓存）→ 实验 guidance（有才放）→ runtime（当前事实，最后）
@@ -3333,7 +3440,7 @@ export async function runColivingTurn(args: {
     tools: activeTools,
     // 交付了正文就收工；没交付则最多跑到步数上限
     stopWhen: [hasToolCall("sendReply"), stepCountIs(MAX_STEPS)],
-  });
+  }));
 
   for (const step of result.steps) {
     for (const call of step.toolCalls ?? []) {
@@ -3363,7 +3470,8 @@ export async function runColivingTurn(args: {
      * 想好的结论交付成一句正文。这比"猜哪段文字是正文"可靠得多。
      */
     try {
-      const forced = await generateText({
+      const forced = await trackedGatewayCall("forced-sendReply", modelId, () =>
+      generateText({
         abortSignal: turnAbortSignal(),
         model: getLanguageModel(modelId),
         system: buildGeneratorSystemMessages({
@@ -3384,7 +3492,7 @@ export async function runColivingTurn(args: {
         ],
         tools: { sendReply: tools.sendReply },
         toolChoice: { type: "tool", toolName: "sendReply" },
-      });
+      }));
       // 补上：这次强制重试自己的工具调用之前从没被记进 toolsUsed——
       // 安全网确实兜住了、消息也送达了，但事后完全看不出这一轮其实是
       // 靠安全网兜住的，会掩盖"主生成为什么没能正常交付"这条排查线索
@@ -3396,6 +3504,8 @@ export async function runColivingTurn(args: {
       }
       raw = deliveredReply ?? "";
     } catch (error) {
+      // 评测预算触限必须向上抛，不能被"兜底失败就退回自由文本"吞掉。
+      if (isEvalBudgetExceeded(error)) throw error;
       console.log(
         "[turn] 强制 sendReply 兜底失败，退回自由文本：",
         error instanceof Error ? error.message : String(error)
@@ -3470,7 +3580,8 @@ export async function runColivingTurn(args: {
       .filter((n): n is string => !!n);
     if (names.length > 0) {
       try {
-        const forcedContact = await generateText({
+        const forcedContact = await trackedGatewayCall("forced-contact", modelId, () =>
+        generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
           // 跟主生成调用、下面的force-sendReply同一个道理：这段一轮里可能被
@@ -3494,7 +3605,7 @@ export async function runColivingTurn(args: {
           tools: { contactPerson: tools.contactPerson },
           toolChoice: { type: "tool", toolName: "contactPerson" },
           stopWhen: stepCountIs(names.length),
-        });
+        }));
         // 同一个盲区（2026-09-05 泛化排班硬规则时才发现原来不止一处）：
         // 这次强制补发自己的工具调用之前没被记进 toolsUsed，外部看不出
         // "新人已经被联系到"到底是主生成做的还是这条安全网兜住的。
@@ -3504,6 +3615,8 @@ export async function runColivingTurn(args: {
           }
         }
       } catch (error) {
+        // 同强制 sendReply：预算触限要向上抛，不能被补发失败吞掉。
+        if (isEvalBudgetExceeded(error)) throw error;
         console.log(
           "[turn] 强制打招呼补发失败：",
           error instanceof Error ? error.message : String(error)
@@ -3586,20 +3699,6 @@ export async function runColivingTurn(args: {
 
   // 出站消息先审、先落定"拦没拦"——回复的审稿要用得上这个结果（见下）。
   /**
-   * **生成器能看见"最近跟这屋里的人说过什么"（context.ts 渲染进了
-   * ctx.text），批判器一直看不见。** 生产上真出过：AI 给两位住户发了
-   * "你一般几点做饭"，70 秒后又因为房东发来一条新消息，把同一句问话
-   * 原样又发了一遍——两人都还没来得及答第一条。生成器的 doctrine 里
-   * 明明写着"已经问过的别再问一遍"，但批判器审这条重复消息时，`facts`
-   * 里只有名册和本轮工具，压根没有"最近对这个人说过什么"这个信息，
-   * 判不出"这是重复"。跟今天早些时候修的名册过期快照是同一类问题：
-   * 批判器缺的不是判断力，是生成器已经有、批判器没有的那份事实。
-   * 这里现查一份较宽的最近往来记录，按收信人过滤后喂给对应的批判器
-   * 调用。
-   */
-  const recentForCritique = await repo.recentOutbound(sender.householdId, 24);
-
-  /**
    * 抽成函数是因为**这条审核不止跑一次**——2026-09-05 发现的真实漏洞：
    * 批判器打回回复、进入重写阶段时，重写拿到了完整工具集（含
    * `contactPerson`），如果它这时候才调用 `contactPerson` 发消息，
@@ -3612,13 +3711,59 @@ export async function runColivingTurn(args: {
   // TS 的控制流窄化过不了闭包边界（sender 在函数顶部已经判过非空），
   // 这里显式存一份非空引用给闭包用，不然每处 sender.xxx 都会报"可能为 null"
   const senderName = sender.name;
+
   /**
-   * 这一轮是不是**一对一传话**（relay）。是的话，非敏感的出站草稿与最终
-   * 回复也要进批判器——rubric 第 14/15 条（任务忠实、回信只交代动作与状态）
-   * 是 relay 专属的人际质量门禁，安全敏感正则抓不到它们（见
-   * `needsSemanticCritique` 的说明）。
+   * **生成器能看见"最近跟这屋里的人说过什么"（context.ts 渲染进了
+   * ctx.text），批判器一直看不见。** 生产上真出过：AI 给两位住户发了
+   * "你一般几点做饭"，70 秒后又因为房东发来一条新消息，把同一句问话
+   * 原样又发了一遍——两人都还没来得及答第一条。生成器的 doctrine 里
+   * 明明写着"已经问过的别再问一遍"，但批判器审这条重复消息时，`facts`
+   * 里只有名册和本轮工具，压根没有"最近对这个人说过什么"这个信息，
+   * 判不出"这是重复"。跟今天早些时候修的名册过期快照是同一类问题：
+   * 批判器缺的不是判断力，是生成器已经有、批判器没有的那份事实。
+   *
+   * 这份最近往来在审核前查一次，按收信人过滤后喂给批判器。本轮自己发出的
+   * 消息 `sentAt >= turnStartedAt` 排除掉。
    */
-  const relayActive = loadedModuleIds.includes("relay");
+  const recentForCritique = await repo.recentOutbound(sender.householdId, 24);
+
+  /**
+   * **房屋级的"此前有没有实质往来"信号：审核前算一次、全程复用。**
+   *
+   * 每个新成员的第一次出站是介绍，所以任一收件人出站 ≥2 条即"有过介绍之外的
+   * 实质传话"。取全屋、不绑定本轮收件人——模型漏调 contactPerson 时本轮
+   * outbound 为空，只有房屋级信号还能认出连续关系（corpus-031 第 6 轮）。
+   */
+  const houseHasPriorSubstantiveOutbound = (() => {
+    const perRecipient = new Map<string, number>();
+    for (const r of recentForCritique) {
+      if (r.sentAt >= turnStartedAt) continue;
+      perRecipient.set(r.to, (perRecipient.get(r.to) ?? 0) + 1);
+    }
+    return [...perRecipient.values()].some((n) => n >= 2);
+  })();
+
+  /**
+   * **选择性强审稿**：relay 这一轮，出站与回信 critic 该不该直接用强模型。
+   *
+   * 只看结构事实（见 `relayReviewNeedsStrong`）：本轮实际/尝试联系了几个收件人、
+   * 这套房在本轮开始前有没有"介绍之外"的实质出站往来。首次简单提醒（一个收件人、
+   * 此前只有一条介绍）保持默认便宜 critic，不升级；非 relay 恒为 false，普通对话
+   * 不受影响。
+   */
+  const strongRelayReview = relayReviewNeedsStrong({
+    relayActive,
+    recipientCount: new Set(outbound.map((o) => o.personId)).size,
+    houseHasPriorSubstantiveOutbound,
+  });
+  /**
+   * **本轮已被判不合格的草稿，同一段文字再交一次不许翻成通过。**
+   * 同一个文本同一轮被重复审出相反结论，是把判断交给随机性；这里按
+   * 「收信人 + 正文」记下不合格结论并沿用。只缓存不合格的，通过的不锁死。
+   */
+  const rejectedDraftVerdicts = new Map<string, Verdict>();
+  const draftKey = (message: OutboundMessage): string =>
+    `${message.personId}\u0000${normalizeDraftKeyText(message.text)}`;
   async function critiqueAndMarkOutbound(msgs: OutboundMessage[]): Promise<void> {
     const batchSummary = msgs
       .map((message) => {
@@ -3690,6 +3835,12 @@ export async function runColivingTurn(args: {
         verdicts[i] = { verified: true, pass: true, broke: "", why: "" };
         continue;
       }
+      // 同一段文字本轮已被判不合格：直接沿用原判，不再重问模型。
+      const remembered = rejectedDraftVerdicts.get(draftKey(o));
+      if (remembered) {
+        verdicts[i] = remembered;
+        continue;
+      }
       const targetName = outboundNames.get(o.personId) ?? "某位住户";
       const withThisPerson = recentForCritique
         // **必须早于本轮开始**——本轮自己刚发的（含正在审的这条本身）
@@ -3717,6 +3868,12 @@ export async function runColivingTurn(args: {
                   recipientName: targetName,
                 })
               : undefined,
+          // 结构标记：非介绍、且本轮是 relay 的出站 → 用 relay-recipient 短专属视图，
+          // 不套 179 行通用 rubric。自我介绍（isIntroduction）不带标记，仍按通用审。
+          view:
+            relayActive && !o.isIntroduction ? "relay-recipient" : undefined,
+          // 连续关系/多收件人的 relay，出站草稿用强模型复核（见 strongRelayReview）。
+          forceStrong: strongRelayReview,
           /**
            * 共用者规矩、针对个人的事、中性打招呼，三种判法完全不同。
            * **"被说到的人"这个角色是给纠纷场景准备的**——刚加进系统、
@@ -3780,6 +3937,7 @@ export async function runColivingTurn(args: {
         // 显示给人看——那是审稿系统真的在起作用的证据，只标一个 blocked
         // 布尔值等于把最有价值的部分丢了
         msg.blockReason = `第${v.broke}条：${v.why}`;
+        rejectedDraftVerdicts.set(draftKey(msg), v);
       }
     }
   }
@@ -3836,14 +3994,10 @@ export async function runColivingTurn(args: {
   function checkFalseContactClaim(
     text: string
   ): { broke: "0"; why: string } | null {
-    const unresolved = outbound.filter((o) => o.blocked && !outbound.some(
-      (other) => other.personId === o.personId && !other.blocked
-    ));
+    const unresolved = uncoveredBlockedPersonIds(outbound);
     const anyBlocked = unresolved.length > 0;
     if (anyBlocked && claimsContactCompletion(text)) {
-      const blockedTargets = unresolved
-        .map((o) => o.personId)
-        .join("、");
+      const blockedTargets = unresolved.join("、");
       return {
         broke: "0",
         why:
@@ -3854,7 +4008,41 @@ export async function runColivingTurn(args: {
           "确实做了的事来说。",
       };
     }
+    /**
+     * **relay 这一轮一条出站都没有，回复却说已经联系上了。** 上面那支只在
+     * "有出站但被拦下"时触发，这里补"连出站都不存在"的情形（`sendReply`
+     * 直接交差、`contactPerson` 没调，corpus-031 第 6 轮）。判定是纯结构事实，
+     * 见 `isUnsolicitedContactClaim`：不猜目标人，非 relay 不启用。
+     */
+    if (
+      isUnsolicitedContactClaim({
+        relayActive,
+        outboundCount: outbound.length,
+        claimsCompletion: claimsContactCompletion(text),
+      })
+    ) {
+      return {
+        broke: "0",
+        why:
+          "回复里说已经/正在联系某人，但这一轮**没有任何要发出去的出站**，" +
+          "联系这件事没有发生——不管用什么时态都不能说成已经联系到了或者" +
+          "正在联系。要么现在就用 contactPerson 真的把这条传话发出去，" +
+          "要么老实说清楚这一步还没做成。",
+      };
+    }
     return null;
+  }
+
+  /** 本轮真的发出去的收信人姓名——给 `checkProcessNarration` 的第 6 组用。 */
+  function acceptedContactNames(): string[] {
+    return [
+      ...new Set(
+        outbound
+          .filter((o) => !o.blocked)
+          .map((o) => outboundNames.get(o.personId) ?? "")
+          .filter(Boolean)
+      ),
+    ];
   }
 
   function missingSelectedScheduleParticipants(): string[] {
@@ -3990,7 +4178,7 @@ export async function runColivingTurn(args: {
     return (
       checkFalseContactClaim(text) ??
       checkIncompleteConflictTurn(text) ??
-      checkProcessNarration(text)
+      checkProcessNarration(text, acceptedContactNames())
     );
   }
 
@@ -4036,6 +4224,10 @@ export async function runColivingTurn(args: {
           taskContext: relayActive
             ? relaySenderReplyTaskContext({ senderName })
             : undefined,
+          // 结构标记：relay 回给发信人的回信用 relay-sender-reply 短专属视图。
+          view: relayActive ? "relay-sender-reply" : undefined,
+          // 连续关系/多收件人的 relay，回信也用强模型复核（见 strongRelayReview）。
+          forceStrong: strongRelayReview,
           said: args.text,
           facts: replyFacts,
           draft: reply,
@@ -4149,13 +4341,17 @@ export async function runColivingTurn(args: {
       // outbound 数组——记下重写前的长度，重写完只审"新增的那一截"，
       // 不重复审已经审过、已经落定的那些
       const outboundLenBeforeRedo = outbound.length;
-      const redoResult = await generateText({
+      const redoModelId = relayRewriteModelId({
+        relayActive,
+        stage: "redo",
+        defaultModelId: modelId,
+      });
+      const redoResult = await trackedGatewayCall("redo", redoModelId, () =>
+      generateText({
         abortSignal: turnAbortSignal(),
         // 第一次重写：一律用默认生产模型。只有 relay 的"最终聚焦修正"
         // （下面 finalFix）才升级——见 relayRewriteModelId。
-        model: getLanguageModel(
-          relayRewriteModelId({ relayActive, stage: "redo", defaultModelId: modelId })
-        ),
+        model: getLanguageModel(redoModelId),
         // 同上：这一轮如果批判器打回，这段会跟主生成调用共享同一份
         // doctrine 内容，缓存能命中主调用已经写入的那份
         system: buildGeneratorSystemMessages({
@@ -4220,7 +4416,7 @@ export async function runColivingTurn(args: {
         // 仍然远低于主生成的 MAX_STEPS=6——这是补救性的单次重写，
         // 不该比正常一轮更奢侈。
         stopWhen: [hasToolCall("sendReply"), stepCountIs(4)],
-      });
+      }));
       /**
        * **同一个盲区，第三处发现（2026-09-05）：** 主生成、MAX_STEPS
        * 兜底、强制打招呼补发都已经在聚合 `toolsUsed`，唯独这条"第一层
@@ -4297,7 +4493,8 @@ export async function runColivingTurn(args: {
          * `contactPerson` 本身就是核心链路常驻工具（见工具分层注释），
          * 不受路由影响，不需要额外补。
          */
-        const retryResult = await generateText({
+        const retryResult = await trackedGatewayCall("fact-retry", modelId, () =>
+        generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
           system: buildGeneratorSystemMessages({
@@ -4333,7 +4530,7 @@ export async function runColivingTurn(args: {
           toolChoice: "required",
           // 可能要先调 pickSchedule 再 chooseSchedule 再 sendReply，给够步数余量
           stopWhen: [hasToolCall("sendReply"), stepCountIs(4)],
-        });
+        }));
         // 同一个盲区第四处——这条循环本身是这次泛化才新写的，写的时候
         // 就该顺手聚合，结果还是漏了，说明这个盲区已经不是"忘了"这么
         // 简单，值得往后每次新增 generateText 调用时，把"这次调用的
@@ -4373,9 +4570,11 @@ export async function runColivingTurn(args: {
        * （信息不全时延后必须先问）。**这条路径以前完全没人复查**，
        * 重写永远被当成"改完就对"。
        *
-       * 主观分歧最多只再给一次**聚焦的最终修正机会**（只带 sendReply，
-       * 喂完整最新事实和明确的审稿理由），再复核一次收尾——比死循环重写
-       * 更克制，也比"打回一次就摆烂"更负责。这次复核的结论就是最终
+       * 主观分歧的**聚焦最终修正有界**：只带 sendReply（需要动作时加必要工具），
+       * 喂完整最新事实和明确的审稿理由，再复核收尾——比死循环重写更克制，
+       * 也比"打回一次就摆烂"更负责。预算见 `finalFixBudget`：普通 1 次，
+       * relay 且仍有被拦出站时最多 2 次（一次只够消掉一个 violation）；每次
+       * 都用**最新**的 blocked reason，成功立即停。复核的结论就是最终
        * `replyReview`：还不合格，宁可保留这条可交付的消息（不让用户
        * 收不到任何回复），但**评测和汇总必须看到红灯**，不能再假装通过。
        */
@@ -4383,9 +4582,16 @@ export async function runColivingTurn(args: {
         renderBaseFacts() +
         (outbound.length
           ? `\n同一轮还联系了别人：${outbound
-              .map(
-                (o) =>
-                  `→${o.blocked ? "【这条被审稿拦下，没有发出去】" : ""}${o.text}`
+              .map((o) =>
+                o.blocked
+                  ? // **被拦的具体理由必须进这里。** 最终聚焦修正（可能已升级强模型）
+                    // 若只看到"这条没发出去"，不知道错在哪，就会原样重发同一句——
+                    // 2026-09-11 corpus-031 第 7 轮连续重发原句、critic 反复打回。
+                    // 这是给模型的内部事实，不会出现在任何住户可见文本里。
+                    `→【这条被审稿拦下，没有发出去；审稿意见：${
+                      o.blockReason ?? "（未记录理由）"
+                    }】${o.text}`
+                  : `→${o.text}`
               )
               .join(" ／ ")}`
           : "\n这一轮没有联系任何其他人");
@@ -4406,6 +4612,8 @@ export async function runColivingTurn(args: {
               taskContext: relayActive
                 ? relaySenderReplyTaskContext({ senderName })
                 : undefined,
+              view: relayActive ? "relay-sender-reply" : undefined,
+              forceStrong: strongRelayReview,
               said: args.text,
               facts: renderNewReplyFacts(),
               draft: reply,
@@ -4420,28 +4628,54 @@ export async function runColivingTurn(args: {
         };
       } else {
         console.log(
-          "[critic] 重写后复核仍不合格，做最后一次聚焦修正：",
+          "[critic] 重写后复核仍不合格，做聚焦修正：",
           redoVerdict.broke,
           redoVerdict.why
         );
-        try {
-          deliveredReply = null;
-          // 与首轮 isBrokenPromise 同一份分类：6.5/6.6/6.7 调度正确性打回在
-          // 最后一次聚焦修正里同样要给完整工具集，不能只剩 sendReply。
-          // **被拦的 relay 出站必须真正重发。** relay 这一轮已有 blocked 出站时，
-          // 第一步强制 contactPerson，别让强模型先调 sendReply 就绕过重发
-          // （见 finalFixForcedFirstTool）。这个判定同时决定要不要给多步工具集。
+        /**
+         * **有界的最终强修正循环。** 预算由 `finalFixBudget` 在**进入循环前**按当时
+         * 状态定一次：普通路径 1 次；relay 且本轮仍有被拦出站时最多 2 次（那次修正
+         * 本来就要重发被拦的联系）。循环只在前一次仍失败时继续，**一旦复核通过立即
+         * break**——非 relay、首稿、第一次 redo 的调用次数都不变，也不会无限循环。
+         * **是否强制重发每次迭代重算**（见循环内 `uncoveredBlockedPersonIds`），预算
+         * 上限不随之增长；每次重算 `renderNewReplyFacts()`，把**最新**的 blocked
+         * reason 喂给模型（被拦出站带 `blockReason`；新一稿再被拦也会即时进下一次
+         * 的 facts）。
+         */
+        const maxFinalFixAttempts = finalFixBudget({
+          relayActive,
+          hasBlockedOutbound: outbound.some((message) => message.blocked),
+        });
+        let lastFinalVerdict: Verdict = redoVerdict;
+        for (let fixAttempt = 0; fixAttempt < maxFinalFixAttempts; fixAttempt++) {
+          /**
+           * **每次迭代按当前最终状态重算"仍未被合格出站覆盖的被拦目标"。**
+           *
+           * 旧写法在进循环前只算一次 `hasBlockedOutbound`：只要本轮历史上出现过
+           * blocked，第二次迭代仍会强制 `contactPerson`。若第一次修正已为同一收件人
+           * 补上合格出站、只是回信审稿仍不过，第二次就会重复联系同一个人——这正是
+           * Codex 2026-09-12 退回的控制流问题。改成看**当前** `outbound`：同一
+           * personId 已有 `blocked:false` 出站即视为覆盖、不再重发；只剩回信问题时
+           * 集合为空，第二次只能用 `sendReply` 改回信，不能再联系。纯结构事实，
+           * 见 `uncoveredBlockedPersonIds`。
+           */
+          const uncoveredBlocked = uncoveredBlockedPersonIds(outbound);
+          // 被拦的 relay 出站必须真正重发：第一步强制 contactPerson，别让强模型
+          // 先调 sendReply 就绕过重发（见 finalFixForcedFirstTool）。这个判定同时
+          // 决定要不要给多步工具集。
           const forcedFirstTool = finalFixForcedFirstTool({
             relayActive,
-            hasBlockedOutbound: outbound.some((message) => message.blocked),
+            hasBlockedOutbound: uncoveredBlocked.length > 0,
           });
+          // 与首轮 isBrokenPromise 同一份分类：6.5/6.6/6.7 调度正确性打回在
+          // 最终聚焦修正里同样要给完整工具集，不能只剩 sendReply。
           const finalNeedsAction =
             forcedFirstTool !== null ||
-            redoVerdict.broke.trim() === "7" ||
-            redoVerdict.broke.trim() === "0" ||
-            ["6.5", "6.6", "6.7"].includes(redoVerdict.broke.trim()) ||
-            (outbound.some((message) => message.blocked) &&
-              ["1", "2", "12"].includes(redoVerdict.broke.trim()));
+            lastFinalVerdict.broke.trim() === "7" ||
+            lastFinalVerdict.broke.trim() === "0" ||
+            ["6.5", "6.6", "6.7"].includes(lastFinalVerdict.broke.trim()) ||
+            (uncoveredBlocked.length > 0 &&
+              ["1", "2", "12"].includes(lastFinalVerdict.broke.trim()));
           const finalTools: Record<string, (typeof tools)[keyof typeof tools]> =
             finalNeedsAction
               ? {
@@ -4452,119 +4686,140 @@ export async function runColivingTurn(args: {
                 }
               : { sendReply: tools.sendReply };
           const finalOutboundLen = outbound.length;
-          const finalFix = await generateText({
-            abortSignal: turnAbortSignal(),
-            // **relay 唯一升级强模型的地方。** 走到这里意味着初稿和第一次重写
-            // 都已被 critic 打回，只剩这最后一次聚焦修正——便宜模型反复重写
-            // 仍改不动的（029 实测只会复述内容），用一次 sonnet 换一次真正
-            // 改对的机会。非 relay、首稿、出站、第一次重写都不升级
-            // （见 relayRewriteModelId 与其离线回归）。
-            model: getLanguageModel(
-              relayRewriteModelId({
-                relayActive,
-                stage: "finalFix",
-                defaultModelId: modelId,
-              })
-            ),
-            system: buildGeneratorSystemMessages({
-              doctrine,
-              runtime,
-              guidance: args.guidance,
-            }),
-            messages: [
-              ...history,
-              { role: "user" as const, content: args.text },
-              { role: "assistant" as const, content: reply },
-              {
-                role: "user" as const,
-                content:
-                  "【这不是住户说的，是审稿意见——这是最后一次修正机会】\n" +
-                  `第${redoVerdict.broke}条仍不合格：${redoVerdict.why}\n\n` +
-                  `【这一轮最新的完整事实】\n${renderNewReplyFacts()}\n\n` +
-                  (finalNeedsAction
-                    ? "这次不能只换措辞：先调必要的工具，把该排的方案排出来、该联系的人联系到；完成后再调 sendReply 交付正文。"
-                    : "只做一件事：调 sendReply，把改好后真正要发给对方的那句话交出来，") +
-                  "对着上面的理由和事实改，不要重复同一个问题。",
-              },
-            ],
-            tools: finalTools,
-            toolChoice: finalNeedsAction
-              ? "required"
-              : { type: "tool", toolName: "sendReply" },
-            // 被拦的 relay 出站：**第一步强制 contactPerson 真正重发**，
-            // 之后（step 1+）放开为 "required"，仍可在有限步数内调 sendReply
-            // 交付回信。不加这段时，强模型可以第一步就 sendReply、绕过重发。
-            ...(forcedFirstTool !== null
-              ? {
-                  prepareStep: ({ stepNumber }: { stepNumber: number }) =>
-                    stepNumber === 0
-                      ? {
-                          toolChoice: {
-                            type: "tool" as const,
-                            toolName: "contactPerson" as const,
-                          },
-                        }
-                      : { toolChoice: "required" as const },
-                }
-              : {}),
-            ...(finalNeedsAction
-              ? { stopWhen: [hasToolCall("sendReply"), stepCountIs(4)] }
-              : {}),
-          });
-          for (const step of finalFix.steps) {
-            for (const call of step.toolCalls ?? []) {
-              toolsUsed.push(call.toolName);
+          try {
+            deliveredReply = null;
+            const finalFixModelId = relayRewriteModelId({
+              relayActive,
+              stage: "finalFix",
+              defaultModelId: modelId,
+            });
+            const finalFix = await trackedGatewayCall("finalFix", finalFixModelId, () =>
+            generateText({
+              abortSignal: turnAbortSignal(),
+              // **relay 最终聚焦修正升级强模型的地方。** 走到这里意味着初稿和
+              // 第一次重写都已被 critic 打回——便宜模型反复重写仍改不动的
+              // （029 实测只会复述内容），用一次 sonnet 换一次真正改对的机会。
+              // 非 relay、首稿、出站、第一次重写都不升级（见 relayRewriteModelId）。
+              model: getLanguageModel(finalFixModelId),
+              system: buildGeneratorSystemMessages({
+                doctrine,
+                runtime,
+                guidance: args.guidance,
+              }),
+              messages: [
+                ...history,
+                { role: "user" as const, content: args.text },
+                { role: "assistant" as const, content: reply },
+                {
+                  role: "user" as const,
+                  content:
+                    "【这不是住户说的，是审稿意见——这是最后一次修正机会】\n" +
+                    `第${lastFinalVerdict.broke}条仍不合格：${lastFinalVerdict.why}\n\n` +
+                    `【这一轮最新的完整事实】\n${renderNewReplyFacts()}\n\n` +
+                    (finalNeedsAction
+                      ? "这次不能只换措辞：先调必要的工具，把该排的方案排出来、该联系的人联系到；完成后再调 sendReply 交付正文。"
+                      : "只做一件事：调 sendReply，把改好后真正要发给对方的那句话交出来，") +
+                    "对着上面的理由和事实改，不要重复同一个问题。",
+                },
+              ],
+              tools: finalTools,
+              toolChoice: finalNeedsAction
+                ? "required"
+                : { type: "tool", toolName: "sendReply" },
+              // 被拦的 relay 出站：**第一步强制 contactPerson 真正重发**，
+              // 之后（step 1+）放开为 "required"，仍可在有限步数内调 sendReply
+              // 交付回信。不加这段时，强模型可以第一步就 sendReply、绕过重发。
+              ...(forcedFirstTool !== null
+                ? {
+                    prepareStep: ({ stepNumber }: { stepNumber: number }) =>
+                      stepNumber === 0
+                        ? {
+                            toolChoice: {
+                              type: "tool" as const,
+                              toolName: "contactPerson" as const,
+                            },
+                          }
+                        : { toolChoice: "required" as const },
+                  }
+                : {}),
+              ...(finalNeedsAction
+                ? { stopWhen: [hasToolCall("sendReply"), stepCountIs(4)] }
+                : {}),
+            }));
+            for (const step of finalFix.steps) {
+              for (const call of step.toolCalls ?? []) {
+                toolsUsed.push(call.toolName);
+              }
             }
+            const finalText = stripMarkdown((deliveredReply ?? "").trim());
+            if (finalText) {
+              reply = finalText;
+            }
+            const finalNewOutbound = outbound.slice(finalOutboundLen);
+            if (finalNewOutbound.length > 0) {
+              await critiqueAndMarkOutbound(finalNewOutbound);
+            }
+          } catch (finalError) {
+            // 预算触限是停止信号，不能被"聚焦修正失败就沿用上一版稿"吞掉。
+            if (isEvalBudgetExceeded(finalError)) throw finalError;
+            console.log(
+              "[critic] 聚焦修正失败，沿用上一版稿：",
+              finalError instanceof Error ? finalError.message : String(finalError)
+            );
           }
-          const finalText = stripMarkdown((deliveredReply ?? "").trim());
-          if (finalText) {
-            reply = finalText;
+          const finalFactFidelityHit = checkFactFidelity(reply);
+          // 修正稿同样按 needsSemanticCritique 判：安全敏感升级 sonnet，
+          // relay 这一轮的普通稿也进默认便宜 critic；其余直接 pass。
+          lastFinalVerdict = finalFactFidelityHit
+            ? { verified: true, pass: false as const, ...finalFactFidelityHit }
+            : needsSemanticCritique({
+                  relayActive,
+                  safetySensitive: hasSafetySensitiveTopic(reply, args.text),
+                })
+              ? await critique({
+                  to: sender.name,
+                  role: senderRole,
+                  taskContext: relayActive
+                    ? relaySenderReplyTaskContext({ senderName })
+                    : undefined,
+                  view: relayActive ? "relay-sender-reply" : undefined,
+                  forceStrong: strongRelayReview,
+                  said: args.text,
+                  facts: renderNewReplyFacts(),
+                  draft: reply,
+                })
+              : { verified: true, pass: true as const, broke: "", why: "" };
+          replyReview = {
+            verified: lastFinalVerdict.verified,
+            pass: lastFinalVerdict.pass,
+            broke: lastFinalVerdict.broke,
+            why: lastFinalVerdict.why,
+          };
+          // 成功立即停：不再烧下一次强修正。
+          if (lastFinalVerdict.pass) {
+            break;
           }
-          const finalNewOutbound = outbound.slice(finalOutboundLen);
-          if (finalNewOutbound.length > 0) {
-            await critiqueAndMarkOutbound(finalNewOutbound);
-          }
-        } catch (finalError) {
           console.log(
-            "[critic] 最后一次聚焦修正失败，沿用上一版重写稿：",
-            finalError instanceof Error ? finalError.message : String(finalError)
+            "[critic] 聚焦修正后仍不合格：",
+            lastFinalVerdict.broke,
+            lastFinalVerdict.why,
+            fixAttempt + 1 < maxFinalFixAttempts
+              ? "——还有一次预算，再来一次"
+              : "——预算用尽"
           );
         }
-        const finalFactFidelityHit = checkFactFidelity(reply);
-        // 最后一次修正稿同样按 needsSemanticCritique 判：安全敏感升级 sonnet，
-        // relay 这一轮的普通稿也进默认便宜 critic；其余直接 pass。
-        const finalVerdict = finalFactFidelityHit
-          ? { verified: true, pass: false as const, ...finalFactFidelityHit }
-          : needsSemanticCritique({
-                relayActive,
-                safetySensitive: hasSafetySensitiveTopic(reply, args.text),
-              })
-            ? await critique({
-                to: sender.name,
-                role: senderRole,
-                taskContext: relayActive
-                  ? relaySenderReplyTaskContext({ senderName })
-                  : undefined,
-                said: args.text,
-                facts: renderNewReplyFacts(),
-                draft: reply,
-              })
-            : { verified: true, pass: true as const, broke: "", why: "" };
-        replyReview = {
-          verified: finalVerdict.verified,
-          pass: finalVerdict.pass,
-          broke: finalVerdict.broke,
-          why: finalVerdict.why,
-        };
         if (!replyReview.pass) {
           console.log(
             "[critic] 最终修正后仍不合格——保留可交付消息，但 replyReview 标红：",
-            finalVerdict.broke,
-            finalVerdict.why
+            replyReview.broke,
+            replyReview.why
           );
         }
       }
     } catch (error) {
+      // 评测预算触限必须向上抛：不能被"重写失败就用原稿"吞掉——吞掉后
+      // 这一轮照样发信、下一轮接着超预算。
+      if (isEvalBudgetExceeded(error)) throw error;
       // 改不动就用原来那条——有消息总好过没消息，但 replyReview 保持
       // 上面设的失败态（初次打回的结论），不能假装重写成功了。
       console.log(

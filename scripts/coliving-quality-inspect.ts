@@ -2,14 +2,16 @@
  * No database imports, no send path. Run with NODE_OPTIONS=--conditions=react-server.
  */
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { config } from "dotenv";
 import { assembleSystemPrompt } from "../lib/ai/brains";
-import { finalizeJudgment, judgeConversation, type JudgeTurn } from "../lib/chat/coliving/evals/judge";
+import { finalizeJudgment, judgeConversation, judgeGuideText, type JudgeTurn } from "../lib/chat/coliving/evals/judge";
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
 import {
   countAcceptedOutbound,
   evaluateReplyReview,
+  evaluateTurnExpectation,
   evaluateTurnReplyReviews,
   validateScenario,
 } from "../lib/chat/coliving/evals/schema";
@@ -20,6 +22,7 @@ import {
   extractExplicitFixedStart,
   extractPreferredStart,
   extractSlotFromInquiry,
+  finalFixBudget,
   finalFixForcedFirstTool,
   hasDeferredCoordination,
   isLowInformationFollowUp,
@@ -29,9 +32,12 @@ import {
   isScheduleFairnessObjection,
   isScheduleSlotInquiry,
   isSimpleAffirmation,
+  isUnsolicitedContactClaim,
   needsSemanticCritique,
+  normalizeDraftKeyText,
   relayRecipientTaskContext,
   relaySenderReplyTaskContext,
+  uncoveredBlockedPersonIds,
   scheduleContactTextForAct,
   scheduleInquiryConfirmation,
   scheduleSlotMatchesSelfStatement,
@@ -39,12 +45,24 @@ import {
 import {
   criticModelId,
   hasSafetySensitiveTopic,
+  selectCriticRubric,
 } from "../lib/chat/coliving/critic";
 import {
   COLIVING_DEFAULT_MODEL,
   RELAY_FINAL_FIX_MODEL,
+  relayReviewNeedsStrong,
   relayRewriteModelId,
 } from "../lib/chat/coliving/model";
+import {
+  BatchBudget,
+  currentEvalLedger,
+  GatewayCostLedger,
+  gatewayCostFromResult,
+  isEvalBudgetExceeded,
+  mergeLedgerSnapshots,
+  runWithEvalLedger,
+  trackedGatewayCall,
+} from "../lib/chat/coliving/gateway-ledger";
 import {
   COLIVING_GUIDANCE_TEXTS,
   isKnownGuidanceId,
@@ -123,6 +141,12 @@ function toolDeclarationLiteralChars(src: string, toolNames: string[]): number {
 async function main() {
   let count = 0;
   const check = (name: string, fn: () => void) => { fn(); count++; console.log(`PASS ${name}`); };
+  // 少数检查需要 await（AsyncLocalStorage 并发隔离），单独一个异步版本。
+  const checkAsync = async (name: string, fn: () => Promise<void>) => {
+    await fn();
+    count++;
+    console.log(`PASS ${name}`);
+  };
   const bad: JudgeTurn[] = [{
     fromName: "小林", said: "大家的时间都告诉你了，安排好了吗？",
     reply: "方案已经分别发给他们两位了。",
@@ -161,6 +185,345 @@ async function main() {
     ]);
     assert.equal(failures.length, 1);
     assert.match(failures[0], /第1轮/);
+  });
+  check("per-turn expectation reuses the scene-level wording and enforces recipient scope", () => {
+    // 场景级 expect 与逐轮 expect 共用这一个纯函数，失败措辞必须逐字一致。
+    assert.deepEqual(
+      evaluateTurnExpectation(
+        { minAcceptedOutbound: 1 },
+        { toolsUsed: [], reply: "", outbound: [] }
+      ),
+      ["应有至少 1 条通过审稿的出站，实际 0 条；调用联系工具不等于联系成功"]
+    );
+    // 未声明 expect 的轮次不受任何单轮约束：单轮场景行为逐字不变。
+    assert.deepEqual(
+      evaluateTurnExpectation(undefined, { toolsUsed: [], reply: "随便", outbound: [] }),
+      []
+    );
+    const scope = {
+      minAcceptedOutbound: 1,
+      mustUseTools: ["contactPerson"],
+      mustContactNames: ["甲"],
+      mustNotContactNames: ["乙", "丙"],
+    };
+    const outcome = (
+      outbound: Array<{ toName: string; text: string; blocked?: boolean }>
+    ) => ({ toolsUsed: ["contactPerson"], reply: "已经跟甲说了，等他回话。", outbound });
+    // 有一条通过审稿、发给甲、没碰别人 → 通过。
+    assert.deepEqual(
+      evaluateTurnExpectation(scope, outcome([{ toName: "甲", text: "…", blocked: false }])),
+      []
+    );
+    // 只调了工具、出站被审稿拦下：不算联系上（minAcceptedOutbound + mustContactNames 各一条）。
+    assert.equal(
+      evaluateTurnExpectation(scope, outcome([{ toName: "甲", text: "…", blocked: true }])).length,
+      2
+    );
+    // 越权联系乙：即使被审稿拦下，越权尝试本身也算失败。
+    const overreach = evaluateTurnExpectation(
+      scope,
+      outcome([
+        { toName: "甲", text: "…", blocked: false },
+        { toName: "乙", text: "…", blocked: true },
+      ])
+    );
+    assert.equal(overreach.length, 1);
+    assert.match(overreach[0], /乙/);
+  });
+  check("outboundMustMatch only inspects accepted outbound, symmetric with outboundMustNotMatch", () => {
+    const expect = { outboundMustMatch: ["换宿舍|分开住"] };
+    const outcome = (
+      outbound: Array<{ toName: string; text: string; blocked?: boolean }>
+    ) => ({ toolsUsed: ["contactPerson"], reply: "已经问他了。", outbound });
+    // 通过审稿的出站命中核心议题 → 通过。
+    assert.deepEqual(
+      evaluateTurnExpectation(
+        expect,
+        outcome([{ toName: "甲", text: "想问问你要不要分开住", blocked: false }])
+      ),
+      []
+    );
+    // 出站没命中 → 一条失败（这是正向证据：议题不能被软化掉）。
+    const miss = evaluateTurnExpectation(
+      expect,
+      outcome([{ toName: "甲", text: "想聊聊接下来怎么住", blocked: false }])
+    );
+    assert.equal(miss.length, 1);
+    assert.match(miss[0], /没有命中该出现的模式/);
+    // 被审稿拦下的草稿不算送达：命中也不算通过（与 MustNotMatch 只查通过的出站对称）。
+    assert.equal(
+      evaluateTurnExpectation(
+        expect,
+        outcome([{ toName: "甲", text: "要不要分开住", blocked: true }])
+      ).length,
+      1
+    );
+    // 未声明 outboundMustMatch 的场景行为逐字不变。
+    assert.deepEqual(
+      evaluateTurnExpectation(
+        {},
+        outcome([{ toName: "甲", text: "随便走走", blocked: false }])
+      ),
+      []
+    );
+    // 场景接线：corpus-031 最后一轮必须带这条正向证据，且整个 JSON 能被 schema 接受。
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/corpus-031-reddit-repeated-relay-2026-09-11.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(raw, "corpus-031.json");
+    const last = scenario.turns[scenario.turns.length - 1];
+    const issuePatterns = last.expect?.outboundMustMatch ?? [];
+    assert(issuePatterns.length > 0, "corpus-031 最后一轮要求出站命中核心议题");
+    const issueHit = (text: string) => issuePatterns.some((p) => new RegExp(p).test(text));
+    // 语义明确的等价说法都算命中：换宿舍/分开住/要不要继续一起住。
+    for (const hit of [
+      "问你要不要换宿舍",
+      "聊聊要不要分开住",
+      "聊聊以后怎么住、要不要继续一起住这件事",
+      "问他还愿不愿意一起住",
+    ]) {
+      assert(issueHit(hit), `核心议题断言应命中：${hit}`);
+    }
+    // 只含糊说"聊聊以后怎么住/近况"不算——议题没传达到，正向证据必须红灯。
+    for (const miss of ["聊聊以后怎么住", "聊聊近况", "想跟你坐下来谈谈"]) {
+      assert(!issueHit(miss), `核心议题断言不该放过含糊说法：${miss}`);
+    }
+  });
+  check("corpus-031 第 1 轮回归哨兵：出站须保留收件人自购义务，禁止把义务转给来源人（只认通过审稿的出站）", () => {
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/corpus-031-reddit-repeated-relay-2026-09-11.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(raw, "corpus-031.json");
+    const expect = scenario.turns[0].expect ?? {};
+    assert(
+      (expect.outboundMustMatch ?? []).length > 0,
+      "第 1 轮必须正向要求出站保留收件人自购要点"
+    );
+    assert(
+      (expect.outboundMustNotMatch ?? []).length > 0,
+      "第 1 轮必须反向禁止把收件人的义务改记到来源人头上"
+    );
+    const outcome = (
+      outbound: Array<{ toName: string; text: string; blocked?: boolean }>
+    ) => ({
+      toolsUsed: ["contactPerson"],
+      reply: "已经跟小浩说了，在等他回话。",
+      outbound,
+    });
+    // 通过审稿、正确保留「收件人自己买自己的」→ 通过。
+    assert.deepEqual(
+      evaluateTurnExpectation(
+        expect,
+        outcome([
+          {
+            toName: "小浩",
+            text: "小岚说她讲过吃的各买各的。以后没问过她别拿她的吃的，你也自己买自己的。",
+            blocked: false,
+          },
+        ])
+      ),
+      []
+    );
+    // 复现第八次实跑的错误出站（把收件人的义务改成来源人的）→ 哨兵必须红灯。
+    const inverted = evaluateTurnExpectation(
+      expect,
+      outcome([
+        {
+          toName: "小浩",
+          text: "小岚说她的吃的之前讲过是各买各的、不共用。她希望以后没问过她别拿她的吃的，她自己会买自己的。",
+          blocked: false,
+        },
+      ])
+    );
+    assert(inverted.length > 0, "把收件人义务转给来源人必须判失败");
+    // 被审稿拦下的同款草稿不算送达：只有 blocked 草稿时不得通过（不能拿草稿充数）。
+    assert(
+      evaluateTurnExpectation(
+        expect,
+        outcome([
+          {
+            toName: "小浩",
+            text: "以后没问过别拿她的，你也自己买自己的。",
+            blocked: true,
+          },
+        ])
+      ).length > 0,
+      "只有被拦草稿时不得通过哨兵"
+    );
+  });
+  check("corpus-031 第 7 轮回信：完成时真实回执通过，将来时未执行承诺仍被拦", () => {
+    // 第十八阶段：旧负向正则「问他…今晚/有没有空」把已经发生的真实回执
+    // （report 2026-09-12T02-12-29-616Z：「已经跟小浩说了，问他今晚有没有空谈，在等他回话。」）
+    // 误判成将来时内部过程。完成时陈述已发生动作 + 当前等待状态，本就该通过；
+    // 尚未执行的将来时承诺由运行时确定性闸（checkProcessNarration）拦截，
+    // 场景里不再另造一套平行语言正则。
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/corpus-031-reddit-repeated-relay-2026-09-11.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(raw, "corpus-031.json");
+    const last = scenario.turns[scenario.turns.length - 1];
+    // 场景级 expect 只对最后一轮生效（见 runner），与逐轮 expect 共用同一判法。
+    const lastExpect = scenario.expect ?? {};
+    // 正向议题证据不受本次删除影响：第 7 轮出站仍必须保留居住去留议题。
+    assert(
+      (last.expect?.outboundMustMatch ?? []).length > 0,
+      "第 7 轮仍必须正向要求出站保留居住去留议题"
+    );
+    const completedReceipt = "已经跟小浩说了，问他今晚有没有空谈，在等他回话。";
+    // 完成时真实回执：不命中第 7 轮任何负向模式，也不被过程旁白闸当成将来时。
+    assert.equal(
+      evaluateTurnExpectation(lastExpect, {
+        toolsUsed: ["contactPerson"],
+        reply: completedReceipt,
+        outbound: [{ toName: "小浩", text: "之后要不要继续一起住、还是分开安排", blocked: false }],
+      }).length,
+      0,
+      `完成时真实回执不该再被第 7 轮负向模式拦住：${completedReceipt}`
+    );
+    assert.equal(
+      checkProcessNarration(completedReceipt, ["小浩"]),
+      null,
+      "完成时陈述已发生联系 + 当前等待状态，不是将来时过程旁白"
+    );
+    // 尚未执行的将来时承诺：仍须被运行时闸拦住（这里不依赖场景正则）。
+    for (const future of [
+      "我这就去问小浩今晚有没有空。",
+      "我会问小浩今晚有没有空。",
+    ]) {
+      assert(
+        checkProcessNarration(future, ["小浩"]) !== null,
+        `尚未执行的将来时承诺必须仍被拦：${future}`
+      );
+    }
+  });
+  check("process narration catches future-tense contact already delivered this turn", () => {
+    // 名字在"我/这边 + 将来标记 + 联系动词"公式里、且是本轮已联系的人才命中。
+    assert.match(checkProcessNarration("好的，我这就去跟甲说一声。", ["甲"])?.why ?? "", /已经成功联系过/);
+    assert.match(checkProcessNarration("我待会跟甲说。", ["甲"])?.why ?? "", /已经成功联系过/);
+    // 完成时不算将来时；不是本轮联系过的人不算；住户触发的条件句先剥掉。
+    assert.equal(checkProcessNarration("已经跟甲说了，等他回话。", ["甲"]), null);
+    assert.equal(checkProcessNarration("我这就去跟甲说", ["乙"]), null);
+    assert.equal(
+      checkProcessNarration("他要是还闹，你告诉我，我再跟甲说一声。", ["甲"]),
+      null
+    );
+  });
+  check("relay 本轮零出站却声称已联系 = 确定性假完成，非 relay 不误伤", () => {
+    // relay 命中、本轮没有任何出站、回复声称联系完成 → 判假完成。
+    assert.equal(
+      isUnsolicitedContactClaim({
+        relayActive: true,
+        outboundCount: 0,
+        claimsCompletion: true,
+      }),
+      true
+    );
+    // 真联系过（出站 ≥1）不受影响：这是"没做却说做了"，不是"做了却说了"。
+    assert.equal(
+      isUnsolicitedContactClaim({
+        relayActive: true,
+        outboundCount: 1,
+        claimsCompletion: true,
+      }),
+      false
+    );
+    // 没声称联系完成也不拦（可能有别的合法回复）。
+    assert.equal(
+      isUnsolicitedContactClaim({
+        relayActive: true,
+        outboundCount: 0,
+        claimsCompletion: false,
+      }),
+      false
+    );
+    // 非 relay 一律不启用，普通对话不受影响。
+    assert.equal(
+      isUnsolicitedContactClaim({
+        relayActive: false,
+        outboundCount: 0,
+        claimsCompletion: true,
+      }),
+      false
+    );
+    // 接线：确定性闸必须真的用这个判定，而不是另写一份内联条件。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes("isUnsolicitedContactClaim({"),
+      "checkFalseContactClaim 必须复用 isUnsolicitedContactClaim"
+    );
+    // 「有出站但被拦」那一支同样靠 claimsContactCompletion；无主语完成式
+    // 现在也被它覆盖，blocked 出站 + 「跟X说了」才会触发重发链（031 第 4 轮）。
+    const ffIdx = turnSrc.indexOf("function checkFalseContactClaim(");
+    assert(ffIdx > 0, "checkFalseContactClaim 必须存在");
+    const ffBody = turnSrc.slice(
+      ffIdx,
+      turnSrc.indexOf("\n  function ", ffIdx + 10)
+    );
+    assert(
+      ffBody.includes("claimsContactCompletion(text)"),
+      "被拦出站的假完成判定必须复用 claimsContactCompletion"
+    );
+    // 被拦出站判定改用纯函数 `uncoveredBlockedPersonIds`（结构事实：目标人
+    // 是否已有合格出站覆盖）；不再内联遍历 outbound[].blocked，见下方结构断言。
+    assert(
+      ffBody.includes("uncoveredBlockedPersonIds(outbound)"),
+      "被拦出站判定必须基于 uncoveredBlockedPersonIds 结构事实"
+    );
+  });
+  check("被拦目标只用同人合格出站覆盖（结构事实，别人不能顶账）", () => {
+    // 旧 blocked + 同人 accepted → 已被合格出站覆盖，无需重发。
+    assert.deepEqual(
+      uncoveredBlockedPersonIds([
+        { personId: "p1", blocked: true },
+        { personId: "p1", blocked: false },
+      ]),
+      [],
+      "同一个人的合格出站覆盖了它自己被拦的那条：无需重发"
+    );
+    // 旧 blocked + 仍无同人 accepted → 仍需要重发。
+    assert.deepEqual(
+      uncoveredBlockedPersonIds([{ personId: "p1", blocked: true }]),
+      ["p1"],
+      "被拦且没有同人合格出站：仍要重发"
+    );
+    // 不同人的 accepted 不能覆盖 blocked 目标。
+    assert.deepEqual(
+      uncoveredBlockedPersonIds([
+        { personId: "p1", blocked: true },
+        { personId: "p2", blocked: false },
+      ]),
+      ["p1"],
+      "别人的合格出站不能顶账：被拦目标仍要重发"
+    );
+    // 去重后只留仍未被同人覆盖的被拦目标，且顺序稳定（首次被拦序）。
+    assert.deepEqual(
+      uncoveredBlockedPersonIds([
+        { personId: "p1", blocked: true },
+        { personId: "p2", blocked: true },
+        { personId: "p1", blocked: true },
+        { personId: "p2", blocked: false },
+      ]),
+      ["p1"],
+      "多个被拦目标去重，只留仍未被覆盖的"
+    );
+  });
+  check("rejected-draft key folds whitespace and CJK/ASCII punctuation only", () => {
+    // 同一句只把「，」换成「,」（031 第 7 轮真实情形）→ 同一个 key，不重新抽签。
+    assert.equal(
+      normalizeDraftKeyText("小浩，嘉怡、小岚 想今晚聊"),
+      normalizeDraftKeyText("小浩,嘉怡、小岚想今晚聊")
+    );
+    // 真改了内容（换词、增删字）→ key 必须不同，不改动的不锁死。
+    assert.notEqual(normalizeDraftKeyText("要不要分开住"), normalizeDraftKeyText("要不要一起住"));
   });
   check("substantive medium is not accepted", () => {
     assert.equal(finalizeJudgment([{ severity: "medium", turnIndex: 0, issue: "未完成协调", quote: bad[0].reply }], bad).pass, false);
@@ -259,6 +622,14 @@ async function main() {
     assert.equal(claimsContactCompletion("好，我直接问他了。"), true);
     assert.equal(claimsContactCompletion("我还在问另外两位，收齐后一起排。"), true);
     assert.equal(claimsContactCompletion("这轮我也在联系老孙。"), false);
+    // 中文回信常省主语、直接写「跟X说了」——被拦出站的同一轮里就是假完成
+    // （2026-09-11 corpus-031 第 4 轮：出站被拦、回信仍写「跟小浩说了」、
+    // replyReview 误绿）。无主语完成式必须命中。
+    assert.equal(claimsContactCompletion("跟小浩说了，在等他回话。"), true);
+    assert.equal(claimsContactCompletion("和他说过了。"), true);
+    // 相反方向（对方对我说）不算"我联系了对方"，排除在我的消息之外。
+    assert.equal(claimsContactCompletion("小浩跟我说了这件事。"), false);
+    assert.equal(claimsContactCompletion("他昨天跟我说了。"), false);
   });
   check("explicit fixed-start wording is recovered from recorded facts", () => {
     assert.equal(extractExplicitFixedStart("我18点到家，只能18点开始做饭，要做两小时"), 1080);
@@ -471,48 +842,184 @@ async function main() {
       "已发生的内容转述不是未发生的承诺"
     );
   });
-  check("relay task context reaches the critic without changing other roles", () => {
+  check("relay 专属短审稿视图：非 relay 仍用完整 rubric，relay 两种视图各自加载且不混批", () => {
+    // 动态人名/任务关系仍由 taskContext 带（发给收信人 / 回给发信人两种）。
     const outbound = relayRecipientTaskContext({ senderName: "小夏", recipientName: "小陈" });
-    assert(outbound.includes("小夏") && outbound.includes("小陈"), "任务背景要说清发信人与收信人");
-    assert(outbound.includes("第一人称"), "任务背景要提醒不得用发信人第一人称");
-    // 假匿名（023 连续两次自动绿、人工红）：该用发信人名字时草稿写成
-    // 「这屋有人听到」「有人晚上没睡好」，便宜 critic 连续漏判。rubric 12 已管
-    // 这件事，但 critic 拿到任务背景后不去核对来源归属。任务背景必须把 doctrine
-    // 已有的归属二选一规则说清：需要归属就用发信人名字，不需要归属就整条就事论事，
-    // 不得停在「有人/一位室友/同住的人」这种谁也不是的中间态。
-    assert(
-      outbound.includes("发信人名字") && outbound.includes("就事论事"),
-      "任务背景要说清来源归属二选一：用发信人名字，或整条就事论事"
-    );
-    assert(
-      outbound.includes("有人") &&
-        outbound.includes("一位室友") &&
-        outbound.includes("同住的人"),
-      "任务背景要明确点出「有人/一位室友/同住的人」这类假匿名主语不合格"
-    );
-    // 不因为这一条把所有传话改成实名：该保密时仍整条不提来源、就事论事。
-    assert(
-      outbound.includes("不是把所有传话都改成实名"),
-      "任务背景不得把「必须有来源」变成 relay 的普遍要求"
-    );
+    assert(outbound.includes("小夏") && outbound.includes("小陈"), "出站任务背景要说清发信人与收信人");
     const reply = relaySenderReplyTaskContext({ senderName: "小夏" });
     assert(reply.includes("小夏"), "回信任务背景要说清发信人");
-    assert(reply.includes("当前状态"), "回信任务背景要说清动作+当前状态");
-    // 出站可能被 critic 拦下、根本没发出去，同一轮 facts 里就是"被拦、未发"。
-    // 任务背景若写死"已经联系成功"，会和 facts 冲突并诱导假完成——必须只说
-    // 任务关系，是否实际发出以 facts 为准。
-    assert(!reply.includes("已经代他去联系了"), "回信任务背景不得写死联系已成功");
-    assert(reply.includes("已知的事实"), "是否实际发出必须以 facts 为准");
-    // 只对 relay 生效：普通对话不传 taskContext，提示词里就不出现这一段。
+
+    // 非 relay：没有任何视图标记 → 完整通用 rubric 原样装载，行为不变。
+    const general = selectCriticRubric([], true);
+    assert(general.includes("这份不给生成用"), "非 relay 仍装载完整通用 rubric");
+    assert(!general.includes("这是一次一对一传话的**出站**"), "非 relay 不能混进 relay 出站视图");
+
+    // relay 出站：只装短专属视图，不再塞 179 行通用 rubric。
+    const recipient = selectCriticRubric(["relay-recipient"], false);
+    assert(recipient.includes("这是一次一对一传话的**出站**"), "relay 出站用专属短视图");
+    // 假匿名（023 连续两次自动绿、人工红）与第一人称冒充（021）：专属视图必须把
+    // doctrine 已有的归属规则说清——不得用发信人第一人称，也不得虚构「有人/一位
+    // 室友」这种谁也不是的来源，同时**不强迫每条实名**。
+    assert(
+      recipient.includes("第一人称") &&
+        recipient.includes("有人") &&
+        recipient.includes("一位室友"),
+      "专属视图要说清来源归属：不得用发信人第一人称，也不得虚构「有人/一位室友」这类来源"
+    );
+    assert(
+      recipient.includes("就事论事") && recipient.includes("不要求每条都实名"),
+      "专属视图不得把「必须有来源」变成 relay 的普遍要求"
+    );
+    // 第十一阶段：通用事实保真（谁拥有/谁做/谁承担）。实跑第八次 corpus-031 第 1 轮
+    // 把收件人的义务「他也得自己买」改写成来源人「她自己会买自己的」。专属视图必须
+    // 要求核对物品/动作/义务归属，并给出不含本场人名的正反例。
+    assert(
+      recipient.includes("谁拥有") &&
+        recipient.includes("谁承担") &&
+        recipient.includes("义务") &&
+        recipient.includes("fail") &&
+        recipient.includes("pass"),
+      "relay 出站专属视图必须含「谁拥有/谁做/谁承担」的事实保真要求与正反例"
+    );
+    for (const sceneWord of ["小浩", "小岚", "麦片", "意大利面", "洗碗机", "牛排", "饼干"]) {
+      assert(
+        !recipient.includes(sceneWord),
+        `通用 relay 审稿视图不得写进 corpus-031 的专有名词：${sceneWord}`
+      );
+    }
+    // 第三人私密背景（第七次实跑的第 2 轮泄露「阿鹏没住这边」）：专属视图要把它
+    // 单列一条，并给出「事件对象属于谁 vs 第三人行踪」的判断说明（不写关键词正则）。
+    assert(
+      recipient.includes("第三人") && recipient.includes("事件对象"),
+      "专属视图要点出第三人私密背景判断，并区分事件对象与第三人行踪"
+    );
+    // 第九阶段新增的对照判例：不写关键词正则，只把「带行踪 fail / 只留归属+动作 pass」
+    // 这组范式放进专属视图（来自 corpus-031 已人工验收的成功/失败轨迹），并声明
+    // 「用户明确要求转告行踪时反例不适用」这一正常反例。
+    assert(
+      recipient.includes("判断范式") &&
+        recipient.includes("本反例不适用") &&
+        recipient.includes("东西属于谁"),
+      "relay 出站专属视图必须含第三人行踪的正反对照判例与其正常反例"
+    );
+    // 第十二阶段：把「透明转达待定居住安排议题」与「威胁/驱逐」分开。否则 critic 会把
+    // 用户明确交办的「要不要分开住」误判成赶人风险，反而逼出站删掉核心议题（第 7 轮实跑）。
+    assert(
+      recipient.includes("尚未决定") &&
+        recipient.includes("不是威胁") &&
+        recipient.includes("必须保留") &&
+        recipient.includes("擅自升级成驱逐"),
+      "relay 出站视图必须区分「待定的居住安排议题」与「威胁/驱逐」，并要求保留未决定的核心议题"
+    );
+    assert(!recipient.includes("这份不给生成用"), "relay 出站不再装载通用 rubric");
+
+    // relay 回信：与出站不同的另一份短视图，只说「动作 + 当前状态」。
+    const senderReply = selectCriticRubric(["relay-sender-reply"], false);
+    assert(senderReply !== recipient, "出站与回信必须是两份不同的专属视图");
+    assert(
+      senderReply.includes("回信") && senderReply.includes("当前状态"),
+      "回信视图要说清只报动作+当前状态"
+    );
+    assert(
+      senderReply.includes("私下处理") && senderReply.includes("没发群"),
+      "回信视图要明确点出不得汇报私下/没发群这类遵守过程"
+    );
+    assert(senderReply.includes("将来时"), "回信视图要拦「已经做完却写将来时」");
+    assert(
+      senderReply.includes("不预设") && senderReply.includes("已知的事实"),
+      "回信视图不得写死联系已成功，是否发出以 facts 为准"
+    );
+    // 第九阶段新增的对照判例：成功联系时「已经跟他说了，在等他回话」pass、
+    // 复述内容 fail、全被拦时谎称已联系 fail；并说清「在等他回话」是当前等待状态。
+    assert(
+      senderReply.includes("判断范式") &&
+        senderReply.includes("在等他回话") &&
+        senderReply.includes("复述"),
+      "relay 回信专属视图必须含 pass/fail 对照判例与「在等他回话」非编造的说明"
+    );
+    // 第十二阶段：从「一句摘要都不能有」的绝对规则改成分级判断——回信先如实报动作，
+    // 简短点明主题/动作可接受、不阻断；只有冗长复述/讲道理/改事实/泄露/假完成才拦。
+    assert(
+      senderReply.includes("简短点明") &&
+        senderReply.includes("不构成阻断项") &&
+        senderReply.includes("冗长复述") &&
+        senderReply.includes("整段或大半"),
+      "relay 回信视图必须把「简短点明主题/动作」列为可接受、只拦冗长复述等实质问题"
+    );
+    assert(!senderReply.includes("这份不给生成用"), "relay 回信不再装载通用 rubric");
+
+    // 混合批（同批混自我介绍等通用消息）：两类条款都列且各自限定范围，不错位。
+    const mixed = selectCriticRubric(["relay-recipient"], true);
+    assert(
+      mixed.includes("这是一次一对一传话的**出站**") && mixed.includes("这份不给生成用"),
+      "混合批必须同时装载 relay 专属视图与通用 rubric"
+    );
+    assert(
+      mixed.includes("只适用于没有 relay 标注的消息"),
+      "混合批必须显式限定通用清单只用于非 relay 消息，避免介绍消息被套进 relay"
+    );
+
     const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
-    assert(criticSrc.includes("【这一轮的任务】"), "critic 必须渲染任务背景");
-    assert(criticSrc.includes("args.taskContext"), "单条 critic 必须用上 taskContext");
-    assert(criticSrc.includes("e.taskContext"), "批量 critic 必须用上 taskContext");
+    // 每条消息自带视图标记 → 批量出站逐条按自己的模式审，不靠 taskContext 是否非空猜。
+    assert(criticSrc.includes("审稿视图："), "批量 critic 必须逐条标出该条用哪个视图");
+    assert(
+      criticSrc.includes("selectCriticRubric(views, hasGeneral)") &&
+        criticSrc.includes("selectCriticRubric(args.view ? [args.view] : [], !args.view)"),
+      "单条与批量 critic 都必须按结构标记选择视图"
+    );
+    // 不增加模型调用次数：批判器仍只有单条/批量两处 generateText。
+    assert.equal(
+      criticSrc.split("generateText(").length - 1,
+      2,
+      "不能为专属视图新增模型调用"
+    );
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     assert(turnSrc.includes("relayRecipientTaskContext({"), "turn.ts 必须接入 relay 出站任务背景");
     assert(turnSrc.includes("relaySenderReplyTaskContext({"), "turn.ts 必须接入 relay 回信任务背景");
+    assert(
+      turnSrc.split('"relay-recipient"').length - 1 === 1 &&
+        turnSrc.split('"relay-sender-reply"').length - 1 === 3,
+      "relay 出站 1 处、回信 3 处（初稿/重写/最终修正）都要带结构标记"
+    );
   });
-  check("只有 relay 的最终聚焦修正升级强模型，其余生成路径一律默认模型", () => {
+  check("judge 判断前提与 relay 一致：透明转达待定居住议题、简短点题回执都不是失败", () => {
+    // 第十三阶段：事后 semantic judge 原先仍把「暗示可能住不下去」无条件列 high、
+    // 把回执里的内容摘要一律列 medium，与第十二阶段已改对的生产审稿器互相矛盾——
+    // 同一份输出会出现「生产 critic 放行、事后 judge 判红」。这里只校准 judge 的
+    // **判断共同前提**（不改模型、调用次数、schema 或结构事实过滤），并用断言锁住。
+    const guide = judgeGuideText();
+    // 语义锚：正确前提必须存在（居住安排 + 回执分级）。
+    assert(
+      guide.includes("居住安排") &&
+        guide.includes("尚未决定") &&
+        guide.includes("不是伤害") &&
+        guide.includes("必须把要谈"),
+      "judge 必须区分「待定的居住安排议题」与「威胁/驱逐」，并要求保留未决定的核心议题"
+    );
+    assert(
+      guide.includes("简短点明主题") &&
+        guide.includes("整段或大半") &&
+        guide.includes("本可以更短"),
+      "judge 回执前提必须允许简短点明主题/动作，只把整段或大半复述当实质问题"
+    );
+    // 旧绝对规则不得再出现——它们正是与 relay 审稿器冲突的来源。
+    assert(
+      !guide.includes("暗示了可能住不下去"),
+      "judge 不得再把「暗示可能住不下去」一律列 high"
+    );
+    assert(
+      !guide.includes("合格回信只有一句") && !guide.includes("内容摘要证明"),
+      "judge 不得再把回执压成绝对单句规则、或把简短内容摘要一律判 medium"
+    );
+    // 判例必须用角色称谓，不得写进 corpus-031 的专有名词（先写对判断任务，不靠 sanitize 硬丢）。
+    for (const sceneWord of ["小浩", "小岚", "嘉怡", "阿鹏", "麦片", "意大利面", "洗碗机", "牛排", "饼干"]) {
+      assert(
+        !guide.includes(sceneWord),
+        `judge 判例不得写进 corpus-031 的专有名词：${sceneWord}`
+      );
+    }
+  });
+  check("relay 只在最终聚焦修正升级强模型，主生成与其余生成路径一律默认模型", () => {
     // 唯一升级路径：relay + finalFix（走到这里意味着初稿与第一次重写都已被 critic 打回）。
     assert.equal(
       relayRewriteModelId({
@@ -523,7 +1030,7 @@ async function main() {
       RELAY_FINAL_FIX_MODEL,
       "relay 最终聚焦修正必须升级到强模型"
     );
-    assert.equal(RELAY_FINAL_FIX_MODEL, "anthropic/claude-sonnet-4.5");
+    assert.equal(RELAY_FINAL_FIX_MODEL, "anthropic/claude-sonnet-4.6");
     // 其余路径一律默认便宜模型，不能顺手放宽到首稿/出站/第一次重写/非 relay。
     assert.equal(
       relayRewriteModelId({
@@ -573,10 +1080,96 @@ async function main() {
       1,
       "第一次重写必须走默认模型分支"
     );
-    // 其余生成路径（主生成 / 出站 / fact-fidelity 重试）仍直接使用 modelId。
+    // **主生成不升级强模型**（第十七阶段撤回第十六阶段的选择性主生成升级）：
+    // 主生成直接尊重 `args.modelId ?? colivingModelId()`，与强制交付/打招呼/
+    // fact-fidelity 重试一样走默认模型，只保留 finalFix 这一处窄升级。
     assert(
-      turnSrc.split("getLanguageModel(modelId)").length - 1 >= 4,
-      "其余生成路径仍用默认模型，没有被顺手升级"
+      !turnSrc.includes("relayMainModelId"),
+      "不应再有任何 relay 主生成专属选型"
+    );
+    assert(
+      turnSrc.split("getLanguageModel(modelId)").length - 1 >= 3,
+      "主生成与强制交付/打招呼/事实重试都使用默认模型"
+    );
+  });
+  check("relay 选择性强审稿只按结构事实升级：首次简单提醒不升级，连续关系/多收件人才升级", () => {
+    // 首次简单 relay：一个收件人、此前没有介绍之外的往来 → 便宜 critic。
+    assert.equal(
+      relayReviewNeedsStrong({
+        relayActive: true,
+        recipientCount: 1,
+        houseHasPriorSubstantiveOutbound: false,
+      }),
+      false,
+      "首次简单提醒不能升级成强模型调用"
+    );
+    // 房屋级连续关系（本轮开始前已有介绍之外的实质往来）→ 强。
+    assert.equal(
+      relayReviewNeedsStrong({
+        relayActive: true,
+        recipientCount: 1,
+        houseHasPriorSubstantiveOutbound: true,
+      }),
+      true
+    );
+    // 本轮一个出站都没有（模型漏调 contactPerson）、但房屋此前已有实质往来 → 仍升级，
+    // 不能因为"本轮收件人数为 0"就失效（corpus-031 第 6 轮）。
+    assert.equal(
+      relayReviewNeedsStrong({
+        relayActive: true,
+        recipientCount: 0,
+        houseHasPriorSubstantiveOutbound: true,
+      }),
+      true,
+      "模型漏调联系工具时，房屋级信号仍要认出连续关系"
+    );
+    // 本轮多个实际/尝试收件人 → 强（哪怕只有第一次往来）。
+    assert.equal(
+      relayReviewNeedsStrong({
+        relayActive: true,
+        recipientCount: 2,
+        houseHasPriorSubstantiveOutbound: false,
+      }),
+      true
+    );
+    // 非 relay 一律不升级，普通对话不受影响。
+    for (const recipientCount of [0, 1, 2]) {
+      for (const houseHasPriorSubstantiveOutbound of [false, true]) {
+        assert.equal(
+          relayReviewNeedsStrong({
+            relayActive: false,
+            recipientCount,
+            houseHasPriorSubstantiveOutbound,
+          }),
+          false,
+          "非 relay 不得升级"
+        );
+      }
+    }
+    // 强审稿模型与安全敏感同一个：criticModelId(true) === criticModelId(false, true)。
+    const prev = process.env.COLIVING_CRITIC_MODEL;
+    delete process.env.COLIVING_CRITIC_MODEL;
+    try {
+      assert.equal(criticModelId(false, true), "anthropic/claude-sonnet-4.6");
+      assert.equal(criticModelId(false, true), criticModelId(true));
+      assert.equal(criticModelId(false, false), "deepseek/deepseek-v4-flash");
+    } finally {
+      if (prev === undefined) delete process.env.COLIVING_CRITIC_MODEL;
+      else process.env.COLIVING_CRITIC_MODEL = prev;
+    }
+    // 接线：turn.ts 把结构事实算成 strongRelayReview，并喂给出站批量 critic 与回信 critic。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes("relayReviewNeedsStrong({"),
+      "turn.ts 必须调用纯函数算强审稿"
+    );
+    assert(
+      turnSrc.includes("forceStrong: strongRelayReview"),
+      "出站/回信 critic 必须带上强审稿标记"
+    );
+    assert(
+      turnSrc.split("forceStrong: strongRelayReview").length - 1 >= 4,
+      "四个 relay critic 入口（批量出站 + 三处回信）都应带上强审稿标记"
     );
   });
   check("blocked relay 的最终聚焦修正第一步强制 contactPerson，其余最终修正不受影响", () => {
@@ -607,9 +1200,19 @@ async function main() {
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     const forced = turnSrc.indexOf("const forcedFirstTool = finalFixForcedFirstTool({");
     assert(forced > 0, "turn.ts 必须用 finalFixForcedFirstTool 决定是否强制重发");
+    // 强制条件必须来自**每次迭代重算**的"仍未被同人合格出站覆盖"的集合
+    // （`uncoveredBlockedPersonIds`），不是循环外只算一次的静态 blocked 布尔
+    // ——旧写法会在第一次已补齐合格出站后，第二次仍重复联系同一人（Codex
+    // 2026-09-12 控制流退回）。
+    const forcedArgs = turnSrc.slice(forced, forced + 260);
     assert(
-      turnSrc.slice(forced - 220, forced).includes("blocked"),
-      "强制重发只应挂在 blocked relay 出站这条窄路径上"
+      turnSrc.includes("hasBlockedOutbound: uncoveredBlocked.length > 0"),
+      "强制重发只应挂在仍有未覆盖被拦出站的窄路径上（每次迭代重算）"
+    );
+    assert(
+      forcedArgs.includes("hasBlockedOutbound:") &&
+        !forcedArgs.includes("outbound.some((message) => message.blocked)"),
+      "强制判定必须吃循环内重算的 uncoveredBlocked，而不是循环外的静态 blocked 布尔"
     );
     const prep = turnSrc.indexOf("prepareStep:", forced);
     assert(prep > forced, "必须把第一步强制工具接进最终聚焦修正调用");
@@ -636,15 +1239,74 @@ async function main() {
       "最终修正新发的出站仍要过 critiqueAndMarkOutbound"
     );
   });
+  check("最终强修正有界：普通 1 次、relay+blocked 最多 2 次，成功短路、非 relay 不增预算", () => {
+    // 预算纯函数：只有 relay 且本轮仍有被拦出站时才给第二次；其余一律 1 次。
+    assert.equal(
+      finalFixBudget({ relayActive: true, hasBlockedOutbound: true }),
+      2,
+      "relay 且有被拦出站：最多 2 次"
+    );
+    assert.equal(
+      finalFixBudget({ relayActive: true, hasBlockedOutbound: false }),
+      1,
+      "relay 但无 blocked：仍是 1 次"
+    );
+    assert.equal(
+      finalFixBudget({ relayActive: false, hasBlockedOutbound: true }),
+      1,
+      "非 relay 不增加预算"
+    );
+    assert.equal(
+      finalFixBudget({ relayActive: false, hasBlockedOutbound: false }),
+      1,
+      "非 relay 且无 blocked：1 次"
+    );
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    // 上限由纯函数给，不在循环里再写死一个数字。
+    assert(
+      turnSrc.includes("const maxFinalFixAttempts = finalFixBudget({"),
+      "预算必须来自 finalFixBudget 纯函数"
+    );
+    assert(
+      turnSrc.includes("fixAttempt < maxFinalFixAttempts"),
+      "有界循环必须以上限为界，不能写死更大的数"
+    );
+    // 成功立即停：复核通过即短路，不白烧下一次强修正。
+    const loopIdx = turnSrc.indexOf("for (let fixAttempt = 0;");
+    assert(loopIdx > 0, "必须有有界最终修正循环");
+    const loopEnd = turnSrc.indexOf("if (!replyReview.pass)", loopIdx);
+    const loopBody = turnSrc.slice(loopIdx, loopEnd);
+    assert(loopIdx < loopEnd, "循环体必须存在");
+    assert(
+      loopBody.includes("if (lastFinalVerdict.pass) {") && loopBody.includes("break;"),
+      "复核通过必须立即 break 短路"
+    );
+    // 每次用最新事实（含最新 blockReason）复核，不是复用旧结论。
+    assert(
+      loopBody.includes("renderNewReplyFacts()") &&
+        loopBody.includes("const finalFactFidelityHit = checkFactFidelity(reply)"),
+      "每次修正都要用最新的 blocked reason 与事实复核"
+    );
+    assert(
+      turnSrc.includes("o.blockReason ?? "),
+      "被拦出站的 blockReason 必须进最终修正的事实"
+    );
+    // 没有复制整段控制流：finalFix 选型仍只有一处。
+    assert.equal(
+      turnSrc.split('stage: "finalFix"').length - 1,
+      1,
+      "有界循环仍只有一处 finalFix 选型，没有复制控制流"
+    );
+  });
   check("process-narration gate is wired into checkFactFidelity", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     assert(src.includes("export function checkProcessNarration("), "turn.ts 必须导出 checkProcessNarration");
     const ffIdx = src.indexOf("function checkFactFidelity(");
     assert(ffIdx > 0, "checkFactFidelity 必须存在");
     const ffBody = src.slice(ffIdx, src.indexOf("const factFidelityHit", ffIdx));
-    assert(ffBody.includes("checkProcessNarration(text)"), "checkFactFidelity 必须调用 checkProcessNarration");
+    assert(ffBody.includes("checkProcessNarration(text,"), "checkFactFidelity 必须调用 checkProcessNarration");
     assert(
-      ffBody.indexOf("checkProcessNarration(text)") > ffBody.indexOf("checkIncompleteConflictTurn(text)"),
+      ffBody.indexOf("checkProcessNarration(text,") > ffBody.indexOf("checkIncompleteConflictTurn(text)"),
       "checkProcessNarration 必须作为 checkFactFidelity 末尾的最后一道检查"
     );
   });
@@ -936,7 +1598,9 @@ async function main() {
     const marker = "短路闸：住户以「愿意/行/可以」这类简单肯定，回复一条排班时段征询";
     const markerIdx = turnSrc.indexOf(marker);
     const buildCtxIdx = turnSrc.indexOf("const ctx = await buildContext(sender");
-    const mainGenIdx = turnSrc.indexOf("const result = await generateText({");
+    // 主生成现在包在评测计费台账里（`trackedGatewayCall("main", …)`），
+    // 断言改锚在包装调用上，仍然验证"短路闸先于主生成"。
+    const mainGenIdx = turnSrc.indexOf('const result = await trackedGatewayCall("main"');
     assert(markerIdx > 0, "短路闸注释必须存在");
     assert(buildCtxIdx > markerIdx,
       `短路闸（@${markerIdx}）必须先于 buildContext（@${buildCtxIdx}）`);
@@ -1148,7 +1812,7 @@ async function main() {
     try {
       assert.equal(criticModelId(), "deepseek/deepseek-v4-flash", "默认必须降级成跟大脑同源的便宜模型");
       assert.equal(criticModelId(false), "deepseek/deepseek-v4-flash");
-      assert.equal(criticModelId(true), "anthropic/claude-sonnet-4.5", "安全敏感主题必须程序化升级到 sonnet");
+      assert.equal(criticModelId(true), "anthropic/claude-sonnet-4.6", "安全敏感主题必须程序化升级到 sonnet");
     } finally {
       if (prev === undefined) delete process.env.COLIVING_CRITIC_MODEL;
       else process.env.COLIVING_CRITIC_MODEL = prev;
@@ -1156,10 +1820,10 @@ async function main() {
     const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
     assert(criticSrc.includes("hasSafetySensitiveTopic(args.said, args.draft)"),
       "critique 必须用入站正文 + 待发消息判安全敏感主题");
-    assert(criticSrc.includes("criticModelId(forceSensitive)"),
-      "critique 必须把敏感判定结果喂给模型选型");
+    assert(criticSrc.includes("criticModelId(forceSensitive, args.forceStrong)"),
+      "critique 必须把敏感判定结果 + relay 选择性强审稿喂给模型选型");
     assert(criticSrc.includes('DEFAULT_CRITIC_MODEL = "deepseek/deepseek-v4-flash"'), "默认降级常量必须在");
-    assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.5"'), "升级常量必须在");
+    assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.6"'), "升级常量必须在");
     assert(criticSrc.includes('process.env.COLIVING_CRITIC_MODEL?.trim()'), "必须保留 COLIVING_CRITIC_MODEL 覆盖");
   });
   check("relay turns route non-sensitive outbound/reply into the default critic; other chats still skip it", () => {
@@ -1311,8 +1975,8 @@ async function main() {
     const outboundSeg = turnSrc.slice(outboundStart, outboundEnd);
     assert(outboundSeg.includes("hasSafetySensitiveTopic(o.text, args.text)"), "出站守卫必须覆盖 o.text（正文）");
     // 4) 升级在 critic 内部：安全敏感命中 → forceSensitive → criticModelId(true)=sonnet
-    assert(criticSrc.includes("criticModelId(forceSensitive)"), "critic 内仍按 forceSensitive 升级模型");
-    assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.5"'), "升级常量必须在");
+    assert(criticSrc.includes("criticModelId(forceSensitive"), "critic 内仍按 forceSensitive 升级模型");
+    assert(criticSrc.includes('SENSITIVE_CRITIC_MODEL = "anthropic/claude-sonnet-4.6"'), "升级常量必须在");
   });
 
   /**
@@ -1426,12 +2090,35 @@ async function main() {
     );
   });
 
-  check("评测报告在正常/异常两条返回路径都记录 guidance id", () => {
-    assert.equal(
-      evalGuidanceSrc.split("guidance: GUIDANCE_LABEL,").length - 1,
-      2,
-      "正常结果与异常结果两条返回路径都要写 guidance id"
+  check("评测报告在正常/预算中止/异常返回路径都记录 guidance id", () => {
+    // 不硬编码"应该有 2 条"这种脆弱计数：预算中止是和异常并列的**第三条**
+    // 返回路径（`runScenario` 的 loopBudgetStop 提前返回），以后还可能加新的。
+    // 改成**成对不变量**：凡带本地账 `cost: ledger.snapshot()` 的结果返回，
+    // 就必须同时带 `guidance: GUIDANCE_LABEL`——新增路径两者一起出现才通过，
+    // 只加账、漏了 guidance 立刻失败。
+    const costStamps = evalGuidanceSrc.split("cost: ledger.snapshot()").length - 1;
+    const guidanceStamps =
+      evalGuidanceSrc.split("guidance: GUIDANCE_LABEL").length - 1;
+    assert(
+      costStamps >= 3,
+      `正常/预算中止/异常三条返回路径都应写本地账，实际 ${costStamps} 条`
     );
+    assert.equal(
+      guidanceStamps,
+      costStamps,
+      "每条带本地账的结果返回路径都必须同时记录 guidance id（成对出现）"
+    );
+    // 三条路径确实各自存在（用各自独有的事实措辞做锚，不用可被凑数满足的固定计数）
+    for (const anchor of [
+      "评测预算停止：", // runScenario 的预算中止返回
+      "场景执行异常：", // runScenarioSafely 的 catch 返回
+      "pass: failures.length === 0,", // runScenario 的正常返回
+    ]) {
+      assert(
+        evalGuidanceSrc.includes(anchor),
+        `预期中的返回路径锚点不存在：${anchor}`
+      );
+    }
   });
 
   /**
@@ -3522,6 +4209,10 @@ async function main() {
       "你跟他说一声吧，以后有事先敲门",
       "你赶紧帮我跟他说一声，让他把音量调小",
       "麻烦你替我转告他一声",
+      // 口语里常不带"帮我"、收信人用姓名（2026-09-11 corpus-031 第 2、6 轮漏加载的真实说法）。
+      "你现在单独跟小浩说，没得到阿鹏同意就别动阿鹏的吃的",
+      "你私下提醒他把门口这些饼干屑扫掉，别发群里",
+      "你提醒他一下，别在大半夜进屋",
     ];
     for (const text of shouldLoad) {
       assert(
@@ -3534,6 +4225,11 @@ async function main() {
       "帮我安排一下厨房的时段",
       "我昨天跟他说了，他说知道了",
       "你到底是房东那边的还是我们租客这边的？",
+      // 在**询问 AI 的历史**、没有任何交办动作的完成式/经验式说法：`(?!了|过)`
+      // 把这类从"祈使/委托"里排除（2026-09-11 第五阶段 matcher 的误命中）。
+      "你昨天跟小明说了什么？",
+      "你之前跟房东讲过吗？",
+      "你上周提醒过他了吗？",
     ];
     for (const text of shouldNotLoad) {
       assert(
@@ -3543,12 +4239,393 @@ async function main() {
     }
   });
 
+  /**
+   * relay doctrine 的 few-shot 转化判例哨兵（第十四阶段）。corpus-031 第 2 轮生成端
+   * 反复把物主行踪带进出站、把收件人的义务反转给来源人，根因是缺可模仿的成功转化。
+   * 这里只做**源码级字符串检查**：判例确实以「原始交办 → 合格/不合格」进入 doctrine，
+   * 且失败判例是本场景不可复制的通用对照。它**不证明**默认模型会照做——自然语言能力
+   * 由实跑与人工验收判断，不是这段断言能认证的。
+   */
+  check("relay doctrine 转化判例：成功/失败对照已进入 doctrine，且不含 corpus-031 专有名词", () => {
+    const relayDoc = readFileSync("lib/ai/brains/coliving/doctrine/domain/relay.md", "utf8");
+    assert(relayDoc.includes("原始交办"), "判例必须以「原始交办 → 出站」形式呈现");
+    assert(relayDoc.includes("合格") && relayDoc.includes("不合格"), "判例必须给出合格与不合格对照");
+    // 两条判例各自的教学点：删掉与动作无关的第三人行踪；义务稳定落在收件人，不反转、不改成报备。
+    assert(relayDoc.includes("行踪"), "判例要展示第三人行踪对完成动作无关、必须删掉");
+    assert(relayDoc.includes("义务"), "判例要展示义务归属不得因改写而反转");
+    for (const sceneWord of ["小岚", "嘉怡", "阿鹏", "小浩", "麦片", "意大利面", "洗碗机", "牛排", "饼干", "温控器"]) {
+      assert(!relayDoc.includes(sceneWord), `通用 relay doctrine 不得写进 corpus-031 的专有名词：${sceneWord}`);
+    }
+  });
+
+  /**
+   * 第十五阶段：约谈议题被「温和地删掉」的对照判例。第 7 轮原始交办明确要谈
+   * 「要不要分开住」，通过审稿的出站却写成「一起商量往后怎么住更舒服。没定什么结论」，
+   * 把决定收件人是否参加所必需的议题盖掉；抽象条款「必须保留核心议题」不足以稳定识别。
+   * doctrine 与出站专属审稿视图都要有这组「温和≠含糊」的语义对照。仍是源码级字符串
+   * 检查：它**不证明**默认模型会照做，自然语言能力由实跑与人工验收判断。
+   */
+  check("relay 约谈议题对照判例：doctrine 与出站专属视图都有「温和≠含糊」的语义对照，且无本语料专名", () => {
+    const relayDoc = readFileSync("lib/ai/brains/coliving/doctrine/domain/relay.md", "utf8");
+    // 议题要直说去留（继续一起住 / 分开安排），不能含糊成「以后怎么住得更舒服」。
+    assert(
+      relayDoc.includes("继续一起住") && relayDoc.includes("分开安排"),
+      "doctrine 判例要明说约谈议题是「继续一起住 / 分开安排」"
+    );
+    assert(
+      relayDoc.includes("温和") && relayDoc.includes("含糊"),
+      "doctrine 判例要点出「温和不等于含糊」"
+    );
+    assert(
+      relayDoc.includes("以后怎么住得更舒服"),
+      "doctrine 判例要给出被含糊掉的失败对照"
+    );
+    // 出站专属视图：同一判断范式——更软的说法不能替代去留议题，且不得无中生有。
+    const recipient = selectCriticRubric(["relay-recipient"], false);
+    assert(
+      recipient.includes("以后怎么住得舒服") &&
+        recipient.includes("不能替代") &&
+        recipient.includes("是否继续合住") &&
+        recipient.includes("是否分开安排"),
+      "出站专属视图要明确「以后怎么住得舒服 / 之后怎么协调」不能替代「是否继续合住 / 是否分开安排」"
+    );
+    assert(
+      recipient.includes("不得自行添加"),
+      "出站专属视图要保留正常反例：原始交办没有居住去留议题时不得自行添加"
+    );
+    for (const sceneWord of ["小岚", "嘉怡", "阿鹏", "小浩", "麦片", "意大利面", "洗碗机", "牛排", "饼干", "温控器"]) {
+      assert(!relayDoc.includes(sceneWord), `doctrine 约谈判例不得写进 corpus-031 的专有名词：${sceneWord}`);
+      assert(!recipient.includes(sceneWord), `通用 relay 审稿视图不得写进 corpus-031 的专有名词：${sceneWord}`);
+    }
+  });
+
   const previous = process.env.COLIVING_JUDGE_OFF;
   process.env.COLIVING_JUDGE_OFF = "1";
   const off = await judgeConversation({ scenarioId: "off", source: "offline", roster: [], turns: bad });
   assert.equal(off.verified, false); assert.equal(off.pass, false); count++;
   if (previous === undefined) delete process.env.COLIVING_JUDGE_OFF;
   else process.env.COLIVING_JUDGE_OFF = previous;
+
+  // ── 评测计费台账（gateway-ledger.ts）：纯离线，不发任何模型调用 ────────
+  /** 伪造一次 generateText 结果：每步一个 gateway.cost（undefined = 缺字段）。 */
+  const fakeGatewayResult = (costs: Array<string | undefined>) => ({
+    steps: costs.map((cost) =>
+      cost === undefined ? { providerMetadata: {} } : { providerMetadata: { gateway: { cost } } }
+    ),
+  });
+
+  check("评测台账：已知花费逐步累加、缺 cost 记 unknown（不当 0）", () => {
+    const ledger = new GatewayCostLedger({});
+    ledger.beforeCall("main", "m1");
+    ledger.afterCall(
+      "main",
+      "m1",
+      gatewayCostFromResult(fakeGatewayResult(["0.10", "0.20"]))
+    );
+    ledger.beforeCall("critic", "m2");
+    ledger.afterCall(
+      "critic",
+      "m2",
+      gatewayCostFromResult(fakeGatewayResult([undefined]))
+    );
+    const snap = ledger.snapshot();
+    assert.equal(snap.calls, 2, "两次调用都要登记");
+    assert.ok(
+      Math.abs(snap.knownCostUsd - 0.3) < 1e-9,
+      `已知花费应为 0.30，实际 ${snap.knownCostUsd}`
+    );
+    assert.equal(snap.unknownCostCalls, 1, "缺 cost 的那次必须记 unknown，不能当 0");
+    assert.equal(snap.stopped, false);
+    assert.equal(snap.byStage.find((b) => b.key === "main")?.calls, 1);
+    assert.equal(snap.byModel.find((b) => b.key === "m2")?.unknownCostCalls, 1);
+  });
+  check("评测台账：步级 cost 缺失 => 该次整笔 unknown，绝不按 0 计", () => {
+    const reading = gatewayCostFromResult(fakeGatewayResult(["0.05", undefined]));
+    assert.equal(reading.unknown, true, "只要有一步缺 cost 就标 unknown");
+    assert.ok(Math.abs(reading.costUsd - 0.05) < 1e-9, "已知的部分照实累加");
+    assert.equal(gatewayCostFromResult(fakeGatewayResult([])).unknown, true);
+  });
+  check("评测台账：调用数硬上限，第 N+1 次在发起前被拒", () => {
+    const ledger = new GatewayCostLedger({ maxModelCalls: 2 });
+    ledger.beforeCall("main", "m");
+    ledger.afterCall("main", "m", { costUsd: 0.01, unknown: false });
+    ledger.beforeCall("redo", "m");
+    ledger.afterCall("redo", "m", { costUsd: 0.01, unknown: false });
+    assert.throws(
+      () => ledger.beforeCall("finalFix", "m"),
+      (error: unknown) => isEvalBudgetExceeded(error),
+      "第 3 次调用必须抛预算错误"
+    );
+    const snap = ledger.snapshot();
+    assert.equal(snap.calls, 2, "被拒的调用不计入已发起数");
+    assert.equal(snap.stopped, true);
+    assert.match(snap.stopReason ?? "", /硬上限/);
+    // 触限后已花的钱留在快照里（报告不丢已花成本）。
+    assert.ok(snap.knownCostUsd > 0, "触限后已花成本必须留在快照里");
+  });
+  check("评测台账：金额达线后拦下一次，单次可略越线、已花成本照留", () => {
+    const ledger = new GatewayCostLedger({ maxCostUsd: 0.25 });
+    ledger.beforeCall("main", "m");
+    ledger.afterCall("main", "m", { costUsd: 0.3, unknown: false });
+    assert.throws(
+      () => ledger.beforeCall("redo", "m"),
+      (error: unknown) => isEvalBudgetExceeded(error),
+      "已知累计已到线，下一次必须被拒"
+    );
+    const snap = ledger.snapshot();
+    assert.equal(snap.calls, 1, "单次请求可略越线，但不发下一次");
+    assert.ok(snap.knownCostUsd >= 0.25, "已知花费照实记，不粉饰");
+    assert.equal(snap.stopped, true);
+  });
+  check("评测台账：多场景快照可合并，按 stage/model 聚合", () => {
+    const a = new GatewayCostLedger({ maxModelCalls: 10 });
+    a.beforeCall("main", "m");
+    a.afterCall("main", "m", { costUsd: 0.1, unknown: false });
+    const b = new GatewayCostLedger({ maxModelCalls: 10 });
+    b.beforeCall("main", "m");
+    b.afterCall("main", "m", { costUsd: 0.2, unknown: true });
+    const total = mergeLedgerSnapshots([a.snapshot(), b.snapshot()]);
+    assert.equal(total.calls, 2);
+    assert.ok(Math.abs(total.knownCostUsd - 0.3) < 1e-9);
+    assert.equal(total.unknownCostCalls, 1);
+    const main = total.byStage.find((x) => x.key === "main");
+    assert.equal(main?.calls, 2);
+    assert.equal(main?.unknownCostCalls, 1);
+  });
+  check("评测台账：整批共享预算——多场景账本共用一个总上限，第 N+1 次全局被拒", () => {
+    // 关键回归：`--max-model-calls` 是**整批**上限，不是每场景各一份。
+    // 两个场景共用一份预算、各有一份本地台账；全局只能调 2 次。
+    const budget = new BatchBudget({ maxModelCalls: 2 });
+    const localA = new GatewayCostLedger({}, budget);
+    const localB = new GatewayCostLedger({}, budget);
+    localA.beforeCall("main", "m");
+    localA.afterCall("main", "m", { costUsd: 0.1, unknown: false });
+    localB.beforeCall("main", "m");
+    localB.afterCall("main", "m", { costUsd: 0.2, unknown: false });
+    // 第 3 次（不管从哪个场景发起）都必须被整批共享上限拒。
+    assert.throws(
+      () => localA.beforeCall("redo", "m"),
+      (error: unknown) => isEvalBudgetExceeded(error),
+      "第 3 次调用必须被整批共享上限拒绝"
+    );
+    assert.throws(
+      () => localB.beforeCall("redo", "m"),
+      (error: unknown) => isEvalBudgetExceeded(error),
+      "被拒后任何场景的后续调用都拒"
+    );
+    const global = budget.snapshot();
+    assert.equal(global.calls, 2, "整批只放行 2 次调用");
+    assert.ok(Math.abs(global.knownCostUsd - 0.3) < 1e-9, "全局已知花费累加");
+    assert.equal(global.stopped, true);
+    assert.match(global.stopReason ?? "", /硬上限/);
+    // 本地账各记各的收据，不放大成 N 份上限、也不串场。
+    assert.equal(localA.snapshot().calls, 1, "A 的本地账只记 A 的一次");
+    assert.equal(localB.snapshot().calls, 1, "B 的本地账只记 B 的一次");
+    assert.equal(localA.snapshot().stopped, true, "本地账要能反映共享预算已停止");
+    // 合并本地账 = 全局总数：相加既不重复计费，也不漏。
+    const merged = mergeLedgerSnapshots([localA.snapshot(), localB.snapshot()]);
+    assert.equal(
+      merged.calls,
+      global.calls,
+      "合并本地账的调用数必须等于整批总数（不重复计费）"
+    );
+    assert.ok(
+      Math.abs(merged.knownCostUsd - global.knownCostUsd) < 1e-9,
+      "合并本地账的金额必须等于整批总数（不重复计费）"
+    );
+  });
+  await checkAsync(
+    "评测台账：共享预算下并发上下文仍各记各的本地收据（不串场）",
+    async () => {
+      const budget = new BatchBudget({ maxModelCalls: 10 });
+      const ledgerA = new GatewayCostLedger({}, budget);
+      const ledgerB = new GatewayCostLedger({}, budget);
+      await Promise.all([
+        runWithEvalLedger(ledgerA, async () => {
+          await trackedGatewayCall("main", "a", async () => fakeGatewayResult(["0.10"]));
+          await trackedGatewayCall("redo", "a", async () => fakeGatewayResult(["0.20"]));
+        }),
+        runWithEvalLedger(ledgerB, async () => {
+          await trackedGatewayCall("main", "b", async () => fakeGatewayResult(["0.05"]));
+        }),
+      ]);
+      assert.equal(ledgerA.snapshot().calls, 2, "A 的本地账只记 A 的两次");
+      assert.equal(ledgerB.snapshot().calls, 1, "B 的本地账只记 B 的一次");
+      assert.ok(Math.abs(ledgerA.snapshot().knownCostUsd - 0.3) < 1e-9);
+      assert.ok(Math.abs(ledgerB.snapshot().knownCostUsd - 0.05) < 1e-9);
+      const global = budget.snapshot();
+      assert.equal(global.calls, 3, "共享预算记全局 3 次");
+      assert.ok(Math.abs(global.knownCostUsd - 0.35) < 1e-9);
+      assert.equal(global.stopped, false, "没到上限不该停");
+    }
+  );
+  check("评测台账：金额线是整批共享的软上限（单次可略越线，之后全局拦住）", () => {
+    const budget = new BatchBudget({ maxCostUsd: 0.25 });
+    const a = new GatewayCostLedger({}, budget);
+    const b = new GatewayCostLedger({}, budget);
+    a.beforeCall("main", "m");
+    a.afterCall("main", "m", { costUsd: 0.3, unknown: false });
+    assert.throws(
+      () => b.beforeCall("main", "m"),
+      (error: unknown) => isEvalBudgetExceeded(error),
+      "场景 A 花过线后，场景 B 的下一次也必须被拒（金额线整批共享）"
+    );
+    assert.equal(budget.snapshot().calls, 1, "越线的那一次已发起，但不再发下一次");
+    assert.ok(budget.snapshot().knownCostUsd >= 0.25, "已知花费照实记，不粉饰");
+  });
+  await checkAsync("评测台账：并发场景各记各的账（AsyncLocalStorage 隔离）", async () => {
+    // A 上限 1、B 上限 3：两者 Promise.all 并发。若共享一个可变全局，
+    // B 的第二次调用会被 A 的次数/花费拖下水；隔离则各按各的上限走。
+    const ledgerA = new GatewayCostLedger({ maxModelCalls: 1 });
+    const ledgerB = new GatewayCostLedger({ maxModelCalls: 3 });
+    const [a, b] = await Promise.all([
+      runWithEvalLedger(ledgerA, async () => {
+        await trackedGatewayCall("main", "a", async () => fakeGatewayResult(["0.50"]));
+        try {
+          await trackedGatewayCall("redo", "a", async () => fakeGatewayResult(["0.50"]));
+          return "allowed";
+        } catch (error) {
+          return isEvalBudgetExceeded(error) ? "budget" : "other";
+        }
+      }),
+      runWithEvalLedger(ledgerB, async () => {
+        await trackedGatewayCall("main", "b", async () => fakeGatewayResult(["0.01"]));
+        await trackedGatewayCall("redo", "b", async () => fakeGatewayResult(["0.01"]));
+        return "two-ok";
+      }),
+    ]);
+    assert.equal(a, "budget", "A 的第 2 次只该被 A 自己的上限拒");
+    assert.equal(b, "two-ok", "B 不受 A 的次数/花费影响（没有共享全局）");
+    assert.equal(ledgerA.snapshot().calls, 1);
+    assert.equal(ledgerB.snapshot().calls, 2);
+    assert.ok(Math.abs(ledgerA.snapshot().knownCostUsd - 0.5) < 1e-9);
+    assert.ok(Math.abs(ledgerB.snapshot().knownCostUsd - 0.02) < 1e-9);
+  });
+  await checkAsync("评测台账：没有台账时原样透传（生产行为不变）", async () => {
+    assert.equal(currentEvalLedger(), undefined, "生产上下文里没有台账");
+    const marker = { value: 42 };
+    const returned = await trackedGatewayCall("main", "m", async () => marker);
+    assert.equal(returned, marker, "无台账必须原样返回 run 的结果，不包不改");
+    // 没设预算（本地台账自建无上限内部预算）时也不限流：与原来"不设限"一致。
+    const ledger = new GatewayCostLedger({});
+    for (let i = 0; i < 5; i++) {
+      ledger.beforeCall("main", "m");
+      ledger.afterCall("main", "m", { costUsd: 1, unknown: false });
+    }
+    assert.equal(ledger.snapshot().calls, 5);
+    assert.equal(ledger.snapshot().stopped, false, "没设上限就不该停");
+  });
+  check("评测预算闸已接进 coliving-eval，报告在正常/触限/异常三路都带台账", () => {
+    const src = readFileSync("scripts/coliving-eval.ts", "utf8");
+    assert(
+      src.includes("runWithEvalLedger(ledger"),
+      "每个场景必须跑在自己的本地台账上下文里"
+    );
+    // 上限是**整批共享**的：只建一份 BatchBudget，场景本地台账挂上去，
+    // 本地不再各带 CLI 上限（否则 N 个场景把总预算放大 N 倍）。
+    assert.equal(
+      src.split("new BatchBudget(").length - 1,
+      1,
+      "整批只能建一份共享预算（不是每场景一份）"
+    );
+    assert(
+      /new GatewayCostLedger\(\s*\{\}\s*,\s*batchBudget\s*\)/.test(src),
+      "场景本地台账必须挂到整批共享预算上（本地不自带上限）"
+    );
+    assert(
+      !/new GatewayCostLedger\(\{[^}]*max/.test(src),
+      "GatewayCostLedger 构造时不得再带 CLI 上限"
+    );
+    assert(
+      src.includes("maxCostUsd: MAX_COST_USD") &&
+        src.includes("maxModelCalls: MAX_MODEL_CALLS"),
+      "限额必须来自 CLI 参数，并挂在共享预算上"
+    );
+    assert(
+      src.includes("for (const r of results) r.budget = budgetSnapshot"),
+      "报告要给每个场景贴上整批共享预算快照（含停止原因）"
+    );
+    assert(
+      src.split("cost: ledger.snapshot()").length - 1 >= 3,
+      "正常返回、轮次触限、异常三条路径都要带台账（报告不丢已花成本）"
+    );
+    assert(
+      src.includes("isEvalBudgetExceeded(error)"),
+      "预算错误必须被识别成停止信号，而不是普通失败"
+    );
+    assert(
+      src.includes("mergeLedgerSnapshots(results.map((r) => r.cost))"),
+      "终端汇总要合并各场景台账"
+    );
+    assert(
+      src.indexOf("writeFileSync(reportPath") > 0,
+      "报告在退出前写出，触限不丢"
+    );
+    // 不改生产：只有 turn/critic/judge 的 generateText 走包装，生产无台账即透传。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert.equal(
+      turnSrc.split("trackedGatewayCall(").length - 1,
+      6,
+      "turn.ts 六处 Gateway 调用都要过计费台账"
+    );
+    const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
+    assert.equal(
+      criticSrc.split("trackedGatewayCall(").length - 1,
+      2,
+      "critic.ts 单条/批量两处都要过计费台账"
+    );
+    const judgeSrc = readFileSync("lib/chat/coliving/evals/judge.ts", "utf8");
+    assert.equal(
+      judgeSrc.split("trackedGatewayCall(").length - 1,
+      1,
+      "judge.ts 判定调用要过计费台账"
+    );
+  });
+
+  /**
+   * ── outreach.ts 的裸 generateText 不在评测路径上 ───────────────────────
+   *
+   * outreach.ts 的 `compose()` 直接调 `generateText`，**没走**
+   * `trackedGatewayCall`。要证明它不会在 coliving-eval 里发生：全仓扫 import
+   * 形式，唯一 import 它的是独立 CLI `scripts/coliving-outreach.ts`
+   * （`pnpm coliving:outreach`，跟评测 runner 无关）。评测路径上会调模型的
+   * 三个模块（turn/critic/judge）都不 import 它，因此它的调用发不出去。
+   * 只查 import 形式，不扫正文（注释/表名里出现 "outreach" 属正常）。
+   */
+  check("评测路径不含 outreach：其未纳管的 generateText 发不出", () => {
+    const importRe = /(?:from\s*|import\(\s*)["']([^"']*\/outreach)["']/g;
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+          walk(p);
+        } else if (/\.tsx?$/.test(e.name)) {
+          files.push(p);
+        }
+      }
+    };
+    for (const root of ["lib", "scripts"]) walk(root);
+    const importers = files
+      .filter((f) => {
+        importRe.lastIndex = 0;
+        return importRe.test(readFileSync(f, "utf8"));
+      })
+      .map((f) => f.replace(/\\/g, "/"));
+    assert.ok(
+      importers.length > 0,
+      "至少独立 CLI 应该 import outreach（否则这个扫描本身失效）"
+    );
+    for (const f of importers) {
+      assert.equal(
+        f,
+        "scripts/coliving-outreach.ts",
+        `只有独立 CLI 能 import outreach，评测路径不得依赖它：${f}`
+      );
+    }
+  });
+
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);
 
   const reportIndex = process.argv.indexOf("--report");

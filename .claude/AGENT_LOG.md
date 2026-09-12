@@ -12,6 +12,17 @@
 
 ---
 
+## 2026-09-11 · Reddit 连续一对一传话 corpus-031 与整轮成本闸
+
+- Codex 直接把 Notion Reddit 第一人称故事转成 7 轮 AI-facing relay 语料；Claude Code 按双模型门禁实现 doctrine、critic、judge、schema、运行时修正和评测成本账本，Codex 独立审查与运行。
+- 重要人工退回：把“小浩自己买”写成“小岚自己买”；泄露“阿鹏不在”；从上下文抓错锅主人；把“是否分开住”软化成“以后怎么住舒服”；旧正则把已完成的“已经问他今晚是否有空”误判为过程旁白。
+- 治本改变：relay 生成端加入通用正反 few-shot；recipient/sender 审稿与 judge 统一人物归属、必要披露、透明待定议题和真实回执边界；同人 accepted outbound 覆盖旧 blocked，避免重复联系。
+- 成本纪律落地：`--max-cost-usd` 与 `--max-model-calls` 是整批共享上限；每场保留本地 stage/model 收据；缺失 cost 标 unknown；触限仍写报告。连续 relay 主生成升级 Sonnet 的昂贵实验无收益，已撤回。
+- 最终 `2026-09-12T02-21-25-354Z.json/html`：7 轮结构 1/1、semantic judge 通过、Codex 人工通过；最终一次 $0.314896。本轮全部 Vercel 调用实际累计 $4.338302、unknown 0。
+- 免费验收：`coliving:quality` 141 项通过，`git diff --check` 通过；`tsc --noEmit` 仍只有既有 `components/ai-elements/speech-input.tsx:55-56` 两条 TS2717。无真实 Twilio 发送，`public/sw.js` 未触碰。
+
+---
+
 ## 2026-09-11 · 术语澄清：任务能力 / intent / capability / tool
 
 **老板澄清**：后续按一个个“任务能力”开发，例如替用户传话、协调排班；不是按一个个 intent 标签，也不是按 Codex 先验列出的 capability 目录开发。

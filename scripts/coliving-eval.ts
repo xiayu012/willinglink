@@ -9,6 +9,16 @@
  *   pnpm coliving-eval -- --judge-off        # 跳过语义验收，只跑结构性
  *   pnpm coliving-eval -- --judge-advisory   # 语义验收照跑，但 high 不计入门禁
  *   pnpm coliving-eval -- --guidance concise-coordination-v1   # 实验组：加成功轨迹
+ *   pnpm coliving-eval -- --max-cost-usd 0.5 --max-model-calls 200   # 预算闸
+ *
+ * `--max-cost-usd` / `--max-model-calls` 是**仅评测**的开支闸（见
+ * `lib/chat/coliving/gateway-ledger.ts`）：两个都不传就是原来不设限的完整
+ * 跑批；调用数是硬上限，金额按 gateway 实际回报的花费判断（软硬混合）。
+ * **两个上限都是整次跑批共享的总上限**（只建一份 `BatchBudget`），不是每个
+ * 场景各一份——否则 N 个场景会把总预算放大 N 倍。每个场景仍保有自己的本地
+ * 台账（stage/model 分解），终端汇总不会重复计费。报告与终端汇总都记实际
+ * 调用数、已知花费、拿不到 cost 的调用数；预算中途触限也会把已花的钱和
+ * 已跑完的轮次写进报告，并附上整批共享预算的停止原因。
  *
  * `--guidance` 默认不启用；只接受 `lib/chat/coliving/evals/guidance.ts` 里
  * 已登记的 id，未知 id 立即报错。报告会记录本次用的是哪个 guidance id
@@ -37,9 +47,12 @@ process.env.COLIVING_LOCAL_WRITE = "1";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { JudgeResult } from "../lib/chat/coliving/evals/judge";
-import type { EvalScenario } from "../lib/chat/coliving/evals/schema";
+import type {
+  EvalScenario,
+  TurnOutcome,
+} from "../lib/chat/coliving/evals/schema";
 import {
-  countAcceptedOutbound,
+  evaluateTurnExpectation,
   evaluateTurnReplyReviews,
   validateScenario,
 } from "../lib/chat/coliving/evals/schema";
@@ -49,6 +62,14 @@ import {
   knownGuidanceIds,
   resolveGuidanceArg,
 } from "../lib/chat/coliving/evals/guidance";
+import {
+  BatchBudget,
+  GatewayCostLedger,
+  isEvalBudgetExceeded,
+  mergeLedgerSnapshots,
+  runWithEvalLedger,
+  type LedgerSnapshot,
+} from "../lib/chat/coliving/gateway-ledger";
 
 // ── CLI args ─────────────────────────────────────────────────────────────
 function argValue(name: string): string | null {
@@ -96,6 +117,54 @@ try {
 }
 /** 写进报告的实验版本标识：没启用是 null（基线）。 */
 const GUIDANCE_LABEL = GUIDANCE_ID && GUIDANCE_TEXT ? GUIDANCE_ID.trim() : null;
+
+/**
+ * **评测预算闸（仅评测，生产不经过这里）。**
+ *
+ * `--max-cost-usd <正数>` / `--max-model-calls <正整数>` 都是可选的；两个都
+ * 不传就是原来"不设上限"的完整跑批行为，逐字不变。非法值（0、负数、非数）
+ * 立即报错退出，**不静默退回不设限**——那会把"以为有闸"记成"没闸"。
+ *
+ * 上限语义见 `lib/chat/coliving/gateway-ledger.ts`：调用数是硬上限；金额是
+ * 软硬混合（按 gateway 实际回报的已知花费判断，达到线后拦下一次）。
+ */
+function parseOptionalLimit(
+  name: string,
+  options: { integer: boolean }
+): number | null {
+  // 没传这个 flag 才是"不设限"；传了却缺值/给错值一律报错退出，
+  // 不静默当成没传——那会把"以为有闸"记成"没闸"。
+  if (!process.argv.includes(`--${name}`)) return null;
+  const raw = argValue(name);
+  const value = Number(raw);
+  const valid =
+    raw !== null &&
+    !raw.startsWith("--") &&
+    (options.integer ? Number.isInteger(value) && value > 0 : Number.isFinite(value) && value > 0);
+  if (!valid) {
+    console.error(
+      `--${name} 需要一个${options.integer ? "正整" : "正"}数，实际收到「${raw ?? "（没给值）"}」`
+    );
+    process.exit(2);
+  }
+  return value;
+}
+const MAX_COST_USD = parseOptionalLimit("max-cost-usd", { integer: false });
+const MAX_MODEL_CALLS = parseOptionalLimit("max-model-calls", { integer: true });
+
+/**
+ * **整批共享预算（唯一一份）。** 两个上限的语义是**整次跑批**的总上限，
+ * 不是每个场景各一份——所以只在这里建一个 `BatchBudget`，所有场景的本地
+ * 台账都指向它。两个 flag 都不传时不建预算：各场景本地台账照记收据，
+ * 但谁也不限流，与原来"不设限"的完整跑批行为一致。生产路径不经过这里。
+ */
+const BATCH_BUDGET =
+  MAX_COST_USD !== null || MAX_MODEL_CALLS !== null
+    ? new BatchBudget({
+        maxCostUsd: MAX_COST_USD,
+        maxModelCalls: MAX_MODEL_CALLS,
+      })
+    : undefined;
 
 // ── 加载 + 校验语料 ──────────────────────────────────────────────────────
 const SCENARIOS_DIR = path.join(
@@ -179,10 +248,26 @@ type ScenarioResult = {
   lastReply: string;
   toolsUsed: string[];
   outboundTexts: string[];
+  /**
+   * **本场景这一次的真实 Gateway 计费台账**（本地收据：本场调用数、
+   * stage/model 分解）。`--max-cost-usd` / `--max-model-calls` 启用与否
+   * 都记；生产路径没有台账。
+   */
+  cost: LedgerSnapshot;
+  /**
+   * **整批共享预算快照**：全局调用数、已知花费、未知花费调用数、是否因
+   * 触限停止及停止原因。限额来自 CLI，是整次跑批的总上限（见
+   * `BATCH_BUDGET`）。由 `main()` 在所有场景跑完后统一填入，没设预算时
+   * 是 null。各场景的本地账在 `cost`，这里放的是**共享**那一份。
+   */
+  budget?: LedgerSnapshot | null;
   ms: number;
 };
 
-async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
+async function runScenario(
+  scenario: EvalScenario,
+  ledger: GatewayCostLedger
+): Promise<ScenarioResult> {
   const start = Date.now();
   const repo = await import("../lib/chat/coliving/repo");
   const turn = await import("../lib/chat/coliving/turn");
@@ -312,17 +397,31 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
 
   let last: Awaited<ReturnType<typeof turn.runColivingTurn>> | null = null;
   const transcript: TurnRecord[] = [];
+  /**
+   * 预算在某一轮中途触限 → 记下原因、跳出循环。**不丢已经跑完的轮次和
+   * 已经花掉的钱**：下面据此返回一份带 `cost` 的失败结果，报告照写。
+   */
+  let loopBudgetStop: string | null = null;
   for (const t of scenario.turns) {
     const livePhone = phoneRewrite[t.from] ?? t.from;
     const said = rewritePhonesInText(t.text, phoneRewrite);
     // guidance 只有显式 `--guidance <id>` 时才有值；不传就是基线，
     // 生成器看到的 system 与生产逐字一致（见 turn.ts 里共用的
     // buildGeneratorSystemMessages：无 guidance 时严格 doctrine → runtime）。
-    last = await turn.runColivingTurn({
-      from: livePhone,
-      text: said,
-      guidance: GUIDANCE_TEXT,
-    });
+    try {
+      last = await turn.runColivingTurn({
+        from: livePhone,
+        text: said,
+        guidance: GUIDANCE_TEXT,
+      });
+    } catch (error) {
+      if (isEvalBudgetExceeded(error)) {
+        loopBudgetStop = error.message;
+        console.log(`[budget] ${scenario.id} 预算停止：${error.message}`);
+        break;
+      }
+      throw error;
+    }
     transcript.push({
       fromName:
         members.find((m) => m.address === livePhone)?.name ?? livePhone,
@@ -357,52 +456,60 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
       });
     }
   }
+  /**
+   * 预算在轮次中途停下：不做期望值/语义验收（这一轮根本没跑完，拿残缺
+   * 文字稿去判只会产生噪音），直接返回带台账的失败结果。已跑完的轮次、
+   * 已花的钱都在里面，报告不丢。
+   */
+  if (loopBudgetStop) {
+    const lastTurn = transcript.at(-1);
+    return {
+      id: scenario.id,
+      source: scenario.source,
+      guidance: GUIDANCE_LABEL,
+      pass: false,
+      failures: [`评测预算停止：${loopBudgetStop}`],
+      turns: transcript,
+      judge: { pass: false, verified: false, findings: [] },
+      replyReview: {
+        verified: false,
+        pass: false,
+        broke: "",
+        why: `评测预算停止：${loopBudgetStop}`,
+      },
+      lastReply: lastTurn?.reply ?? "",
+      toolsUsed: lastTurn?.toolsUsed ?? [],
+      outboundTexts: lastTurn?.outbound.map((o) => o.text) ?? [],
+      cost: ledger.snapshot(),
+      ms: Date.now() - start,
+    };
+  }
   if (!last) {
     throw new Error(`场景 ${scenario.id} 没有任何 turns`);
   }
 
   const failures: string[] = [];
   const exp = scenario.expect ?? {};
-  const acceptedOutboundCount = countAcceptedOutbound(last.allOutbound);
-  if (exp.minAcceptedOutbound !== undefined && acceptedOutboundCount < exp.minAcceptedOutbound) {
-    failures.push(`应有至少 ${exp.minAcceptedOutbound} 条通过审稿的出站，实际 ${acceptedOutboundCount} 条；调用联系工具不等于联系成功`);
-  }
   const toolsUsed = last.toolsUsed;
   const outboundTexts = last.outbound.map((o) => o.text);
 
-  for (const t of exp.mustUseTools ?? []) {
-    if (!toolsUsed.includes(t)) {
-      failures.push(`应该调用 ${t}，但 toolsUsed 里没有（实际：${toolsUsed.join("、") || "无"}）`);
-    }
-  }
-  if (exp.mustUseAnyOfTools && exp.mustUseAnyOfTools.length > 0) {
-    const hit = exp.mustUseAnyOfTools.some((t) => toolsUsed.includes(t));
-    if (!hit) {
-      failures.push(
-        `应该调用 [${exp.mustUseAnyOfTools.join("、")}] 里的至少一个，但一个都没调（实际：${toolsUsed.join("、") || "无"}）`
-      );
-    }
-  }
-  for (const t of exp.mustNotUseTools ?? []) {
-    if (toolsUsed.includes(t)) {
-      failures.push(`不该调用 ${t}，但调用了`);
-    }
-  }
-  for (const pattern of exp.replyMustNotMatch ?? []) {
-    if (new RegExp(pattern).test(last.reply)) {
-      failures.push(`回复命中了不该出现的模式「${pattern}」：${last.reply.slice(0, 80)}`);
-    }
-  }
-  for (const pattern of exp.replyMustMatch ?? []) {
-    if (!new RegExp(pattern).test(last.reply)) {
-      failures.push(`回复没有命中该出现的模式「${pattern}」：${last.reply.slice(0, 80)}`);
-    }
-  }
-  for (const pattern of exp.outboundMustNotMatch ?? []) {
-    const hit = outboundTexts.find((text) => new RegExp(pattern).test(text));
-    if (hit) {
-      failures.push(`出站消息命中了不该出现的模式「${pattern}」：${hit.slice(0, 80)}`);
-    }
+  // 场景级 expect 照旧只查最后一轮；逐轮 expect 只在该轮自己声明时生效。
+  // 两边共用同一个纯函数，不另写一份判法。
+  const outcomes: TurnOutcome[] = transcript.map((t) => ({
+    toolsUsed: t.toolsUsed,
+    reply: t.reply,
+    outbound: t.outbound,
+  }));
+  failures.push(
+    ...evaluateTurnExpectation(scenario.expect, outcomes[outcomes.length - 1])
+  );
+  for (const [i, t] of scenario.turns.entries()) {
+    if (!t.expect) continue;
+    failures.push(
+      ...evaluateTurnExpectation(t.expect, outcomes[i]).map(
+        (failure) => `第${i + 1}轮：${failure}`
+      )
+    );
   }
   /**
    * **批判器明知最终回复不合格，代码照样发了——这个门禁堵这个漏洞。**
@@ -444,6 +551,8 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
   // `verified:false, pass:false`，不能让调用方因为拿不到 judge 结果就
   // 默认当没发生过、把总结果算成绿。
   let judge: JudgeResult = { pass: false, verified: false, findings: [] };
+  /** 语义验收那一步撞上预算闸时记原因；正常情况是 null。 */
+  let judgeBudgetStop: string | null = null;
   if (!JUDGE_OFF) {
     try {
       const { judgeConversation } = await import(
@@ -466,14 +575,22 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
         })),
       });
     } catch (error) {
-      // 判定器挂了不该让整个跑批直接崩溃退出——但这一场景的语义层
-      // 确确实实没验收过，`judge` 保持上面初始化的未验收态，不当通过。
-      console.log(
-        `[judge] ${scenario.id} 判定失败（标记未验收）：`,
-        error instanceof Error ? error.message : String(error)
-      );
+      // 预算触限发生在判定这一步：文字稿已经跑完、钱也花在别处了，
+      // 不能当成一次普通的"判定器挂了"。记成结构性失败，并把台账一起写进报告。
+      if (isEvalBudgetExceeded(error)) {
+        judgeBudgetStop = error.message;
+        console.log(`[budget] ${scenario.id} 语义验收被预算停止：${error.message}`);
+      } else {
+        // 判定器挂了不该让整个跑批直接崩溃退出——但这一场景的语义层
+        // 确确实实没验收过，`judge` 保持上面初始化的未验收态，不当通过。
+        console.log(
+          `[judge] ${scenario.id} 判定失败（标记未验收）：`,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
     }
   }
+  if (judgeBudgetStop) failures.push(`评测预算停止（语义验收）：${judgeBudgetStop}`);
 
   return {
     id: scenario.id,
@@ -487,6 +604,7 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
     lastReply: last.reply,
     toolsUsed,
     outboundTexts,
+    cost: ledger.snapshot(),
     ms: Date.now() - start,
   };
 }
@@ -495,10 +613,22 @@ async function runScenario(scenario: EvalScenario): Promise<ScenarioResult> {
  * 单个场景的基础设施故障也必须落进报告。否则模型网关超时会让整批直接
  * 退出，已经完成的场景和失败原因一起丢失，看起来反而像“没有红灯”。
  */
-async function runScenarioSafely(scenario: EvalScenario): Promise<ScenarioResult> {
+async function runScenarioSafely(
+  scenario: EvalScenario,
+  batchBudget?: BatchBudget
+): Promise<ScenarioResult> {
   const start = Date.now();
+  /**
+   * **每个场景一份独立本地台账**，挂在 `runWithEvalLedger` 开的异步上下文里，
+   * 各记各的收据（stage/model 分解、本场调用数），互不串场。**上限不在这里**：
+   * 本地台账指向整批唯一的 `batchBudget`，由它统一执行全局调用数硬上限和
+   * 金额软上限——否则 N 个场景各带一份 CLI 上限，总预算会被放大 N 倍。
+   * 没设预算（`batchBudget` 为 undefined）时本地台账自建无上限的内部预算，
+   * 行为与原来"不设限"逐字一致。
+   */
+  const ledger = new GatewayCostLedger({}, batchBudget);
   try {
-    return await runScenario(scenario);
+    return await runWithEvalLedger(ledger, () => runScenario(scenario, ledger));
   } catch (error) {
     const reason = (() => {
       if (error instanceof Error) {
@@ -549,6 +679,8 @@ async function runScenarioSafely(scenario: EvalScenario): Promise<ScenarioResult
       lastReply: "",
       toolsUsed: [],
       outboundTexts: [],
+      // 异常也要把已经花的钱带上，不然报告里这场看起来"零成本"，实际不是。
+      cost: ledger.snapshot(),
       ms: Date.now() - start,
     };
   }
@@ -564,16 +696,27 @@ async function main() {
     `跑 ${scenarios.length} 个场景，并发 ${CONCURRENCY}；` +
       `guidance=${GUIDANCE_LABEL ?? "无（基线）"}${
         GUIDANCE_LABEL ? "（实验组）" : ""
+      }；` +
+      `预算=${
+        MAX_COST_USD === null && MAX_MODEL_CALLS === null
+          ? "不设限"
+          : `金额上限 ${MAX_COST_USD ?? "无"}、调用上限 ${MAX_MODEL_CALLS ?? "无"}`
       }…\n`
   );
 
   const start = Date.now();
-  const results = await runWithConcurrency(
-    scenarios,
-    CONCURRENCY,
-    runScenarioSafely
+  const results = await runWithConcurrency(scenarios, CONCURRENCY, (s) =>
+    runScenarioSafely(s, BATCH_BUDGET)
   );
   const totalMs = Date.now() - start;
+
+  /**
+   * 所有场景跑完后取**共享预算的最终快照**，贴到每个场景结果上（报告页
+   * 只认已知字段，多一个 `budget` 不影响渲染）。这样报告既能看各场景
+   * 本地账（`cost`），也能看到整批共享预算的停止原因。
+   */
+  const budgetSnapshot = BATCH_BUDGET?.snapshot() ?? null;
+  for (const r of results) r.budget = budgetSnapshot;
 
   /**
    * 四种情况分开算，报告和终端输出都要能区分开：
@@ -630,6 +773,42 @@ async function main() {
       `总门禁 ${results.length - overallFailCount}/${results.length} 通过，` +
       `总耗时 ${(totalMs / 1000).toFixed(1)}s`
   );
+
+  /**
+   * **真实计费汇总。** 金额是 gateway 逐次回报的 `providerMetadata.gateway.
+   * cost` 之和，不是按价目表估算——换模型/网关调价都不用改这里。
+   * `unknownCostCalls > 0` 表示有调用拿不到 cost（**不是 0 花费**），
+   * 这时"已知花费"是下界，别当总额看。
+   *
+   * 本地账合并相加 = 整批总数（每个场景只记自己的调用，**不重复计费**），
+   * 但本地账不带整批上限。所以全局 calls/cost/停止原因以**共享预算快照**
+   * 为准（没设预算时退回合并结果，行为与原来一致）；stage/model 分解只有
+   * 本地账有，用合并结果。
+   */
+  const merged = mergeLedgerSnapshots(results.map((r) => r.cost));
+  const totals = budgetSnapshot ?? merged;
+  const caps =
+    totals.maxCostUsd === null && totals.maxModelCalls === null
+      ? "不设限"
+      : `金额上限 ${totals.maxCostUsd ?? "无"}、调用上限 ${totals.maxModelCalls ?? "无"}`;
+  console.log(
+    `\n计费（Gateway 实际回报）：预算 ${caps}；实际调用 ${totals.calls} 次；` +
+      `已知花费 $${totals.knownCostUsd.toFixed(6)}；` +
+      `未知花费调用 ${totals.unknownCostCalls} 次` +
+      `${totals.stopped ? `；**已因触限停止**（${totals.stopReason ?? ""}）` : ""}`
+  );
+  for (const bucket of [...merged.byStage].sort((a, b) => b.calls - a.calls)) {
+    console.log(
+      `    - stage ${bucket.key}：${bucket.calls} 次，$${bucket.knownCostUsd.toFixed(6)}` +
+        `${bucket.unknownCostCalls ? `，未知 ${bucket.unknownCostCalls} 次` : ""}`
+    );
+  }
+  for (const bucket of [...merged.byModel].sort((a, b) => b.calls - a.calls)) {
+    console.log(
+      `    - model ${bucket.key}：${bucket.calls} 次，$${bucket.knownCostUsd.toFixed(6)}` +
+        `${bucket.unknownCostCalls ? `，未知 ${bucket.unknownCostCalls} 次` : ""}`
+    );
+  }
 
   const reportDir = path.join(process.cwd(), "tests/coliving-eval/reports");
   mkdirSync(reportDir, { recursive: true });

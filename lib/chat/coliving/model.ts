@@ -33,7 +33,7 @@ export function colivingModelId(): string {
  * 生成的能力。**只把这最后一次生成升级到 sonnet**，用一次贵调用换一次真正改对
  * 的机会；其余生成路径（首稿、第一次重写、出站、非 relay）保持默认便宜模型。
  */
-export const RELAY_FINAL_FIX_MODEL = "anthropic/claude-sonnet-4.5";
+export const RELAY_FINAL_FIX_MODEL = "anthropic/claude-sonnet-4.6";
 
 /**
  * relay 回复重写路径该用哪个模型。
@@ -56,6 +56,41 @@ export function relayRewriteModelId(args: {
   return args.relayActive && args.stage === "finalFix"
     ? RELAY_FINAL_FIX_MODEL
     : args.defaultModelId;
+}
+
+/**
+ * relay 的**选择性强审稿**：这一轮该不该用强模型复核。
+ *
+ * 单纯首次的一对一提醒用默认便宜 critic 就够；只有结构事实表明这不是
+ * "第一次简单交办"时才升级，避免把每次 relay 都变成一整批贵模型调用：
+ *  - 本轮实际或尝试联系了**多个收件人**（越权通知、群发的风险更高）；
+ *  - 或**这套房在本轮开始前已有「介绍之外」的实质出站往来**——同一段连续
+ *    关系，容易累积旧账、泄露历史、把没定的事说成定了。
+ *
+ * **房屋级而不是收件人级**：模型漏调 `contactPerson` 时本轮 outbound 为空，
+ * 从"本轮收件人"推不出任何东西；只有房屋级信号还能认出这是连续关系
+ * （2026-09-11 corpus-031 第 6 轮：没联系却回"已经跟他说了"，强审稿恰好失效）。
+ *
+ * **只看结构事实**（出站记录、收件人集合），不猜语义：不看"单独/私下"
+ * 这类中文措辞，也不看食品名或人名。非 relay 一律 false，普通对话不受影响。
+ *
+ * 抽成纯函数是为了可离线测试：给定几个结构事实就能证明"首次简单提醒不升级、
+ * 连续关系/多收件人才升级"，不需要真的调模型或跑场景（见
+ * `scripts/coliving-quality-inspect.ts`）。
+ */
+export function relayReviewNeedsStrong(args: {
+  relayActive: boolean;
+  /** 本轮实际或尝试联系的不同收件人数（含被审稿拦下的越权尝试）。 */
+  recipientCount: number;
+  /**
+   * 本轮开始前，这套房是否已有「介绍之外」的实质出站往来。判断依据：
+   * 每个新成员的第一次出站是介绍，所以**任一收件人**出站 ≥2 条，就说明
+   * 至少有过一次介绍之外的实质传话。取全屋、不绑定本轮收件人。
+   */
+  houseHasPriorSubstantiveOutbound: boolean;
+}): boolean {
+  if (!args.relayActive) return false;
+  return args.recipientCount > 1 || args.houseHasPriorSubstantiveOutbound;
 }
 
 /**

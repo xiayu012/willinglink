@@ -221,42 +221,161 @@ export type ScenarioTurn = {
   /** 发信人手机号，必须在 people 里 */
   from: string;
   text: string;
+  /**
+   * **可选：只对这一轮生效的结构性断言**，默认不填。连续多轮场景（同一住户
+   * 反复交办、只查最后一轮会失明）把它填进需要的轮次；单轮场景不填，
+   * 行为逐字不变。结构复用场景级 `ScenarioExpectation`，不另立字段。
+   */
+  expect?: ScenarioExpectation;
 };
 
 /**
- * 只对**最后一轮**的结果做断言——多轮场景里，前面几轮是在铺垫信息，
- * 真正要检验的是"信息齐全之后这一轮做没做该做的事"。
- * 只需要断言中间某一轮时，把该轮设成一个独立场景更清楚，不在这里加复杂度。
+ * 默认只对**最后一轮**的结果做断言——多轮场景里前面几轮是铺垫，
+ * 真正要检验的是"信息齐全之后这一轮做没做该做的事"。需要逐轮都查的场景，
+ * 把同一份结构填进 `ScenarioTurn.expect`；两者共用本类型，避免两套漂移。
  */
 export type ScenarioExpectation = {
   /** 至少多少条出站通过审稿、可供投递。离线评测仍不真的发短信。 */
   minAcceptedOutbound?: number;
-  /** 最后一轮 toolsUsed 必须包含全部这些工具，否则判失败 */
+  /** toolsUsed 必须包含全部这些工具，否则判失败 */
   mustUseTools?: string[];
   /**
-   * 最后一轮 toolsUsed 至少要出现其中一个（OR，不要求全部）。
+   * toolsUsed 至少要出现其中一个（OR，不要求全部）。
    * **这是防"拖延无行动"这类 bug 最稳的检查**——纯文字正则去匹配
    * "回头商量""我会去说"这类话术太脆弱（中文语义变体太多，容易漏判
    * 或者误伤合法的"确实需要延后"场景）。工具有没有被调用是确定性的
    * 事实，不受措辞影响。
    */
   mustUseAnyOfTools?: string[];
-  /** 最后一轮 toolsUsed 不能出现任何一个，出现即判失败 */
+  /** toolsUsed 不能出现任何一个，出现即判失败 */
   mustNotUseTools?: string[];
-  /** 最后一轮的 reply 文本，命中任意一条即判失败（正则，用于抓"编号泄漏"这类明确、低歧义的模式） */
+  /** reply 文本，命中任意一条即判失败（正则，用于抓"编号泄漏"这类明确、低歧义的模式） */
   replyMustNotMatch?: string[];
-  /** 最后一轮的 reply 文本，必须命中全部这些（正则），用于确认关键信息真的传达了 */
+  /** reply 文本，必须命中全部这些（正则），用于确认关键信息真的传达了 */
   replyMustMatch?: string[];
   /**
-   * 最后一轮主动发给别人的消息（`contactPerson`产生的 outbound，不是
-   * reply）——命中任意一条即判失败。经典场景就是"发给被投诉方，
-   * 却写成冲他一个人的祈使句"，这种问题从来不出现在 reply 里，
-   * 只出现在 outbound，所以要单独查。
+   * 主动发给别人的消息（`contactPerson`产生的 outbound，不是 reply）
+   * ——命中任意一条即判失败。经典场景就是"发给被投诉方，却写成冲他
+   * 一个人的祈使句"，这种问题从来不出现在 reply 里，只出现在 outbound，
+   * 所以要单独查。
    */
   outboundMustNotMatch?: string[];
-  /** 跑完这轮后，阻塞清单（getBlockedComms）至少要有几条——验证"问出去的话有没有被正确标记成在等回音" */
+  /**
+   * 主动发给别人的消息，必须命中全部这些（正则）——与 `outboundMustNotMatch`
+   * 对称，只查**通过审稿**的实际出站（被拦下的草稿不算真正送达）。
+   * 用于确认关键信息真的随出站传达了，比如约谈分开住的议题不能被软化掉。
+   */
+  outboundMustMatch?: string[];
+  /** 本轮必须有一条**通过审稿**的出站发给这个收件人（全部满足）：调了工具不等于是真的发出去了。 */
+  mustContactNames?: string[];
+  /** 本轮不得产生发给这些收件人的出站，**含被审稿拦下的越权尝试**。 */
+  mustNotContactNames?: string[];
+  /** 跑完这轮后，阻塞清单（getBlockedComms）至少几条。要查库，仅场景级 `expect` 生效。 */
   minBlockedComms?: number;
 };
+
+/** 一轮跑完后的确定性事实，够 `evaluateTurnExpectation` 判完所有非查库断言。 */
+export type TurnOutcome = {
+  toolsUsed: string[];
+  reply: string;
+  outbound: Array<{ toName: string; text: string; blocked?: boolean }>;
+};
+
+/**
+ * 把一份 `ScenarioExpectation` 对一轮结果判一遍，返回失败原因（空数组=通过）。
+ * **纯函数**：不碰数据库、不调模型，场景级与逐轮共用同一份判法；要查库的
+ * `minBlockedComms` 不在这里判，由 runner 单独处理。
+ */
+export function evaluateTurnExpectation(
+  expect: ScenarioExpectation | undefined,
+  outcome: TurnOutcome
+): string[] {
+  if (!expect) return [];
+  const failures: string[] = [];
+  // 通过的出站（真的会投递的那些）；被审稿拦下的草稿不算。
+  const acceptedOutbound = outcome.outbound.filter((o) => !o.blocked);
+  const acceptedCount = countAcceptedOutbound(outcome.outbound);
+  if (expect.minAcceptedOutbound !== undefined && acceptedCount < expect.minAcceptedOutbound) {
+    failures.push(
+      `应有至少 ${expect.minAcceptedOutbound} 条通过审稿的出站，实际 ${acceptedCount} 条；调用联系工具不等于联系成功`
+    );
+  }
+  for (const t of expect.mustUseTools ?? []) {
+    if (!outcome.toolsUsed.includes(t)) {
+      failures.push(
+        `应该调用 ${t}，但 toolsUsed 里没有（实际：${outcome.toolsUsed.join("、") || "无"}）`
+      );
+    }
+  }
+  if (expect.mustUseAnyOfTools && expect.mustUseAnyOfTools.length > 0) {
+    const hit = expect.mustUseAnyOfTools.some((t) => outcome.toolsUsed.includes(t));
+    if (!hit) {
+      failures.push(
+        `应该调用 [${expect.mustUseAnyOfTools.join("、")}] 里的至少一个，但一个都没调（实际：${outcome.toolsUsed.join("、") || "无"}）`
+      );
+    }
+  }
+  for (const t of expect.mustNotUseTools ?? []) {
+    if (outcome.toolsUsed.includes(t)) {
+      failures.push(`不该调用 ${t}，但调用了`);
+    }
+  }
+  for (const pattern of expect.replyMustNotMatch ?? []) {
+    if (new RegExp(pattern).test(outcome.reply)) {
+      failures.push(
+        `回复命中了不该出现的模式「${pattern}」：${outcome.reply.slice(0, 80)}`
+      );
+    }
+  }
+  for (const pattern of expect.replyMustMatch ?? []) {
+    if (!new RegExp(pattern).test(outcome.reply)) {
+      failures.push(
+        `回复没有命中该出现的模式「${pattern}」：${outcome.reply.slice(0, 80)}`
+      );
+    }
+  }
+  for (const pattern of expect.outboundMustNotMatch ?? []) {
+    const hit = acceptedOutbound.find((msg) => new RegExp(pattern).test(msg.text));
+    if (hit) {
+      failures.push(
+        `出站消息命中了不该出现的模式「${pattern}」：${hit.text.slice(0, 80)}`
+      );
+    }
+  }
+  for (const pattern of expect.outboundMustMatch ?? []) {
+    // 只看通过审稿的实际出站（与 MustNotMatch 对称）：被拦下的草稿没送达，不算。
+    const hit = acceptedOutbound.some((msg) => new RegExp(pattern).test(msg.text));
+    if (!hit) {
+      failures.push(
+        `出站消息没有命中该出现的模式「${pattern}」（通过审稿的出站：${
+          acceptedOutbound.map((msg) => msg.text).join(" ／ ") || "无"
+        }）`
+      );
+    }
+  }
+  // 授权收件人范围：正向只认**通过审稿**的出站（调了工具但被拦下不算联系上），
+  // 反向连被拦下的尝试也算（越权尝试本身就是问题，不因为被拦而免罪）。
+  const acceptedNames = new Set(acceptedOutbound.map((o) => o.toName));
+  for (const name of expect.mustContactNames ?? []) {
+    if (!acceptedNames.has(name)) {
+      const attempted = [...new Set(outcome.outbound.map((o) => o.toName))];
+      failures.push(
+        `应该有通过审稿的出站发给「${name}」，但没有（本轮出站收件人：${
+          attempted.join("、") || "无"
+        }）`
+      );
+    }
+  }
+  const attemptedNames = new Set(outcome.outbound.map((o) => o.toName));
+  for (const name of expect.mustNotContactNames ?? []) {
+    if (attemptedNames.has(name)) {
+      failures.push(
+        `不该联系「${name}」，但本轮产生了发给他的出站（含被审稿拦下的尝试）`
+      );
+    }
+  }
+  return failures;
+}
 
 export type EvalScenario = {
   id: string;
@@ -347,6 +466,37 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
   const setup = obj?.setup as EvalScenario["setup"] | undefined;
   if (setup?.openCases && !Array.isArray(setup.openCases)) {
     errors.push("setup.openCases 必须是数组");
+  }
+  // 收件人姓名断言写错会静默失效（mustContact 永远失败 / mustNot 永远通过），
+  // 所以非快照场景在载入阶段就查名字在不在名册里（快照名册来自 phoneMap，跳过）。
+  if (!isSnapshot) {
+    const roster = new Set(((obj?.people as ScenarioPerson[]) ?? []).map((p) => p.name));
+    const blocks: Array<[unknown, string]> = [
+      [obj?.expect, "expect"],
+      ...(Array.isArray(obj?.turns) ? (obj.turns as ScenarioTurn[]) : []).map(
+        (t, i) => [t?.expect, `turns[${i}].expect`] as [unknown, string]
+      ),
+    ];
+    for (const [block, where] of blocks) {
+      if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+      for (const field of ["mustContactNames", "mustNotContactNames"] as const) {
+        const value = (block as Record<string, unknown>)[field];
+        if (value === undefined) continue;
+        if (
+          !Array.isArray(value) ||
+          value.length === 0 ||
+          value.some((n) => typeof n !== "string" || !n)
+        ) {
+          errors.push(`${where}.${field} 必须是非空字符串数组`);
+          continue;
+        }
+        for (const name of value as string[]) {
+          if (!roster.has(name)) {
+            errors.push(`${where}.${field} 里的「${name}」不在 people 名册里`);
+          }
+        }
+      }
+    }
   }
   if (obj?.privacyCard !== undefined) {
     validatePrivacyCardShape(obj.privacyCard, errors);

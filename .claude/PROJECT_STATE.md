@@ -191,3 +191,13 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 2. 读本文件 + 对应工作线的 `AGENT_LOG.md` 最近条目。
 3. 产品行为改动 → 派 `.claude/CODEX_TASK.md` 给 Claude Code。
 4. Codex 验收后 commit + push origin main。
+
+## 2026-09-11 当前工作线：Reddit 连续一对一传话 corpus-031
+
+- 将 Notion 中的 Reddit 第一人称合租故事转为 7 轮连续 relay：食物边界、第三人物品、温控、洗碗、借锅、公共过道、是否继续合住的约谈。
+- 新证据推动 relay 继续成长：人物/物主/义务主体不得互换；第三人行踪不是必要内容时删除；透明说明“是否继续合住”且保持未决定，不得温和地藏掉核心议题；真实完成回执与将来时过程旁白分开。
+- 生成端加入通用成功/失败转化判例；recipient/sender 两个 relay 短审稿视图与 semantic judge 对齐；被拦收件人只在尚无同人合格出站时重发，避免旧 blocked 导致重复联系。
+- `coliving-eval` 新增整批共享的 `--max-cost-usd` 与 `--max-model-calls`、逐 stage/model 的 Gateway 实际费用收据和未知费用标记；预算中止也写报告。一次跑多个场景时上限不会按场景数倍增。
+- 连续 relay 主生成全量升级 Sonnet 的实验已用实际成本否决并撤回：一次 $1.036325，其中 main $0.832472，仍未稳定消除第三人行踪泄露；生产主生成保持 DeepSeek，连续关系/多收件人才用强审稿，最终聚焦修正才用 Sonnet 4.6。
+- 最终报告 `2026-09-12T02-21-25-354Z.json/html`：7 轮结构与语义门禁通过，Codex 逐轮人工接受；最终固定网页在 `tests/coliving-eval/reports/intent-capability/reddit-corpus-031-repeated-relay-final-2026-09-11.html`。
+- 本轮所有 Vercel 评测实际累计 $4.338302，0 次未知费用；以后每次用户开发对话以约 $4 为默认目标，先免费闸、定向场景、实际 cost 记账，到线停止下一请求。141 项免费检查通过；类型检查仍只有 `speech-input.tsx:55-56` 两条既有 TS2717。
