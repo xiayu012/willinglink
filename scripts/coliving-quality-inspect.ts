@@ -415,6 +415,106 @@ async function main() {
       );
     }
   });
+  check("corpus-032 窄范围传话：两轮只联系指定室友，不升级为全屋规则/人身评价/硬钟点", () => {
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/corpus-032-reddit-narrow-reminders-2026-09-12.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(raw, "corpus-032.json");
+    assert.equal(scenario.turns.length, 2, "corpus-032 只应有两轮");
+    for (const [i, turn] of scenario.turns.entries()) {
+      const expect = turn.expect ?? {};
+      assert.deepEqual(
+        expect.mustNotUseTools,
+        ["proposeRule"],
+        `第${i + 1}轮全场不得调用 proposeRule`
+      );
+      assert.deepEqual(expect.mustContactNames, ["阿川"], `第${i + 1}轮只联系阿川`);
+      assert.deepEqual(
+        expect.mustNotContactNames,
+        ["小禾"],
+        `第${i + 1}轮不得产生发给发信人小禾的出站`
+      );
+      assert(
+        (expect.outboundMustMatch ?? []).length > 0,
+        `第${i + 1}轮必须有出站正向哨兵`
+      );
+      assert(
+        (expect.outboundMustNotMatch ?? []).length > 0,
+        `第${i + 1}轮必须有出站负向哨兵`
+      );
+    }
+    const outcome = (text: string, toName = "阿川") => ({
+      toolsUsed: ["contactPerson"],
+      reply: "已经跟他说了，在等他回话。",
+      outbound: [{ toName, text, blocked: false }],
+    });
+    // 可接受的两条：只说眼下这一次 / 只提清理对象 → 通过。
+    for (const [i, text] of [
+      "阿川，今天凌晨四点开洗衣机和烘干机吵到隔壁房间了。这一次先别在深夜洗和烘干，谢谢。",
+      "阿川，洗完澡麻烦把浴室墙面和地漏里的头发清理一下，谢谢。",
+    ].entries()) {
+      assert.deepEqual(
+        evaluateTurnExpectation(scenario.turns[i].expect, outcome(text)),
+        [],
+        `第${i + 1}轮这条合格出站不该被判失败：${text}`
+      );
+    }
+    // 第 2 轮核心动作：清理/清掉这类明确动作，语序不限（动作词在「头发」前后），
+    // 都算把交办办到 → 绿灯。
+    for (const clear of [
+      "阿川，洗完澡把浴室墙面和地漏里的头发清理掉，谢谢。",
+      "阿川，洗完澡顺手清一下墙上的头发，别让它堵了地漏，谢谢。",
+    ]) {
+      assert.deepEqual(
+        evaluateTurnExpectation(scenario.turns[1].expect, outcome(clear)),
+        [],
+        `第 2 轮明确清理动作（语序不限）不该被判失败：${clear}`
+      );
+    }
+    // 第 2 轮只说过一遍水的「冲一下」这类含糊处理 → 核心动作走样，必须红灯。
+    // 两条都保留了「头发」这个对象，红灯只可能来自核心动作缺失。
+    for (const rinseOnly of [
+      "阿川，洗完澡把墙上的头发冲一下就行，谢谢。",
+      "阿川，洗完澡把地漏里的头发冲一冲，谢谢。",
+    ]) {
+      assert(
+        evaluateTurnExpectation(scenario.turns[1].expect, outcome(rinseOnly)).length > 0,
+        `第 2 轮只冲一下、没真清理必须判失败：${rinseOnly}`
+      );
+    }
+    // 升级成长期全屋规则 / 铸硬钟点门槛 / 人身评价 → 必须红灯。
+    // 每条都故意保留该轮的正向要点（第 1 轮深夜、第 2 轮头发 + 清理动作），
+    // 让红灯只可能来自负向哨兵，而不是顺带漏了正向要点。
+    const badCases: Array<[number, string]> = [
+      [0, "阿川，以后别在深夜洗衣服了。"],
+      [0, "阿川，深夜十一点以后不要用洗衣机，这是全屋的规矩。"],
+      [0, "阿川，那个秃头室友说你凌晨洗衣吵到他了。"],
+      [1, "阿川，浴室墙面的头发清掉吧，看着真恶心。"],
+    ];
+    for (const [i, bad] of badCases) {
+      assert(
+        evaluateTurnExpectation(scenario.turns[i].expect, outcome(bad)).length > 0,
+        `越界出站必须判失败：${bad}`
+      );
+    }
+    // 收件人写错（发给发信人、或漏发阿川）→ 两个方向都必须红灯。
+    assert(
+      evaluateTurnExpectation(scenario.turns[0].expect, outcome("深夜先别洗了", "小禾"))
+        .length > 0,
+      "把出站发给发信人小禾必须判失败"
+    );
+    assert(
+      evaluateTurnExpectation(scenario.turns[1].expect, {
+        toolsUsed: ["contactPerson"],
+        reply: "已经跟他说了，在等他回话。",
+        outbound: [{ toName: "阿川", text: "浴室收拾干净了", blocked: true }],
+      }).length > 0,
+      "只有被拦草稿、且未保留清理对象时不得通过"
+    );
+  });
   check("process narration catches future-tense contact already delivered this turn", () => {
     // 名字在"我/这边 + 将来标记 + 联系动词"公式里、且是本轮已联系的人才命中。
     assert.match(checkProcessNarration("好的，我这就去跟甲说一声。", ["甲"])?.why ?? "", /已经成功联系过/);
