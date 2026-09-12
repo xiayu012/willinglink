@@ -276,7 +276,7 @@ type ScenarioResult = {
    * 处理"没验收"这个状态，不能因为字段不存在就悄悄当没发生过、算作通过。
    */
   judge: JudgeResult;
-  /** 最终回复最后一次审稿的结论——见 lib/chat/coliving/turn.ts 的 ReplyReview */
+  /** 最终回复最后一次核对的结论——见 lib/chat/coliving/turn.ts 的 ReplyReview */
   replyReview: ReplyReview;
   lastReply: string;
   toolsUsed: string[];
@@ -511,6 +511,7 @@ async function runScenario(
       turns: transcript,
       judge: { pass: false, verified: false, findings: [] },
       replyReview: {
+        mode: "generation-only",
         verified: false,
         pass: false,
         broke: "",
@@ -551,11 +552,11 @@ async function runScenario(
     );
   }
   /**
-   * **批判器明知最终回复不合格，代码照样发了——这个门禁堵这个漏洞。**
-   * `runColivingTurn` 已经把打回/重写/最终修正的真实结论算成了
-   * `replyReview`；这里不重新判断，只核对这个结论本身站不站得住，
-   * 不合格或没验证过都计入结构性失败，让"批判器打回但总门禁绿色"
-   * 不再可能发生。
+   * **代码可证的确定性核对命中时，最终回复照样发了——这个门禁堵这个漏洞。**
+   * `runColivingTurn` 已经把确定性核对的真实结论算成了 `replyReview`；这里
+   * 不重新判断，只核对这个结论本身站不站得住。生产是只生成（`verified:false`
+   * 属设计如此，不再算失败）；只有 `pass:false`（确定性核对不合格）计入结构性
+   * 失败，让"核对命中红灯但总门禁绿色"不再可能发生。
    */
   failures.push(...evaluateTurnReplyReviews(transcript.map((turn) => turn.replyReview)));
 
@@ -718,6 +719,7 @@ async function runScenarioSafely(
       turns: [],
       judge: { pass: false, verified: false, findings: [] },
       replyReview: {
+        mode: "generation-only",
         verified: false,
         pass: false,
         broke: "",

@@ -29,8 +29,6 @@ import {
   extractExplicitFixedStart,
   extractPreferredStart,
   extractSlotFromInquiry,
-  finalFixBudget,
-  finalFixForcedFirstTool,
   hasDeferredCoordination,
   isLowInformationFollowUp,
   isOpenConflictCase,
@@ -40,29 +38,16 @@ import {
   isScheduleSlotInquiry,
   isSimpleAffirmation,
   isUnsolicitedContactClaim,
-  needsSemanticCritique,
-  normalizeDraftKeyText,
-  relayRecipientTaskContext,
-  relaySenderReplyTaskContext,
   uncoveredBlockedPersonIds,
   scheduleContactTextForAct,
   scheduleInquiryConfirmation,
   scheduleSlotMatchesSelfStatement,
 } from "../lib/chat/coliving/turn";
-import {
-  criticEnabled,
-  criticModelId,
-  DEFAULT_CRITIC_MODEL,
-  hasSafetySensitiveTopic,
-  SENSITIVE_CRITIC_MODEL,
-  selectCriticRubric,
-} from "../lib/chat/coliving/critic";
+// 只留离线视图选择器：生产已只生成，quality 脚本不再断言批判器生产接线/选型。
+import { selectCriticRubric } from "../lib/chat/coliving/critic";
 import {
   COLIVING_DEFAULT_MODEL,
   colivingModelId,
-  RELAY_FINAL_FIX_MODEL,
-  relayReviewNeedsStrong,
-  relayRewriteModelId,
 } from "../lib/chat/coliving/model";
 import { COORDINATION_INTENT_MODEL } from "../lib/coordination/llm";
 import {
@@ -175,18 +160,31 @@ async function main() {
     assert.equal(countAcceptedOutbound(bad[0].outbound), 0);
     assert.equal(countAcceptedOutbound([...bad[0].outbound, { blocked: false }]), 1);
   });
-  check("failed or unverified reply review cannot pass the eval gate", () => {
+  check("generation-only review evidence: unverified-by-design passes, deterministic failure still fails", () => {
     assert.deepEqual(evaluateReplyReview(undefined).length, 1);
+    // 生产只生成：`verified:false` 是设计如此（没有 LLM 审稿），只要没有代码可证的
+    // 确定性失败（pass:true）就放行——不能把"按设计没审"当成"审了没通过"。
     assert.deepEqual(
-      evaluateReplyReview({ verified: false, pass: true, broke: "", why: "模型超时" }).length,
+      evaluateReplyReview({ mode: "generation-only", verified: false, pass: true, broke: "", why: "" }),
+      []
+    );
+    // 模式缺省按 generation-only 处理（简化/历史调用点），同样不因 verified:false 判失败。
+    assert.deepEqual(
+      evaluateReplyReview({ verified: false, pass: true, broke: "", why: "" }),
+      []
+    );
+    // 确定性核对不合格一律红灯，不管有没有 LLM 审稿。
+    assert.equal(
+      evaluateReplyReview({ mode: "generation-only", verified: false, pass: false, broke: "0", why: "假完成" }).length,
+      1
+    );
+    // 显式 LLM 审稿（离线/历史路径）没真的跑起来判过，仍算门禁失败。
+    assert.equal(
+      evaluateReplyReview({ mode: "llm-review", verified: false, pass: true, broke: "", why: "模型超时" }).length,
       1
     );
     assert.deepEqual(
-      evaluateReplyReview({ verified: true, pass: false, broke: "2", why: "编造事实" }).length,
-      1
-    );
-    assert.deepEqual(
-      evaluateReplyReview({ verified: true, pass: true, broke: "", why: "" }),
+      evaluateReplyReview({ mode: "llm-review", verified: true, pass: true, broke: "", why: "" }),
       []
     );
   });
@@ -528,15 +526,6 @@ async function main() {
       "多个被拦目标去重，只留仍未被覆盖的"
     );
   });
-  check("rejected-draft key folds whitespace and CJK/ASCII punctuation only", () => {
-    // 同一句只把「，」换成「,」（031 第 7 轮真实情形）→ 同一个 key，不重新抽签。
-    assert.equal(
-      normalizeDraftKeyText("小浩，嘉怡、小岚 想今晚聊"),
-      normalizeDraftKeyText("小浩,嘉怡、小岚想今晚聊")
-    );
-    // 真改了内容（换词、增删字）→ key 必须不同，不改动的不锁死。
-    assert.notEqual(normalizeDraftKeyText("要不要分开住"), normalizeDraftKeyText("要不要一起住"));
-  });
   check("substantive medium is not accepted", () => {
     assert.equal(finalizeJudgment([{ severity: "medium", turnIndex: 0, issue: "未完成协调", quote: bad[0].reply }], bad).pass, false);
   });
@@ -854,13 +843,9 @@ async function main() {
       "已发生的内容转述不是未发生的承诺"
     );
   });
-  check("relay 专属短审稿视图：非 relay 仍用完整 rubric，relay 两种视图各自加载且不混批", () => {
-    // 动态人名/任务关系仍由 taskContext 带（发给收信人 / 回给发信人两种）。
-    const outbound = relayRecipientTaskContext({ senderName: "小夏", recipientName: "小陈" });
-    assert(outbound.includes("小夏") && outbound.includes("小陈"), "出站任务背景要说清发信人与收信人");
-    const reply = relaySenderReplyTaskContext({ senderName: "小夏" });
-    assert(reply.includes("小夏"), "回信任务背景要说清发信人");
-
+  check("relay 专属短审稿视图（离线/未来保留）：非 relay 用完整 rubric，relay 两种视图各自加载且不混批", () => {
+    // ⚠️ 生产已只生成（老板 2026-09-11）：`turn.ts` 不再 import/调用批判器，
+    // 本组只验 `critic.ts` 的离线视图选择器，不再断言任何生产接线。
     // 非 relay：没有任何视图标记 → 完整通用 rubric 原样装载，行为不变。
     const general = selectCriticRubric([], true);
     assert(general.includes("这份不给生成用"), "非 relay 仍装载完整通用 rubric");
@@ -972,26 +957,18 @@ async function main() {
     );
 
     const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
-    // 每条消息自带视图标记 → 批量出站逐条按自己的模式审，不靠 taskContext 是否非空猜。
+    // 每条消息自带视图标记 → 批量 critic 逐条按自己的模式审，不靠 taskContext 是否非空猜。
     assert(criticSrc.includes("审稿视图："), "批量 critic 必须逐条标出该条用哪个视图");
     assert(
       criticSrc.includes("selectCriticRubric(views, hasGeneral)") &&
         criticSrc.includes("selectCriticRubric(args.view ? [args.view] : [], !args.view)"),
       "单条与批量 critic 都必须按结构标记选择视图"
     );
-    // 不增加模型调用次数：批判器仍只有单条/批量两处 generateText。
+    // 离线批判器仍只有单条/批量两处 generateText——它不因这次产品决定新增调用。
     assert.equal(
       criticSrc.split("generateText(").length - 1,
       2,
-      "不能为专属视图新增模型调用"
-    );
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(turnSrc.includes("relayRecipientTaskContext({"), "turn.ts 必须接入 relay 出站任务背景");
-    assert(turnSrc.includes("relaySenderReplyTaskContext({"), "turn.ts 必须接入 relay 回信任务背景");
-    assert(
-      turnSrc.split('"relay-recipient"').length - 1 === 1 &&
-        turnSrc.split('"relay-sender-reply"').length - 1 === 3,
-      "relay 出站 1 处、回信 3 处（初稿/重写/最终修正）都要带结构标记"
+      "离线批判器仍只有单条/批量两处模型调用"
     );
   });
   check("judge 判断前提与 relay 一致：透明转达待定居住议题、简短点题回执都不是失败", () => {
@@ -1031,284 +1008,89 @@ async function main() {
       );
     }
   });
-  check("relay 只在最终聚焦修正升级强模型，主生成与其余生成路径一律默认模型", () => {
-    // 唯一升级路径：relay + finalFix（走到这里意味着初稿与第一次重写都已被 critic 打回）。
-    assert.equal(
-      relayRewriteModelId({
-        relayActive: true,
-        stage: "finalFix",
-        defaultModelId: COLIVING_DEFAULT_MODEL,
-      }),
-      RELAY_FINAL_FIX_MODEL,
-      "relay 最终聚焦修正必须升级到强模型"
-    );
-    assert.equal(RELAY_FINAL_FIX_MODEL, "deepseek/deepseek-v4.1-flash");
-    // 其余路径一律默认便宜模型，不能顺手放宽到首稿/出站/第一次重写/非 relay。
-    assert.equal(
-      relayRewriteModelId({
-        relayActive: false,
-        stage: "finalFix",
-        defaultModelId: COLIVING_DEFAULT_MODEL,
-      }),
-      COLIVING_DEFAULT_MODEL,
-      "非 relay 不升级"
-    );
-    assert.equal(
-      relayRewriteModelId({
-        relayActive: true,
-        stage: "redo",
-        defaultModelId: COLIVING_DEFAULT_MODEL,
-      }),
-      COLIVING_DEFAULT_MODEL,
-      "relay 第一次重写不升级（首稿/出站同理不变）"
-    );
-    assert.equal(
-      relayRewriteModelId({
-        relayActive: false,
-        stage: "redo",
-        defaultModelId: COLIVING_DEFAULT_MODEL,
-      }),
-      COLIVING_DEFAULT_MODEL,
-      "非 relay 重写不升级"
-    );
-    // 默认模型被 COLIVING_MODEL 覆盖时，非升级路径如实返回它，不偷偷换成强模型。
-    assert.equal(
-      relayRewriteModelId({
-        relayActive: true,
-        stage: "redo",
-        defaultModelId: "some/other-model",
-      }),
-      "some/other-model"
-    );
-    // 接线：只有 finalFix 一处传 stage:"finalFix"；第一次重写必须走 stage:"redo"。
+  /**
+   * ── 生产只生成（generation-only，老板 2026-09-11 拍板）──────────────────
+   *
+   * 老板："缩减步骤，只管生成。" 生成/工具循环是生产唯一 LLM 阶段：
+   * 没有 LLM 批判器复核、没有打回重写、没有 relay 最终聚焦修正。下面的断言
+   * 用免费的结构事实证明这条契约仍在（不调模型、不跑场景）：
+   * ①turn.ts 没有任何 critic/redo/finalFix 的 import 或调用路径；
+   * ②回复核对证据是"按设计未审"（generation-only）而不是"审了没通过"；
+   * ③确定性工具/安全保护仍在（竞态门禁、出站硬闸、代码可证的事实核对）；
+   * ④离线 judge 仍可选且与生产隔离；
+   * ⑤没有生产默认再选批判器/最终修正模型。
+   */
+  check("generation-only contract: turn.ts 无 critic/redo/finalFix 路径，保护与离线 judge 各就各位", () => {
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert.equal(
-      turnSrc.split('stage: "finalFix"').length - 1,
-      1,
-      "只有最终聚焦修正这一处走升级选型"
-    );
-    assert.equal(
-      turnSrc.split('stage: "redo"').length - 1,
-      1,
-      "第一次重写必须走默认模型分支"
-    );
-    // **主生成不升级强模型**（第十七阶段撤回第十六阶段的选择性主生成升级）：
-    // 主生成直接尊重 `args.modelId ?? colivingModelId()`，与强制交付/打招呼/
-    // fact-fidelity 重试一样走默认模型，只保留 finalFix 这一处窄升级。
+
+    // ① 生产 turn 不 import/不调用任何 LLM 批判器、重写或最终聚焦修正生成。
+    assert(!turnSrc.includes("critic"), "turn.ts 不得再出现任何 critic 引用（import/调用）");
+    assert(!turnSrc.includes("critiqueBatch"), "turn.ts 不得调用 critiqueBatch");
+    assert(!turnSrc.includes("await critique("), "turn.ts 不得调用 critique");
     assert(
-      !turnSrc.includes("relayMainModelId"),
-      "不应再有任何 relay 主生成专属选型"
+      !turnSrc.includes('stage: "finalFix"') && !turnSrc.includes('stage: "redo"'),
+      "turn.ts 不得再有 redo/finalFix 生成阶段选型"
     );
     assert(
-      turnSrc.split("getLanguageModel(modelId)").length - 1 >= 3,
-      "主生成与强制交付/打招呼/事实重试都使用默认模型"
+      !turnSrc.includes('trackedGatewayCall("finalFix"') &&
+        !turnSrc.includes('trackedGatewayCall("redo"'),
+      "turn.ts 不得再有任何打回/最终修正的计费调用"
     );
-  });
-  check("relay 选择性强审稿只按结构事实升级：首次简单提醒不升级，连续关系/多收件人才升级", () => {
-    // 首次简单 relay：一个收件人、此前没有介绍之外的往来 → 便宜 critic。
+    // 生产只剩三处模型调用，且都用同一个默认生成模型：主生成 + 两处确定性兜底
+    // （强制 sendReply / relay 被拦时强制 contactPerson）。
     assert.equal(
-      relayReviewNeedsStrong({
-        relayActive: true,
-        recipientCount: 1,
-        houseHasPriorSubstantiveOutbound: false,
-      }),
-      false,
-      "首次简单提醒不能升级成强模型调用"
-    );
-    // 房屋级连续关系（本轮开始前已有介绍之外的实质往来）→ 强。
-    assert.equal(
-      relayReviewNeedsStrong({
-        relayActive: true,
-        recipientCount: 1,
-        houseHasPriorSubstantiveOutbound: true,
-      }),
-      true
-    );
-    // 本轮一个出站都没有（模型漏调 contactPerson）、但房屋此前已有实质往来 → 仍升级，
-    // 不能因为"本轮收件人数为 0"就失效（corpus-031 第 6 轮）。
-    assert.equal(
-      relayReviewNeedsStrong({
-        relayActive: true,
-        recipientCount: 0,
-        houseHasPriorSubstantiveOutbound: true,
-      }),
-      true,
-      "模型漏调联系工具时，房屋级信号仍要认出连续关系"
-    );
-    // 本轮多个实际/尝试收件人 → 强（哪怕只有第一次往来）。
-    assert.equal(
-      relayReviewNeedsStrong({
-        relayActive: true,
-        recipientCount: 2,
-        houseHasPriorSubstantiveOutbound: false,
-      }),
-      true
-    );
-    // 非 relay 一律不升级，普通对话不受影响。
-    for (const recipientCount of [0, 1, 2]) {
-      for (const houseHasPriorSubstantiveOutbound of [false, true]) {
-        assert.equal(
-          relayReviewNeedsStrong({
-            relayActive: false,
-            recipientCount,
-            houseHasPriorSubstantiveOutbound,
-          }),
-          false,
-          "非 relay 不得升级"
-        );
-      }
-    }
-    // 强审稿模型与安全敏感同一个：criticModelId(true) === criticModelId(false, true)。
-    const prev = process.env.COLIVING_CRITIC_MODEL;
-    delete process.env.COLIVING_CRITIC_MODEL;
-    try {
-      assert.equal(criticModelId(false, true), "deepseek/deepseek-v4.1-flash");
-      assert.equal(criticModelId(false, true), criticModelId(true));
-      assert.equal(criticModelId(false, false), "deepseek/deepseek-v4.1-flash");
-    } finally {
-      if (prev === undefined) delete process.env.COLIVING_CRITIC_MODEL;
-      else process.env.COLIVING_CRITIC_MODEL = prev;
-    }
-    // 接线：turn.ts 把结构事实算成 strongRelayReview，并喂给出站批量 critic 与回信 critic。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(
-      turnSrc.includes("relayReviewNeedsStrong({"),
-      "turn.ts 必须调用纯函数算强审稿"
-    );
-    assert(
-      turnSrc.includes("forceStrong: strongRelayReview"),
-      "出站/回信 critic 必须带上强审稿标记"
-    );
-    assert(
-      turnSrc.split("forceStrong: strongRelayReview").length - 1 >= 4,
-      "四个 relay critic 入口（批量出站 + 三处回信）都应带上强审稿标记"
-    );
-  });
-  check("blocked relay 的最终聚焦修正第一步强制 contactPerson，其余最终修正不受影响", () => {
-    // 唯一强制路径：relay 这一轮已有 blocked 出站——必须真正重发，不能先 sendReply 绕过。
-    assert.equal(
-      finalFixForcedFirstTool({ relayActive: true, hasBlockedOutbound: true }),
-      "contactPerson",
-      "blocked relay 必须第一步强制 contactPerson"
-    );
-    // 其余三种情形一律不强制（行为保持现状）：
-    assert.equal(
-      finalFixForcedFirstTool({ relayActive: true, hasBlockedOutbound: false }),
-      null,
-      "relay 但没有 blocked 出站：没有东西要重发，不强制"
+      turnSrc.split("generateText(").length - 1,
+      3,
+      "生产只应有主生成与两处强制兜底共三处模型调用"
     );
     assert.equal(
-      finalFixForcedFirstTool({ relayActive: false, hasBlockedOutbound: true }),
-      null,
-      "非 relay：普通对话没有重发被拦出站这回事，不强制"
+      turnSrc.split("trackedGatewayCall(").length - 1,
+      3,
+      "三处模型调用都必须过计费台账"
     );
     assert.equal(
-      finalFixForcedFirstTool({ relayActive: false, hasBlockedOutbound: false }),
-      null,
-      "非 relay 且无 blocked 出站：不强制"
-    );
-    // 接线：turn.ts 的最终聚焦修正里，只在 forcedFirstTool 非空时才加 prepareStep，
-    // 把第一步钉成 contactPerson；之后放开为 required，仍可调 sendReply 收口。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const forced = turnSrc.indexOf("const forcedFirstTool = finalFixForcedFirstTool({");
-    assert(forced > 0, "turn.ts 必须用 finalFixForcedFirstTool 决定是否强制重发");
-    // 强制条件必须来自**每次迭代重算**的"仍未被同人合格出站覆盖"的集合
-    // （`uncoveredBlockedPersonIds`），不是循环外只算一次的静态 blocked 布尔
-    // ——旧写法会在第一次已补齐合格出站后，第二次仍重复联系同一人（Codex
-    // 2026-09-12 控制流退回）。
-    const forcedArgs = turnSrc.slice(forced, forced + 260);
-    assert(
-      turnSrc.includes("hasBlockedOutbound: uncoveredBlocked.length > 0"),
-      "强制重发只应挂在仍有未覆盖被拦出站的窄路径上（每次迭代重算）"
+      turnSrc.split("getLanguageModel(modelId)").length - 1,
+      3,
+      "三处调用都必须用同一个默认生成模型"
     );
     assert(
-      forcedArgs.includes("hasBlockedOutbound:") &&
-        !forcedArgs.includes("outbound.some((message) => message.blocked)"),
-      "强制判定必须吃循环内重算的 uncoveredBlocked，而不是循环外的静态 blocked 布尔"
+      turnSrc.includes("const modelId = args.modelId ?? colivingModelId();"),
+      "生产模型一律默认 colivingModelId()，没有 critic/finalFix 专用选型"
     );
-    const prep = turnSrc.indexOf("prepareStep:", forced);
-    assert(prep > forced, "必须把第一步强制工具接进最终聚焦修正调用");
-    const prepBlock = turnSrc.slice(prep, prep + 500);
-    assert(prepBlock.includes('toolName: "contactPerson"'), "第一步必须钉成 contactPerson");
-    assert(prepBlock.includes("stepNumber === 0"), "只强制第一步，之后放开让它调 sendReply");
+
+    // ② 回复核对证据必须是 generation-only（设计如此），不是"审稿器没跑起来"。
     assert(
-      prepBlock.includes('{ toolChoice: "required" as const }'),
-      "第一步之后仍给有限步数调 sendReply（required + stopWhen 收口）"
+      turnSrc.includes('mode: "generation-only"'),
+      "生产 replyReview 必须是 generation-only 证据"
     );
+    assert(!turnSrc.includes('mode: "llm-review"'), "生产不得产生 LLM 审稿证据");
+
+    // ③ 确定性工具/安全保护仍在（非 LLM 的硬闸与事实核对）。
+    assert(turnSrc.includes("async function enforceOutboundGate("), "确定性出站硬闸必须保留");
+    assert(turnSrc.includes("isPrematureCapacityEscape("), "过早增容逃逸确定性打回必须保留");
+    assert(turnSrc.includes("if (o.scheduleVerified) continue;"), "排班一致正文的确定性放行必须保留");
+    assert(turnSrc.includes("function checkFactFidelity("), "代码可证的事实核对必须保留");
+    assert(turnSrc.includes("uncoveredBlockedPersonIds(outbound)"), "被拦出站结构事实必须保留");
+    assert(turnSrc.includes("claimsContactCompletion(text)"), "确定性假完成判定必须保留");
+    assert(turnSrc.includes("await repo.hasNewInboundSince("), "发送前竞态门禁必须保留");
+    assert(turnSrc.includes("const targetHasNewInbound"), "竞态门禁的跳过路径必须保留");
+
+    // ④ 离线 judge 仍可选、且与生产隔离：turn.ts 不依赖它，还能用环境变量关掉。
     assert(
-      turnSrc.includes("...(forcedFirstTool !== null"),
-      "只有 forcedFirstTool 非空时才加 prepareStep，其余最终修正不触发"
+      !turnSrc.includes("judgeConversation") && !turnSrc.includes("evals/judge"),
+      "生产 turn 不得依赖离线 judge"
     );
-    // 非强制路径（非 relay / 无 blocked 出站）的 base toolChoice 保持原样。
-    const baseIdx = turnSrc.indexOf("toolChoice: finalNeedsAction");
-    assert(baseIdx > 0, "最终修正的 base toolChoice 必须保持");
-    const baseBlock = turnSrc.slice(baseIdx, baseIdx + 140);
-    assert(baseBlock.includes('"required"'), "需要动作时仍为 required");
-    assert(baseBlock.includes('toolName: "sendReply"'), "不需要动作时仍只给 sendReply");
-    // 新增的出站仍按现有 critiqueAndMarkOutbound 复核。
+    const judgeSrc = readFileSync("lib/chat/coliving/evals/judge.ts", "utf8");
     assert(
-      turnSrc.includes("await critiqueAndMarkOutbound(finalNewOutbound)"),
-      "最终修正新发的出站仍要过 critiqueAndMarkOutbound"
+      judgeSrc.includes("COLIVING_JUDGE_OFF"),
+      "离线 judge 必须仍可用 COLIVING_JUDGE_OFF 关闭（可选、非生产阶段）"
     );
-  });
-  check("最终强修正有界：普通 1 次、relay+blocked 最多 2 次，成功短路、非 relay 不增预算", () => {
-    // 预算纯函数：只有 relay 且本轮仍有被拦出站时才给第二次；其余一律 1 次。
-    assert.equal(
-      finalFixBudget({ relayActive: true, hasBlockedOutbound: true }),
-      2,
-      "relay 且有被拦出站：最多 2 次"
-    );
-    assert.equal(
-      finalFixBudget({ relayActive: true, hasBlockedOutbound: false }),
-      1,
-      "relay 但无 blocked：仍是 1 次"
-    );
-    assert.equal(
-      finalFixBudget({ relayActive: false, hasBlockedOutbound: true }),
-      1,
-      "非 relay 不增加预算"
-    );
-    assert.equal(
-      finalFixBudget({ relayActive: false, hasBlockedOutbound: false }),
-      1,
-      "非 relay 且无 blocked：1 次"
-    );
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // 上限由纯函数给，不在循环里再写死一个数字。
-    assert(
-      turnSrc.includes("const maxFinalFixAttempts = finalFixBudget({"),
-      "预算必须来自 finalFixBudget 纯函数"
-    );
-    assert(
-      turnSrc.includes("fixAttempt < maxFinalFixAttempts"),
-      "有界循环必须以上限为界，不能写死更大的数"
-    );
-    // 成功立即停：复核通过即短路，不白烧下一次强修正。
-    const loopIdx = turnSrc.indexOf("for (let fixAttempt = 0;");
-    assert(loopIdx > 0, "必须有有界最终修正循环");
-    const loopEnd = turnSrc.indexOf("if (!replyReview.pass)", loopIdx);
-    const loopBody = turnSrc.slice(loopIdx, loopEnd);
-    assert(loopIdx < loopEnd, "循环体必须存在");
-    assert(
-      loopBody.includes("if (lastFinalVerdict.pass) {") && loopBody.includes("break;"),
-      "复核通过必须立即 break 短路"
-    );
-    // 每次用最新事实（含最新 blockReason）复核，不是复用旧结论。
-    assert(
-      loopBody.includes("renderNewReplyFacts()") &&
-        loopBody.includes("const finalFactFidelityHit = checkFactFidelity(reply)"),
-      "每次修正都要用最新的 blocked reason 与事实复核"
-    );
-    assert(
-      turnSrc.includes("o.blockReason ?? "),
-      "被拦出站的 blockReason 必须进最终修正的事实"
-    );
-    // 没有复制整段控制流：finalFix 选型仍只有一处。
-    assert.equal(
-      turnSrc.split('stage: "finalFix"').length - 1,
-      1,
-      "有界循环仍只有一处 finalFix 选型，没有复制控制流"
-    );
+
+    // ⑤ 没有任何生产默认再选批判器/最终修正模型。
+    const modelSrc = readFileSync("lib/chat/coliving/model.ts", "utf8");
+    assert(!modelSrc.includes("RELAY_FINAL_FIX_MODEL"), "model.ts 不得再有 relay 最终修正专用模型");
+    assert(!modelSrc.includes("relayRewriteModelId"), "model.ts 不得再有 relay 重写/最终修正选型");
+    assert(modelSrc.includes("COLIVING_DEFAULT_MODEL"), "默认生成模型必须保留");
   });
   check("process-narration gate is wired into checkFactFidelity", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -1351,63 +1133,16 @@ async function main() {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     assert(!src.includes("function checkScheduleHardRule("));
     assert(!src.includes("const pullBackMinutes"));
-    assert(src.includes("contacted.delete(msg.personId)"));
+    // 确定性出站硬闸仍在：被拦草稿不能占住本轮重发资格。
+    assert(src.includes("contacted.delete(o.personId)"));
     assert(src.includes("bestSchedulePlans(windowStartMinutes, constraints, 5)"));
-    assert(src.includes("const finalNeedsAction ="));
-    assert(src.includes("await critiqueAndMarkOutbound(finalNewOutbound)"));
     assert(src.includes('position.kind !== "commitment"'));
     assert(src.includes("ctx.openCases.some(isOpenConflictCase)"));
     assert(!src.includes("!topicHitsConflict ||\n      !toolsUsed.includes(\"recordPosition\")"));
-    assert(src.includes("const needsBlockedOutboundRecovery ="));
     assert(src.includes("isGeneratedResidentName(target.name)"));
-    assert(src.includes("const redoFactFidelityHit = checkFactFidelity(reply)"));
-    assert(src.includes("const finalFactFidelityHit = checkFactFidelity(reply)"));
     assert(src.includes("function checkUnconsultedSelectedSchedule()"));
     assert(src.includes("const unconsultedSchedule = checkUnconsultedSelectedSchedule()"));
     assert(src.includes("if (o.scheduleVerified)"));
-  });
-  check("6.5/6.6/6.7 schedule brkes enter the full-toolset rewrite", () => {
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // 1) needsScheduleRecompute 具名布尔必须由三个调度正确性 rule id 构成。
-    //    这类打回的修法是重新真算 pickSchedule→chooseSchedule，不是换措辞；
-    //    只给 sendReply 会让模型把编造的时段原样再交一遍。
-    const schedIdx = src.indexOf("const needsScheduleRecompute =");
-    assert(schedIdx > 0, "必须存在 needsScheduleRecompute 布尔");
-    const schedDecl = src.slice(schedIdx, src.indexOf(";", schedIdx));
-    for (const id of ["6.5", "6.6", "6.7"]) {
-      assert(schedDecl.includes(`"${id}"`), `needsScheduleRecompute 必须由 ${id} 构成`);
-    }
-    // 2) 首轮打回重写：isBrokenPromise 必须并入 needsScheduleRecompute，否则
-    //    6.5/6.6/6.7 命中时 redoTools 还是只有 sendReply。
-    const promiseIdx = src.indexOf("const isBrokenPromise =");
-    assert(promiseIdx > 0, "isBrokenPromise 必须存在");
-    const promiseDecl = src.slice(promiseIdx, src.indexOf(";", promiseIdx));
-    assert(promiseDecl.includes("needsScheduleRecompute"),
-      "isBrokenPromise 必须并入 needsScheduleRecompute");
-    // 3) 最后一次聚焦修正：finalNeedsAction 也要把三个 id 算进完整工具集条件，
-    //    否则重写后仍被 6.5/6.6/6.7 打回时只剩 sendReply、照样救不回来。
-    const finalIdx = src.indexOf("const finalNeedsAction =");
-    assert(finalIdx > 0, "finalNeedsAction 必须存在");
-    const finalDecl = src.slice(finalIdx, src.indexOf(";", finalIdx));
-    for (const id of ["6.5", "6.6", "6.7"]) {
-      assert(finalDecl.includes(`"${id}"`), `finalNeedsAction 必须把 ${id} 算作需要完整工具集`);
-    }
-    // 4) 完整工具集重写里真的带排班工具，模型才可能在重写时真算一遍。
-    for (const toolConst of ["const redoTools", "const finalTools"]) {
-      const toolsIdx = src.indexOf(toolConst);
-      assert(toolsIdx > 0, `${toolConst} 必须存在`);
-      const toolsBlock = src.slice(toolsIdx, src.indexOf("};", toolsIdx));
-      assert(toolsBlock.includes("pickSchedule: tools.pickSchedule"), `${toolConst} 必须含 pickSchedule`);
-      assert(toolsBlock.includes("chooseSchedule: tools.chooseSchedule"), `${toolConst} 必须含 chooseSchedule`);
-    }
-    // 5) 调度正确性打回的重写提示词必须指示"真的调 pickSchedule 重算"，
-    //    而不是只让模型换个说法。
-    const redoPromptIdx = src.indexOf("这次打回的是调度正确性：");
-    assert(redoPromptIdx > 0, "重写提示必须带调度正确性专段");
-    assert(
-      src.includes("现在真的调 `pickSchedule`") && src.includes("重新算一版"),
-      "调度正确性打回的重写提示必须指示真的调 pickSchedule 重算"
-    );
   });
   check("contactPerson skips duplicate open messages across turns", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -1492,19 +1227,12 @@ async function main() {
     assert.equal(isScheduleFairnessObjection("不合适。凭什么我让着别人？"), true);
     assert.equal(isScheduleFairnessObjection("可以"), false);
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // 覆盖模板已整体删除：当前说话人的回复正文只由大脑 sendReply / 审稿重写交付。
+    // 覆盖模板已整体删除：当前说话人的回复正文只由大脑 sendReply 交付。
     assert(!src.includes("buildSelectedScheduleReply"), "buildSelectedScheduleReply 必须已删除");
     assert(!src.includes("buildContactProgressReply"), "buildContactProgressReply 必须已删除");
-    // renderBaseFacts 的"本轮调用的工具"之后必须注入公平质疑信号（提示轮换/重议）——
-    // 代码只给信号、不给成品句，措辞由大脑看着办。
-    const renderStart = src.indexOf("const renderBaseFacts = () =>");
-    const renderEnd = src.indexOf("const outboundNames = new Map(", renderStart);
-    assert(renderStart > 0 && renderEnd > renderStart, "renderBaseFacts 必须可定位");
-    const renderFactsRegion = src.slice(renderStart, renderEnd);
-    assert(renderFactsRegion.includes("isScheduleFairnessObjection(args.text)"),
-      "renderBaseFacts 必须用 isScheduleFairnessObjection(args.text) 注入公平质疑信号");
-    assert(renderFactsRegion.includes("应提议轮换或重新协商"),
-      "公平质疑信号必须提示提议轮换/重新协商，别用谁先提出/谁先回复排先后");
+    // 只生成后，回复正文不再经 critic/重写的事实渲染；公平质疑由 doctrine 小节
+    // 直接管，不再有代码往重写提示里注入信号（`renderBaseFacts` 已随重写路径移除）。
+    assert(!src.includes("renderBaseFacts"), "renderBaseFacts 已随 critic/重写路径移除");
   });
   check("isScheduleSlotInquiry recognises slot inquiry by act and body template", () => {
     const slotInquiry = {
@@ -1679,11 +1407,12 @@ async function main() {
     const outboundSrc = fnToNextExport("recentOutbound");
     assert(outboundSrc.includes("limit = 6"), "recentOutbound 默认 limit 必须收窄为 6");
     assert(outboundSrc.includes("m.direction = 'outbound'"), "recentOutbound 必须只返回 outbound");
-    assert(outboundSrc.includes("limit ${limit}"), "recentOutbound 必须用参数 limit，显式传 24（批判器）才不被默认值覆盖");
-    // 调用方显式传 limit 时不得被默认值顶掉：批判器的 24 条窗口是唯一显式传参处。
+    assert(outboundSrc.includes("limit ${limit}"), "recentOutbound 必须用参数 limit，显式传入才能不被默认值覆盖");
+    // 只生成后，唯一显式拉大出站窗口的消费者（离线 critic）已不在生产路径上；
+    // turn.ts 不得再为审稿事实偷偷拉窗口，保持默认 6 条。
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(turnSrc.includes("repo.recentOutbound(sender.householdId, 24)"),
-      "批判器必须继续用显式 24 条窗口（不能回退成默认 6 而丢审稿事实）");
+    assert(!turnSrc.includes("repo.recentOutbound("),
+      "生产 turn 不得再为 critic 拉取出站窗口（critic 已离线）");
   });
   check("查询类工具不再无条件进入 activeTools；只有环境/历史信号才暴露", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -1817,59 +1546,21 @@ async function main() {
     assert.equal(scheduleInquiryConfirmation({ inquiryBody: "你用 17:30-18:00，愿意吗？", responseBody: "不行" }), null);
   });
 
-  // ── 批判器省钱改造（2026-09-07）/ 文本链路统一 V4.1（2026-09-11）──────
-  check("critic default model is V4.1 Flash; safety-sensitive topics use the strong branch", () => {
-    const prev = process.env.COLIVING_CRITIC_MODEL;
-    delete process.env.COLIVING_CRITIC_MODEL;
-    try {
-      assert.equal(criticModelId(), "deepseek/deepseek-v4.1-flash", "默认批判器必须用统一后的 V4.1 Flash");
-      assert.equal(criticModelId(false), "deepseek/deepseek-v4.1-flash");
-      assert.equal(criticModelId(true), "deepseek/deepseek-v4.1-flash", "安全敏感主题走强审稿分支（当前同 slug）");
-    } finally {
-      if (prev === undefined) delete process.env.COLIVING_CRITIC_MODEL;
-      else process.env.COLIVING_CRITIC_MODEL = prev;
-    }
-    const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
-    assert(criticSrc.includes("hasSafetySensitiveTopic(args.said, args.draft)"),
-      "critique 必须用入站正文 + 待发消息判安全敏感主题");
-    assert(criticSrc.includes("criticModelId(forceSensitive, args.forceStrong)"),
-      "critique 必须把敏感判定结果 + relay 选择性强审稿喂给模型选型");
-    assert.equal(DEFAULT_CRITIC_MODEL, "deepseek/deepseek-v4.1-flash", "默认批判器常量必须是 V4.1 Flash");
-    assert.equal(SENSITIVE_CRITIC_MODEL, "deepseek/deepseek-v4.1-flash", "强审稿分支常量必须是 V4.1 Flash");
-    assert(criticSrc.includes('process.env.COLIVING_CRITIC_MODEL?.trim()'), "必须保留 COLIVING_CRITIC_MODEL 覆盖");
-  });
-
   // ── 文本链路统一 V4.1 Flash（2026-09-11 老板决定）─────────────────────────
-  check("all coliving text roles default to V4.1 Flash; escape hatches and review workflow intact", () => {
-    // 六个角色（主生成 / 普通 critic / 安全+强审稿 critic / relay 最终聚焦修正 /
-    // 评测语义判定 / 排班协商意图解析）默认值统一为 V4.1 Flash。
+  check("production generation and offline judge/intent roles still default to V4.1 Flash", () => {
+    // 生产批判器/relay 最终修正的选型断言已随"只生成"整体移除（见上面的
+    // generation-only contract）。这里只锁仍在用的角色：主生成、离线语义判定、
+    // 排班协商意图解析，以及它们各自的显式覆盖逃生舱口。
     const saved = {
       COLIVING_MODEL: process.env.COLIVING_MODEL,
-      COLIVING_CRITIC_MODEL: process.env.COLIVING_CRITIC_MODEL,
       COLIVING_JUDGE_MODEL: process.env.COLIVING_JUDGE_MODEL,
-      COLIVING_CRITIC_OFF: process.env.COLIVING_CRITIC_OFF,
     };
     delete process.env.COLIVING_MODEL;
-    delete process.env.COLIVING_CRITIC_MODEL;
     delete process.env.COLIVING_JUDGE_MODEL;
-    delete process.env.COLIVING_CRITIC_OFF;
     try {
       const v41 = "deepseek/deepseek-v4.1-flash";
       assert.equal(COLIVING_DEFAULT_MODEL, v41, "主生成默认必须是 V4.1 Flash");
       assert.equal(colivingModelId(), v41, "未设覆盖时主生成必须用 V4.1 Flash");
-      assert.equal(criticModelId(false, false), v41, "普通 critic 默认必须是 V4.1 Flash");
-      assert.equal(criticModelId(true), v41, "安全敏感 critic 默认必须是 V4.1 Flash");
-      assert.equal(criticModelId(false, true), v41, "relay 强审稿 critic 默认必须是 V4.1 Flash");
-      assert.equal(RELAY_FINAL_FIX_MODEL, v41, "relay 最终聚焦修正默认必须是 V4.1 Flash");
-      assert.equal(
-        relayRewriteModelId({
-          relayActive: true,
-          stage: "finalFix",
-          defaultModelId: COLIVING_DEFAULT_MODEL,
-        }),
-        v41,
-        "relay 最终聚焦修正选型必须落到 V4.1 Flash"
-      );
       assert.equal(JUDGE_DEFAULT_MODEL, v41, "评测语义判定默认必须是 V4.1 Flash");
       assert.equal(judgeModelId(), v41, "未设覆盖时语义判定必须用 V4.1 Flash");
       assert.equal(
@@ -1877,187 +1568,30 @@ async function main() {
         v41,
         "排班协商意图解析（coordination-bridge/session 依赖）默认必须是 V4.1 Flash"
       );
-      // 审稿默认仍然开着：COLIVING_CRITIC_OFF 只是显式逃生舱口，不是新默认。
-      assert.equal(criticEnabled(), true, "未设 COLIVING_CRITIC_OFF 时审稿必须默认开启");
-      assert.equal(
-        needsSemanticCritique({ relayActive: true, safetySensitive: false }),
-        true,
-        "relay 非敏感出站/回信默认仍进 critic"
-      );
-      // 三条显式覆盖（逃生舱口）仍生效。
+      // 显式覆盖仍生效：只有设了环境变量才改。
       process.env.COLIVING_MODEL = "some/override-main";
-      process.env.COLIVING_CRITIC_MODEL = "some/override-critic";
       process.env.COLIVING_JUDGE_MODEL = "some/override-judge";
       assert.equal(colivingModelId(), "some/override-main", "COLIVING_MODEL 覆盖必须仍生效");
-      assert.equal(criticModelId(false, false), "some/override-critic", "COLIVING_CRITIC_MODEL 覆盖必须仍生效");
-      assert.equal(criticModelId(true), "some/override-critic", "强审稿分支也必须尊重覆盖");
       assert.equal(judgeModelId(), "some/override-judge", "COLIVING_JUDGE_MODEL 覆盖必须仍生效");
-      // 只有显式设 1 才关审稿。
-      process.env.COLIVING_CRITIC_OFF = "1";
-      assert.equal(criticEnabled(), false, "COLIVING_CRITIC_OFF=1 是显式逃生舱口");
     } finally {
       const restore = (key: keyof typeof saved) => {
         if (saved[key] === undefined) delete process.env[key];
         else process.env[key] = saved[key];
       };
       restore("COLIVING_MODEL");
-      restore("COLIVING_CRITIC_MODEL");
       restore("COLIVING_JUDGE_MODEL");
-      restore("COLIVING_CRITIC_OFF");
     }
   });
-  check("relay turns route non-sensitive outbound/reply into the default critic; other chats still skip it", () => {
-    // 纯判定函数：relay 命中 → 进 critic；非 relay 非敏感 → 不进；安全敏感 → 进。
-    assert.equal(
-      needsSemanticCritique({ relayActive: false, safetySensitive: false }),
-      false,
-      "普通非敏感对话必须继续跳过批判器，不能重新把所有对话送回模型"
-    );
-    assert.equal(
-      needsSemanticCritique({ relayActive: true, safetySensitive: false }),
-      true,
-      "relay 的普通非敏感出站/回复也必须进批判器，rubric 14/15 才有生产门禁"
-    );
-    assert.equal(
-      needsSemanticCritique({ relayActive: false, safetySensitive: true }),
-      true,
-      "安全敏感主题照旧进批判器（critic 内部升级 sonnet）"
-    );
-    assert.equal(needsSemanticCritique({ relayActive: true, safetySensitive: true }), true);
-    // 接线：出站批审 + 首稿/重写稿/最终稿回复三处判定都要走这个纯函数。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(
-      turnSrc.includes('const relayActive = loadedModuleIds.includes("relay")'),
-      "必须用 loadedModuleIds 判本轮是不是 relay"
-    );
-    const callCount = turnSrc.split("needsSemanticCritique({").length - 1;
-    assert(
-      callCount >= 4,
-      `出站批审 + 回复首稿/重写稿/最终修正稿四处的判定都要接上 needsSemanticCritique（实际 ${callCount}）`
-    );
-    // relay 的非敏感出站不得再被"只安全敏感才审"的老条件挡回：出站判定里
-    // 必须用 needsSemanticCritique，而不是裸的 hasSafetySensitiveTopic 取反。
-    const fnStart = turnSrc.indexOf("async function critiqueAndMarkOutbound(");
-    const fnEnd = turnSrc.indexOf("await critiqueAndMarkOutbound(outbound);");
-    const fnBody = turnSrc.slice(fnStart, fnEnd);
-    assert(fnBody.includes("needsSemanticCritique("), "出站批审必须经 needsSemanticCritique 判定");
-    assert(
-      !fnBody.includes("!hasSafetySensitiveTopic(o.text, args.text)"),
-      "出站批审不得再用「非安全敏感就跳过」的老条件"
-    );
-  });
-  check("safety-sensitive keyword matcher hits real probes, not benign chit-chat", () => {
-    // 非法驱逐 / 自杀自伤 / 歧视 / 性骚扰 / 住房公平
-    assert.equal(hasSafetySensitiveTopic("房东要把我赶出去，说我不交钱就别住了"), true);
-    assert.equal(hasSafetySensitiveTopic("再这样我真不想活了，活着没意思"), true);
-    assert.equal(hasSafetySensitiveTopic("他那样说我，我觉得就是歧视"), true);
-    assert.equal(hasSafetySensitiveTopic("他半夜摸我，算性骚扰吗"), true);
-    assert.equal(hasSafetySensitiveTopic("房东说因为我有孩子就不租给我"), true);
-    assert.equal(hasSafetySensitiveTopic("好的，晚上一起吃饭吧"), false);
-    assert.equal(hasSafetySensitiveTopic("收到，我记下了"), false);
-  });
 
-  // ── 出站审稿合并成单次批量调用 ────────────────────────────────────────────
-  check("outbound review is a single batch critique call, never N per-message calls", () => {
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
-    assert(criticSrc.includes("export async function critiqueBatch("), "critic.ts 必须导出 critiqueBatch");
-    const fnStart = turnSrc.indexOf("async function critiqueAndMarkOutbound(");
-    const fnEnd = turnSrc.indexOf("await critiqueAndMarkOutbound(outbound);");
-    assert(fnStart > 0, "critiqueAndMarkOutbound 必须存在");
-    assert(fnEnd > fnStart, "必须能定位 critiqueAndMarkOutbound 的结束");
-    const fnBody = turnSrc.slice(fnStart, fnEnd);
-    assert(fnBody.includes("critiqueBatch("), "critiqueAndMarkOutbound 必须走单次批量 critiqueBatch");
-    assert(fnBody.includes("needsCritique"), "必须先收集需要模型审的消息，而不是逐条直接调");
-    assert(!fnBody.includes("critique({"), "critiqueAndMarkOutbound 内不得再逐条调 critique");
-    assert(!fnBody.includes("Promise.all("), "不得再并发逐条调 critique");
-    // 批量安全语义不丢：scheduleVerified 直接放行、过早增容逃逸确定性打回 仍在代码里
-    assert(fnBody.includes("o.scheduleVerified"), "scheduleVerified 直接放行路径必须保留");
-    assert(fnBody.includes("isPrematureCapacityEscape"), "过早增容逃逸确定性打回路径必须保留");
-  });
-
-  // ── 确定性低风险闸：短确认 / 纯告知跳过批判器 ────────────────────────────
-  check("deterministic safe-reply gate covers short confirmation and pure notices", () => {
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    assert(turnSrc.includes("deterministicallySafeReply"), "回复判定必须存在确定性低风险闸");
-    assert(turnSrc.includes("simpleScheduleAffirmation && reply === simpleScheduleConfirmationText"),
-      "短确认命中必须直接 pass（不再走 critique）");
-    assert(turnSrc.includes("isPureNoticeReply(reply)"), "纯告知命中必须走确定性跳过判定");
-    assert(turnSrc.includes("TURN_ACTION_TOOLS"), "跳过判定必须核对本轮有没有新动作（排班/联系人/规则）");
-    // 行为：白名单内的纯确认/知会才算数，含动作/承诺/点名的不算
-    assert.equal(isPureNoticeReply("好的，收到。"), true);
-    assert.equal(isPureNoticeReply("好的。"), true);
-    assert.equal(isPureNoticeReply("知道了，谢谢。"), true);
-    assert.equal(isPureNoticeReply("明白，辛苦啦"), true);
-    assert.equal(isPureNoticeReply("好的，我这就去联系小周。"), false);
-    assert.equal(isPureNoticeReply("收到，回头再安排。"), false);
-    assert.equal(isPureNoticeReply("好的，你最好别这样。"), false);
-    assert.equal(isPureNoticeReply(""), false);
-  });
-
-  // ── 取消"提示词大脑验收"：非敏感直接 pass，只对安全敏感主题调批判器 ────
-  check("non-sensitive main reply does not call critique; safety-sensitive still does", () => {
-    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const gateIdx = src.indexOf("const safetySensitiveReply = hasSafetySensitiveTopic(reply, args.text);");
-    assert(gateIdx > 0, "主回复判定必须先算 safetySensitiveReply（hasSafetySensitiveTopic 同时覆盖 reply 与入站 args.text）");
-    const block = src.slice(gateIdx, src.indexOf("let replyReview: ReplyReview", gateIdx));
-    // 安全敏感 → 仍调 critique（升级 sonnet）；三元收尾的非敏感分支直接 pass，不调 LLM。
-    const passObj = "{ verified: true, pass: true as const, broke: \"\", why: \"\" }";
-    assert(block.includes("await critique({"), "安全敏感命中时主回复仍调 critique");
-    assert(block.lastIndexOf(passObj) > block.indexOf("await critique({"),
-      "非敏感收尾分支必须直接 pass，不再调 LLM 批判器");
-  });
-  check("non-relay non-sensitive outbound skips the critic; relay outbound enters it", () => {
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const fnStart = turnSrc.indexOf("async function critiqueAndMarkOutbound(");
-    const fnEnd = turnSrc.indexOf("await critiqueAndMarkOutbound(outbound);");
-    assert(fnStart > 0 && fnEnd > fnStart, "critiqueAndMarkOutbound 必须可定位");
-    const fnBody = turnSrc.slice(fnStart, fnEnd);
-    const gateIdx = fnBody.indexOf("!needsSemanticCritique({");
-    const pushIdx = fnBody.indexOf("needsCritique.push({");
-    assert(gateIdx > 0, "收集需要模型审的消息前必须经 needsSemanticCritique 判定");
-    assert(gateIdx < pushIdx, "语义复审判定必须早于 needsCritique.push");
-    const gated = fnBody.slice(gateIdx, pushIdx);
-    assert(gated.includes("verdicts[i] = { verified: true, pass: true"),
-      "判为不需要语义复审的出站必须直接放行（verdicts[i] = pass），而不是 push 进 needsCritique");
-    assert(gated.includes("relayActive"), "出站判定必须区分 relay（relay 进 critic，非 relay 仍跳过）");
-    assert(gated.includes("hasSafetySensitiveTopic(o.text, args.text)"),
-      "安全敏感仍由 hasSafetySensitiveTopic 判，覆盖 o.text（正文）");
-    // 确定性闸不丢：scheduleVerified 直通、过早增容逃逸确定性打回、批量调用仍在
-    assert(fnBody.includes("o.scheduleVerified"), "scheduleVerified 直接放行路径必须保留");
-    assert(fnBody.includes("isPrematureCapacityEscape"), "过早增容逃逸确定性打回路径必须保留");
-    assert(fnBody.includes("critiqueBatch("), "敏感消息仍走单次批量 critiqueBatch");
-  });
-  check("whole-turn safety upgrade intact: reply/redo/final/outbound all strong-branch gated", () => {
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
-    // 1) 回复链三处 critique 调用都在（主/重写/最终修正），数量没因改动被删
-    const critiqueCount = turnSrc.split("await critique({").length - 1;
-    assert.equal(critiqueCount, 3, `回复链必须有且只有 3 处 critique 调用，实际 ${critiqueCount}`);
-    // 2) 主回复/重写/最终修正三段，每段 critique 之前都有 hasSafetySensitiveTopic(reply, args.text) 守卫
-    const segments: Array<[string, string]> = [
-      ["const safetySensitiveReply = hasSafetySensitiveTopic(reply, args.text);", "const redoFactFidelityHit = checkFactFidelity(reply);"],
-      ["const redoFactFidelityHit = checkFactFidelity(reply);", "const finalFactFidelityHit = checkFactFidelity(reply);"],
-      ["const finalFactFidelityHit = checkFactFidelity(reply);", "最终落锤：简单肯定覆盖"],
-    ];
-    for (const [startAnchor, endAnchor] of segments) {
-      const start = turnSrc.indexOf(startAnchor);
-      const end = turnSrc.indexOf(endAnchor, start + 1);
-      assert(start > 0 && end > start, `审稿段落必须可定位：${startAnchor.slice(0, 40)}…`);
-      const seg = turnSrc.slice(start, end);
-      assert(seg.includes("await critique({"), "段落内必须保留 critique 调用（安全敏感升级路径）");
-      assert(seg.includes("hasSafetySensitiveTopic(reply, args.text)"), "段落内必须有安全敏感守卫");
-    }
-    // 3) 出站入口的守卫覆盖正文与入站（hasSafetySensitiveTopic 同时覆盖入站与出站/reply）
-    const outboundStart = turnSrc.indexOf("async function critiqueAndMarkOutbound(");
-    const outboundEnd = turnSrc.indexOf("await critiqueAndMarkOutbound(outbound);");
-    assert(outboundStart > 0 && outboundEnd > outboundStart, "出站审稿函数必须可定位");
-    const outboundSeg = turnSrc.slice(outboundStart, outboundEnd);
-    assert(outboundSeg.includes("hasSafetySensitiveTopic(o.text, args.text)"), "出站守卫必须覆盖 o.text（正文）");
-    // 4) 升级在 critic 内部：安全敏感命中 → forceSensitive → 走强审稿分支
-    assert(criticSrc.includes("criticModelId(forceSensitive"), "critic 内仍按 forceSensitive 走强审稿分支");
-    assert.equal(SENSITIVE_CRITIC_MODEL, "deepseek/deepseek-v4.1-flash", "强审稿分支常量必须在且为 V4.1 Flash");
-  });
+  /**
+   * 生产批判器的接线断言已随"只生成"产品决定整体移除（老板 2026-09-11）。
+   * 契约由本文件两条免费断言接管，不再重复：
+   *  - "generation-only contract"：turn.ts 无 critic/critiqueBatch/redo/finalFix
+   *    的 import/调用路径，且没有生产默认再选批判器/最终修正模型；
+   *  - "generation-only review evidence"：只生成证据（`verified:false` 属设计如此）
+   *    被 eval 接受，确定性失败仍红灯；`llm-review` 未验证仍算门禁失败。
+   * `critic.ts` 的离线/未来实现（视图选择、离线批量）仍由上面的离线专项断言覆盖。
+   */
 
   /**
    * ── 评测实验 guidance（Golden Trace A/B）──
@@ -2157,12 +1691,13 @@ async function main() {
       "doctrine 段必须带 prompt cache 断点"
     );
     assert(!noGuidance.some((m) => m.content === "G"), "无 guidance 时数组里没有实验附件");
-    // 六处生成器调用共用 turn.ts 里的同一个构造器（`({` 只命中调用点，不含定义行）；
+    // 三处生成器调用共用 turn.ts 里的同一个构造器（`({` 只命中调用点，不含定义行）：
+    // 主生成、强制投递（forced-sendReply）、强制补发（forced-contact）；
     // 不再各复制条件展开。批判器不走这里。
     assert.equal(
       turnGuidanceSrc.split("buildGeneratorSystemMessages({").length - 1,
-      6,
-      "六处生成器 system 都必须走共享构造器"
+      3,
+      "三处生成器 system 都必须走共享构造器"
     );
     assert(
       !turnGuidanceSrc.includes("content: args.guidance },"),
@@ -4643,10 +4178,13 @@ async function main() {
     );
     // 不改生产：只有 turn/critic/judge 的 generateText 走包装，生产无台账即透传。
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    // 生产只剩三处生成器 Gateway 调用，都要过计费台账：
+    // 主生成（"main"），以及模型没按工具约定走时被拦下的两处确定性兜底
+    // ——强制 sendReply（"forced-sendReply"）与强制 contactPerson（"forced-contact"）。
     assert.equal(
       turnSrc.split("trackedGatewayCall(").length - 1,
-      6,
-      "turn.ts 六处 Gateway 调用都要过计费台账"
+      3,
+      "turn.ts 三处生成器 Gateway 调用（main / forced-sendReply / forced-contact）都要过计费台账"
     );
     const criticSrc = readFileSync("lib/chat/coliving/critic.ts", "utf8");
     assert.equal(

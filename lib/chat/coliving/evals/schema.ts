@@ -188,28 +188,49 @@ export function countAcceptedOutbound(messages: Array<{ blocked?: boolean }>): n
 }
 
 /**
- * 送到住户手里那句最终回复，最后一次审稿的结论是否站得住——
- * `verified:false`（没真的跑起来判过）或 `pass:false`（判过、不合格）
- * 都算门禁失败，不能让"批判器明知不合格但代码照样发了"在跑批里显示绿灯。
+ * 送到住户手里那句最终回复，最后一次核对的结论是否站得住。
+ *
+ * **生产已改为只生成**（见 `ReplyReview`）：`mode` 缺省或 `"generation-only"`
+ * 时，`verified:false` 是**设计如此**（没有 LLM 审稿），**不算失败**——只要
+ * `pass:true`（没有代码可证的确定性失败）就放行。`pass:false` 仍是真实产品
+ * 问题，一律红灯。
+ *
+ * `mode:"llm-review"`（离线/历史路径）保留旧语义：`verified:false` 表示
+ * "审稿器没真的跑起来判过"，算门禁失败，不能给绿灯。
  */
 export function evaluateReplyReview(
-  review: { verified: boolean; pass: boolean; broke: string; why: string } | undefined
+  review:
+    | {
+        mode?: "generation-only" | "llm-review";
+        verified: boolean;
+        pass: boolean;
+        broke: string;
+        why: string;
+      }
+    | undefined
 ): string[] {
   if (!review) {
-    return ["缺少 replyReview——这一轮的最终回复没有可核验的审稿结论"];
-  }
-  if (!review.verified) {
-    return ["最终回复的审稿未验证（verified=false），不能算通过"];
+    return ["缺少 replyReview——这一轮的最终回复没有可核验的核对结论"];
   }
   if (!review.pass) {
-    return [`最终回复审稿不合格：第${review.broke || "?"}条：${review.why}`];
+    return [`最终回复确定性核对不合格：第${review.broke || "?"}条：${review.why}`];
+  }
+  if (review.mode === "llm-review" && !review.verified) {
+    return ["最终回复的 LLM 审稿未验证（verified=false），不能算通过"];
   }
   return [];
 }
 
 export function evaluateTurnReplyReviews(
   reviews: Array<
-    { verified: boolean; pass: boolean; broke: string; why: string } | undefined
+    | {
+        mode?: "generation-only" | "llm-review";
+        verified: boolean;
+        pass: boolean;
+        broke: string;
+        why: string;
+      }
+    | undefined
   >
 ): string[] {
   return reviews.flatMap((review, index) =>

@@ -12,6 +12,14 @@
 
 ---
 
+## 2026-09-11 · 老板拍板：合租房生产只生成，不做 LLM 复审
+
+- 老板人工验收六条 V4.1 Flash 免 critic relay 输出后，纠正 Codex 对 corpus-031 第 7 轮「我们几个」的过严否决：此前通过的 Sonnet 轨迹也有同类代理转述，不能归因成模型或免审稿错误。决定生产路径只保留生成/工具循环。
+- Claude Code 删除 `turn.ts` 的 critic、批量审稿、critic 驱动重写与 relay final-fix 调用；保留工具层确定性保护、真实动作收据与可选离线 judge。评测 schema/runner 改为把 `generation-only` 的 `verified:false` 当设计状态，而非失败。
+- Codex 独立搜索确认生产无 critic/final-fix 调用；免费质量闸 129/129、diff check 通过；tsc 仅剩未改动语音组件的两条既有 TS2717。未跑付费评测、未写库、未真实发送、`public/sw.js` 未动。
+
+---
+
 ## 2026-09-11 · 合租房文本 LLM 统一 V4.1 Flash，免审稿实验否决
 
 - 老板验收前一轮 V4.1 reviewer 后，决定把排班协商意图解析、主生成/outreach、普通 critic、安全/relay 强审稿、relay 最终修正、eval judge 默认统一为 `deepseek/deepseek-v4.1-flash`；三条环境覆盖与强/弱分支结构保留。

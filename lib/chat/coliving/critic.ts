@@ -9,6 +9,15 @@ import { colivingModelId } from "./model";
 import { isEvalBudgetExceeded, trackedGatewayCall } from "./gateway-ledger";
 
 /**
+ * ⚠️ **本模块不是生产路径。** 老板 2026-09-11 拍板生产改为**只生成**
+ * （"缩减步骤，只管生成"）：`lib/chat/coliving/turn.ts` 不再 import 或调用
+ * `critique`/`critiqueBatch`，生产一轮不产生任何 LLM 复核调用。
+ *
+ * 这里保留的批判器实现属于**离线/未来**用途（例如离线 coliving-eval 的语义
+ * judge、或将来需要时重新接回），**不得**被生产 turn 重新接上——除非老板再次
+ * 明确改变产品决定。离线 `coliving-eval` 的 judge 走的是 `evals/judge.ts`，
+ * 与本文件相互独立；删除本文件前请先确认没有离线脚本依赖。
+ *
  * 发出去之前的批判器。
  *
  * ## 为什么不是「你自己再检查一遍」
@@ -72,9 +81,9 @@ function normalizeRuleId(value: unknown): string {
  */
 export const DEFAULT_CRITIC_MODEL = "deepseek/deepseek-v4.1-flash";
 /**
- * 安全敏感主题 / relay 选择性强审稿走的强审稿分支（见 hasSafetySensitiveTopic
- * 与 relayReviewNeedsStrong 的说明）。当前默认 slug 与普通分支相同（统一到
- * V4.1），保留独立常量是为了以后能只改这里重新拉开强/弱差价。
+ * 安全敏感主题走的强审稿分支（见 hasSafetySensitiveTopic 的说明）。当前默认
+ * slug 与普通分支相同（统一到 V4.1），保留独立常量是为了以后能只改这里重新
+ * 拉开强/弱差价。**仅为离线/未来保留**，生产已不调用批判器。
  */
 export const SENSITIVE_CRITIC_MODEL = "deepseek/deepseek-v4.1-flash";
 
