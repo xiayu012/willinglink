@@ -53,10 +53,14 @@ import { COORDINATION_INTENT_MODEL } from "../lib/coordination/llm";
 import {
   BatchBudget,
   currentEvalLedger,
+  EVAL_MAX_OUTPUT_TOKENS_CEILING,
+  EVAL_MAX_OUTPUT_TOKENS_ENV,
+  evalMaxOutputTokensOption,
   GatewayCostLedger,
   gatewayCostFromResult,
   isEvalBudgetExceeded,
   mergeLedgerSnapshots,
+  parseEvalMaxOutputTokens,
   runWithEvalLedger,
   trackedGatewayCall,
 } from "../lib/chat/coliving/gateway-ledger";
@@ -4257,6 +4261,165 @@ async function main() {
     }
     assert.equal(ledger.snapshot().calls, 5);
     assert.equal(ledger.snapshot().stopped, false, "没设上限就不该停");
+  });
+
+  /**
+   * ── 主生成输出上限（评测定向实验，不是生产优化）──────────────────────
+   *
+   * 开关在 `gateway-ledger.ts` 的 `evalMaxOutputTokensOption`：只有「评测台账在 +
+   * `COLIVING_EVAL_MAX_OUTPUT_TOKENS` 是合法正整数」才给主生成传 `maxOutputTokens`。
+   * 下面逐条钉住任务要求的边界：无台账不传、台账+未设不传、台账+合法传、
+   * 非法值永不成为模型参数、原有生成配置不退化。全离线，不调模型、不写库。
+   */
+  check("输出上限解析：只认 1..安全上限 的整数，空/负/0/小数/超限一律非法", () => {
+    assert.deepEqual(parseEvalMaxOutputTokens(undefined), { status: "unset" });
+    assert.deepEqual(parseEvalMaxOutputTokens(null), { status: "unset" });
+    for (const raw of [
+      "",
+      "   ",
+      "0",
+      "-1",
+      "1.5",
+      "abc",
+      "Infinity",
+      "NaN",
+      String(EVAL_MAX_OUTPUT_TOKENS_CEILING + 1),
+    ]) {
+      assert.equal(
+        parseEvalMaxOutputTokens(raw).status,
+        "invalid",
+        `「${raw}」应判非法，不能变成模型参数`
+      );
+    }
+    assert.deepEqual(parseEvalMaxOutputTokens("4096"), {
+      status: "valid",
+      value: 4096,
+    });
+    assert.deepEqual(
+      parseEvalMaxOutputTokens(String(EVAL_MAX_OUTPUT_TOKENS_CEILING)),
+      { status: "valid", value: EVAL_MAX_OUTPUT_TOKENS_CEILING },
+      "安全上限本身应合法"
+    );
+  });
+  await checkAsync("输出上限：无台账时即使设了变量也不传（生产逐字不变）", async () => {
+    const saved = process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+    process.env[EVAL_MAX_OUTPUT_TOKENS_ENV] = "4096";
+    try {
+      assert.equal(currentEvalLedger(), undefined, "生产上下文里没有台账");
+      assert.deepEqual(
+        evalMaxOutputTokensOption(),
+        {},
+        "无台账必须返回空对象，绝不传 cap"
+      );
+    } finally {
+      if (saved === undefined) delete process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+      else process.env[EVAL_MAX_OUTPUT_TOKENS_ENV] = saved;
+    }
+  });
+  await checkAsync("输出上限：有台账但未设不传；设合法值才传 maxOutputTokens", async () => {
+    const saved = process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+    const withLedger = () =>
+      runWithEvalLedger(new GatewayCostLedger({}), async () =>
+        evalMaxOutputTokensOption()
+      );
+    try {
+      delete process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+      assert.deepEqual(await withLedger(), {}, "台账在但未设＝基线，不传");
+      process.env[EVAL_MAX_OUTPUT_TOKENS_ENV] = "4096";
+      assert.deepEqual(await withLedger(), { maxOutputTokens: 4096 });
+    } finally {
+      if (saved === undefined) delete process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+      else process.env[EVAL_MAX_OUTPUT_TOKENS_ENV] = saved;
+    }
+  });
+  await checkAsync("输出上限：非法值在台账内也永不成为模型参数", async () => {
+    const saved = process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+    try {
+      for (const raw of [
+        "",
+        "0",
+        "-3",
+        "2.5",
+        "nope",
+        String(EVAL_MAX_OUTPUT_TOKENS_CEILING + 1),
+      ]) {
+        process.env[EVAL_MAX_OUTPUT_TOKENS_ENV] = raw;
+        const option = await runWithEvalLedger(
+          new GatewayCostLedger({}),
+          async () => evalMaxOutputTokensOption()
+        );
+        assert.deepEqual(
+          option,
+          {},
+          `非法值「${raw}」绝不能成为 maxOutputTokens`
+        );
+      }
+    } finally {
+      if (saved === undefined) delete process.env[EVAL_MAX_OUTPUT_TOKENS_ENV];
+      else process.env[EVAL_MAX_OUTPUT_TOKENS_ENV] = saved;
+    }
+  });
+  check("输出上限：展开空对象不改生成配置，只有启用时才多一个 maxOutputTokens", () => {
+    // 生产（无台账）展开 `evalMaxOutputTokensOption()` 后，一个键都不多。
+    const base = {
+      model: "m",
+      system: "s",
+      messages: [],
+      tools: {},
+      stopWhen: [],
+    };
+    const noLedger = { ...base, ...evalMaxOutputTokensOption() };
+    assert.deepEqual(noLedger, base, "无台账展开后与原来逐键相同");
+    assert.equal("maxOutputTokens" in noLedger, false);
+    // 启用时只多这一个键，其余原样。
+    const enabled = { ...base, ...{ maxOutputTokens: 4096 } };
+    const { maxOutputTokens: cap, ...rest } = enabled;
+    assert.equal(cap, 4096);
+    assert.deepEqual(rest, base, "启用也不动其它生成配置");
+  });
+  check("输出上限：turn.ts 只在主生成展开实验开关，两处兜底生成不传 cap", () => {
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes("evalMaxOutputTokensOption"),
+      "turn.ts 必须引入实验开关"
+    );
+    assert.equal(
+      turnSrc.split("...evalMaxOutputTokensOption()").length - 1,
+      1,
+      "实验开关只能展开一次"
+    );
+    assert.equal(
+      (turnSrc.match(/maxOutputTokens\s*:/g) ?? []).length,
+      0,
+      "turn.ts 不得自己写 maxOutputTokens 参数，只能经开关"
+    );
+    const mainIdx = turnSrc.indexOf('trackedGatewayCall("main"');
+    const capIdx = turnSrc.indexOf("...evalMaxOutputTokensOption()");
+    const forcedReplyIdx = turnSrc.indexOf(
+      'trackedGatewayCall("forced-sendReply"'
+    );
+    assert.ok(
+      mainIdx >= 0 && capIdx > mainIdx && capIdx < forcedReplyIdx,
+      "cap 必须在主生成的 options 里（且在兜底生成之前）"
+    );
+    // 三处生成器调用数量不变（本实验没新增调用路径）。
+    assert.equal(turnSrc.split("trackedGatewayCall(").length - 1, 3);
+  });
+  check("输出上限：coliving-eval 启动即校验变量、非法退出，并把生效值写进报告", () => {
+    const src = readFileSync("scripts/coliving-eval.ts", "utf8");
+    assert(
+      src.includes("parseEvalMaxOutputTokens(") &&
+        src.includes('EVAL_OUTPUT_PARSE.status === "invalid"'),
+      "设了非法值必须启动即报错，不静默退回不设"
+    );
+    assert(
+      src.includes("r.evalMaxOutputTokens = EVAL_OUTPUT_CAP"),
+      "报告要记录本次是否启用输出上限"
+    );
+    assert(
+      src.includes("主生成输出上限="),
+      "终端头部要显示本次是否启用"
+    );
   });
   check("评测预算闸已接进 coliving-eval，报告在正常/触限/异常三路都带台账", () => {
     const src = readFileSync("scripts/coliving-eval.ts", "utf8");

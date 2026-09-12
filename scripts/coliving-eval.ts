@@ -10,6 +10,8 @@
  *   pnpm coliving-eval -- --judge-advisory   # 语义验收照跑，但 high 不计入门禁
  *   pnpm coliving-eval -- --guidance concise-coordination-v1   # 实验组：加成功轨迹
  *   pnpm coliving-eval -- --max-cost-usd 0.5 --max-generations 200   # 预算闸
+ *   COLIVING_EVAL_MAX_OUTPUT_TOKENS=4096 pnpm coliving-eval -- --scenario <id>
+ *     # 定向成本实验：只给主生成加 maxOutputTokens，报告记录生效值
  *
  * `--max-cost-usd` / `--max-generations`（旧名 `--max-model-calls`，语义一直是
  * 这个）是**仅评测**的开支闸（见 `lib/chat/coliving/gateway-ledger.ts`）：
@@ -29,6 +31,13 @@
  * `--guidance` 默认不启用；只接受 `lib/chat/coliving/evals/guidance.ts` 里
  * 已登记的 id，未知 id 立即报错。报告会记录本次用的是哪个 guidance id
  * （没启用记 null），基线和实验结果不会混淆。
+ *
+ * `COLIVING_EVAL_MAX_OUTPUT_TOKENS`（**定向成本实验，不是生产开关**）：设成一个
+ * 合法正整数，就给**主生成**那一处 `generateText` 加 `maxOutputTokens`。不设＝
+ * 基线；设了但非法（空、0、负数、小数、超过安全上限）立即报错退出，不静默退回
+ * 不设——否则会把"以为限了输出"跑成"没限"。生产路径没有评测台账，永远不理会这个
+ * 变量（见 `lib/chat/coliving/gateway-ledger.ts` 的 `evalMaxOutputTokensOption`）。
+ * 报告会记录本次生效的值（没生效记 null），实验和基线不会混淆。
  *
  * 设计对照 docs/coliving-parallel-testing-plan.md 阶段一 + 阶段二：
  * - 每个场景一个独立测试屋，household_id 天然隔离，不需要
@@ -70,9 +79,12 @@ import {
 } from "../lib/chat/coliving/evals/guidance";
 import {
   BatchBudget,
+  EVAL_MAX_OUTPUT_TOKENS_CEILING,
+  EVAL_MAX_OUTPUT_TOKENS_ENV,
   GatewayCostLedger,
   isEvalBudgetExceeded,
   mergeLedgerSnapshots,
+  parseEvalMaxOutputTokens,
   runWithEvalLedger,
   runWithLedgerLabels,
   type LedgerSnapshot,
@@ -130,6 +142,28 @@ try {
 }
 /** 写进报告的实验版本标识：没启用是 null（基线）。 */
 const GUIDANCE_LABEL = GUIDANCE_ID && GUIDANCE_TEXT ? GUIDANCE_ID.trim() : null;
+
+/**
+ * **主生成输出上限（定向成本实验，仅评测）。**
+ *
+ * 环境变量 `COLIVING_EVAL_MAX_OUTPUT_TOKENS` 设了合法正整数才生效，写进报告；
+ * 没设＝基线（null）。**设了但非法立即报错退出，不静默退回不设**——跟预算 flag
+ * 同一套理由：把"以为限了输出"跑成"没限"是更贵的错误。生效后的实际传参由
+ * `turn.ts` 主生成那一处 `evalMaxOutputTokensOption()` 决定；生产无台账，不理会。
+ */
+const EVAL_OUTPUT_PARSE = parseEvalMaxOutputTokens(
+  process.env[EVAL_MAX_OUTPUT_TOKENS_ENV]
+);
+if (EVAL_OUTPUT_PARSE.status === "invalid") {
+  console.error(
+    `${EVAL_MAX_OUTPUT_TOKENS_ENV} 只接受不超过 ${EVAL_MAX_OUTPUT_TOKENS_CEILING} 的正整数` +
+      `（本次收到「${EVAL_OUTPUT_PARSE.raw}」，${EVAL_OUTPUT_PARSE.reason}）。` +
+      `要跑基线就删掉这个变量，不要留空或写 0——否则会把"以为限了输出"跑成"没限"。`
+  );
+  process.exit(2);
+}
+const EVAL_OUTPUT_CAP =
+  EVAL_OUTPUT_PARSE.status === "valid" ? EVAL_OUTPUT_PARSE.value : null;
 
 /**
  * **评测预算闸（仅评测，生产不经过这里）。**
@@ -294,6 +328,12 @@ type ScenarioResult = {
    * 是 null。各场景的本地账在 `cost`，这里放的是**共享**那一份。
    */
   budget?: LedgerSnapshot | null;
+  /**
+   * **本次跑批生效的主生成输出上限**（`COLIVING_EVAL_MAX_OUTPUT_TOKENS`）。
+   * 纯数字，不含任何住户内容；没启用是 null（基线）。由 `main()` 统一填入，
+   * 让报告能一眼分清"这次限了输出"和"这次没限"。**不是生产优化标识。**
+   */
+  evalMaxOutputTokens?: number | null;
   ms: number;
 };
 
@@ -750,6 +790,11 @@ async function main() {
         MAX_COST_USD === null && MAX_MODEL_CALLS === null
           ? "不设限"
           : `金额上限 ${MAX_COST_USD ?? "无"}、generation 上限 ${MAX_MODEL_CALLS ?? "无"}`
+      }；` +
+      `主生成输出上限=${
+        EVAL_OUTPUT_CAP === null
+          ? "无（基线，主生成不传 maxOutputTokens）"
+          : `${EVAL_OUTPUT_CAP}（实验）`
       }…\n`
   );
 
@@ -774,6 +819,9 @@ async function main() {
    */
   const budgetSnapshot = BATCH_BUDGET?.snapshot() ?? null;
   for (const r of results) r.budget = budgetSnapshot;
+  // 本次跑批生效的主生成输出上限（没启用是 null）。异常/触限的场景也照贴，
+  // 报告里不会出现"有的场景有这次实验标识、有的没有"。
+  for (const r of results) r.evalMaxOutputTokens = EVAL_OUTPUT_CAP;
 
   /**
    * 四种情况分开算，报告和终端输出都要能区分开：
@@ -859,7 +907,8 @@ async function main() {
       `${totals.stopped ? `；**已因触限停止**（${totals.stopReason ?? ""}）` : ""}`
   );
   console.log(
-    `    token：非缓存输入 ${formatTokenTotal(summary.tokens.inputUncachedTokens)}、` +
+    `    token：输入总量 ${formatTokenTotal(summary.tokens.inputTotalTokens)}、` +
+      `非缓存输入 ${formatTokenTotal(summary.tokens.inputUncachedTokens)}、` +
       `缓存读 ${formatTokenTotal(summary.tokens.cacheReadTokens)}、` +
       `缓存写 ${formatTokenTotal(summary.tokens.cacheWriteTokens)}、` +
       `输出 ${formatTokenTotal(summary.tokens.outputTokens)}、` +

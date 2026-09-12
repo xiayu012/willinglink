@@ -8,7 +8,11 @@ import { buildContext } from "./context";
 import { kitchenEveningWindow } from "./coordination-bridge";
 import { advanceCoordinationSession } from "./coordination-session";
 import type { OutboundAction, State } from "../../coordination/types";
-import { isEvalBudgetExceeded, trackedGatewayCall } from "./gateway-ledger";
+import {
+  evalMaxOutputTokensOption,
+  isEvalBudgetExceeded,
+  trackedGatewayCall,
+} from "./gateway-ledger";
 import { assertCanWrite } from "./guard";
 import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
@@ -3306,6 +3310,13 @@ export async function runColivingTurn(args: {
     stopWhen: [hasToolCall("sendReply"), stepCountIs(MAX_STEPS)],
     // 评测台账逐步留证；生产（无台账）时是空对象，参数逐字不变。
     ...rec.stepOptions,
+    // ⚠️ 定向成本实验开关，**不是已采纳的生产优化**：只有「评测台账在 +
+    // COLIVING_EVAL_MAX_OUTPUT_TOKENS 是合法正整数」才展开出 maxOutputTokens，
+    // 否则是空对象；生产无台账恒为空，参数逐字不变。**只加在主生成这一处**，
+    // 强制补回复/补联系（forced-sendReply / forced-contact）故意不加——
+    // 它们只在模型没按工具约定交付时才触发，不是本实验要归因的主开销，
+    // 混进来会把"主生成 cap 的效果"和"兜底被截断"搅在一起，反而测不准。
+    ...evalMaxOutputTokensOption(),
   }));
 
   for (const step of result.steps) {

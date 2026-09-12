@@ -95,6 +95,12 @@ export type LedgerBucket = {
 export type StepUsageRecord = {
   /** 该 generation 内第几步（从 0 起）。 */
   index: number;
+  /**
+   * 输入总量（上游回报口径）。注意 Anthropic 的 `input_tokens` 是**非缓存**
+   * 输入，与总量不同；能算出总量时给值，算不出就是 `null`（不是 0，也不由
+   * 费用反推）。
+   */
+  inputTotalTokens: number | null;
   /** 非缓存输入 token；Anthropic 折叠在 `input_tokens`，别家走 normalized 明细。 */
   inputUncachedTokens: number | null;
   cacheReadTokens: number | null;
@@ -110,8 +116,13 @@ export type StepUsageRecord = {
    * `GenerationRecord.durationMs`，那个是真测的。
    */
   durationMs: number | null;
-  /** 响应模型 id（`step.response.modelId`）。 */
+  /** 响应模型 id（`step.response.modelId`，退回网关原始 body 的 `modelId`）。 */
   providerId: string | null;
+  /**
+   * 上游实际路由到的供应商 id（如 `deepseek` / `openai`），**只作定位用**，
+   * 不含正文或密钥；上游没回报就是 `null`。
+   */
+  upstreamProviderId: string | null;
   /** 响应 id（`step.response.id`；gateway 若在 metadata 里给了 generationId 也认）。 */
   generationId: string | null;
   /** 传输层请求 id（`x-vercel-id` header），可用于跟 Vercel 侧对账。 */
@@ -251,6 +262,13 @@ function numOrNull(raw: unknown): number | null {
   return null;
 }
 
+/** 只接受普通对象；数组/字符串/数字/null 一律 null（不解析、不猜）。 */
+function asObject(raw: unknown): Record<string, unknown> | null {
+  return raw !== null && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : null;
+}
+
 function readGatewayCost(metadata: unknown): number | null {
   const meta = metadata as { gateway?: { cost?: unknown } } | undefined;
   const raw = meta?.gateway?.cost;
@@ -335,6 +353,7 @@ type GenerationDraft = {
 };
 
 const NULL_TOKENS = {
+  inputTotalTokens: null,
   inputUncachedTokens: null,
   cacheReadTokens: null,
   cacheWriteTokens: null,
@@ -342,91 +361,279 @@ const NULL_TOKENS = {
   reasoningTokens: null,
 } as const;
 
-type LooseUsage = {
-  inputTokens?: unknown;
-  outputTokens?: unknown;
-  cachedInputTokens?: unknown;
-  reasoningTokens?: unknown;
-  inputTokenDetails?: {
-    noCacheTokens?: unknown;
-    cacheReadTokens?: unknown;
-    cacheWriteTokens?: unknown;
-  };
-  outputTokenDetails?: { reasoningTokens?: unknown };
+/** 一个 usage 对象里能读出的六类 token；每类独立，读不到就是 `null`。 */
+type RawUsageFields = {
+  inputTotalTokens: number | null;
+  inputUncachedTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
 };
 
+const USAGE_FIELD_KEYS: ReadonlyArray<keyof RawUsageFields> = [
+  "inputTotalTokens",
+  "inputUncachedTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "outputTokens",
+  "reasoningTokens",
+];
+
 /**
- * 逐步读取 token 明细，优先级与 turn.ts 的 `sumUsage` 一致：
- *   1. `providerMetadata.anthropic.usage`（Anthropic 原始字段，最全）
- *   2. `step.usage`（AI SDK 归一化；Anthropic 经 gateway 时常常是空的）
- * 读不到的字段是 `null`，**不填 0**。
+ * 从**任意一个** usage 对象里读六类 token，兼容四种真实形状：
+ *
+ * 1. AI SDK 归一化扁平形状（`step.usage` 正常时）：
+ *    `inputTokens: number` + `inputTokenDetails.{noCache,cacheRead,cacheWrite}Tokens`
+ *    + `outputTokens: number` + `outputTokenDetails.reasoningTokens` / `reasoningTokens`
+ * 2. 供应商 spec v3 嵌套形状：
+ *    `inputTokens.{total,noCache,cacheRead,cacheWrite}` / `outputTokens.{total,reasoning}`
+ * 3. 供应商 spec v2 扁平形状：
+ *    `inputTokens/outputTokens/cachedInputTokens/reasoningTokens`（都是 number）
+ * 4. 供应商 snake_case（Anthropic 原始、OpenAI/DeepSeek 兼容层）：
+ *    `prompt_tokens`/`completion_tokens`/`input_tokens`/`output_tokens`/
+ *    `cache_read_input_tokens`/`cache_creation_input_tokens`/
+ *    `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` 等。
+ *
+ * 规则：一个数字都读不到就返回 `null`（调用方继续试下一个来源）；
+ * **绝不填 0，也绝不按 cost 反推 token**。确认是 Anthropic 语义的
+ * `input_tokens`（同时有 cache 读/写字段）才当非缓存输入，否则当输入总量。
+ */
+function readUsageObject(raw: unknown): RawUsageFields | null {
+  const u = asObject(raw);
+  if (!u) return null;
+  const inNested = asObject(u.inputTokens);
+  const outNested = asObject(u.outputTokens);
+  const inDetails = asObject(u.inputTokenDetails);
+  const outDetails = asObject(u.outputTokenDetails);
+  const promptDetails = asObject(u.prompt_tokens_details);
+  const inputDetailsSnake = asObject(u.input_tokens_details);
+  const completionDetails = asObject(u.completion_tokens_details);
+  const outputDetailsSnake = asObject(u.output_tokens_details);
+
+  const cacheReadTokens =
+    numOrNull(inDetails?.cacheReadTokens) ??
+    numOrNull(inNested?.cacheRead) ??
+    numOrNull(u.cachedInputTokens) ??
+    numOrNull(u.cache_read_input_tokens) ??
+    numOrNull(u.prompt_cache_hit_tokens) ??
+    numOrNull(promptDetails?.cached_tokens) ??
+    numOrNull(inputDetailsSnake?.cached_tokens);
+
+  const cacheWriteTokens =
+    numOrNull(inDetails?.cacheWriteTokens) ??
+    numOrNull(inNested?.cacheWrite) ??
+    numOrNull(u.cache_creation_input_tokens);
+
+  let inputTotalTokens =
+    numOrNull(u.inputTokens) ??
+    numOrNull(inNested?.total) ??
+    numOrNull(u.prompt_tokens) ??
+    null;
+
+  let inputUncachedTokens =
+    numOrNull(inDetails?.noCacheTokens) ??
+    numOrNull(inNested?.noCache) ??
+    numOrNull(u.prompt_cache_miss_tokens) ??
+    null;
+
+  const outputTokens =
+    numOrNull(u.outputTokens) ??
+    numOrNull(outNested?.total) ??
+    numOrNull(u.completion_tokens) ??
+    numOrNull(u.output_tokens);
+
+  const reasoningTokens =
+    numOrNull(outDetails?.reasoningTokens) ??
+    numOrNull(outNested?.reasoning) ??
+    numOrNull(u.reasoningTokens) ??
+    numOrNull(u.reasoning_output_tokens) ??
+    numOrNull(completionDetails?.reasoning_tokens) ??
+    numOrNull(outputDetailsSnake?.reasoning_tokens);
+
+  // snake_case `input_tokens`：Anthropic 语义是「非缓存输入」，别家可能当总量。
+  const snakeInput = numOrNull(u.input_tokens);
+  const anthropicStyleInput =
+    numOrNull(u.cache_read_input_tokens) !== null ||
+    numOrNull(u.cache_creation_input_tokens) !== null;
+  if (snakeInput !== null) {
+    if (anthropicStyleInput) {
+      inputUncachedTokens = inputUncachedTokens ?? snakeInput;
+    } else {
+      inputTotalTokens = inputTotalTokens ?? snakeInput;
+    }
+  }
+
+  // 总量兜底：total_tokens 减输出；再不行用「非缓存 + 缓存读 + 缓存写」。
+  if (inputTotalTokens === null) {
+    const total = numOrNull(u.total_tokens);
+    if (total !== null && outputTokens !== null) {
+      inputTotalTokens = Math.max(total - outputTokens, 0);
+    }
+  }
+  if (inputTotalTokens === null) {
+    const parts = [inputUncachedTokens, cacheReadTokens, cacheWriteTokens];
+    if (parts.some((p) => p !== null)) {
+      inputTotalTokens = parts.reduce<number>((sum, p) => sum + (p ?? 0), 0);
+    }
+  }
+  // 非缓存输入兜底（维持旧口径）：
+  // - 有缓存读 → 总量 − 缓存读；
+  // - 没有缓存信息（spec v2 的 inputTokens/prompt_tokens 未分缓存）→ 整段
+  //   输入都算非缓存。这是既有 `readStepTokens` 的行为，不能因为新增来源
+  //   而把这类 step 退化成 null。
+  if (inputUncachedTokens === null && inputTotalTokens !== null) {
+    inputUncachedTokens =
+      cacheReadTokens !== null
+        ? Math.max(inputTotalTokens - cacheReadTokens, 0)
+        : inputTotalTokens;
+  }
+
+  const fields: RawUsageFields = {
+    inputTotalTokens,
+    inputUncachedTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    outputTokens,
+    reasoningTokens,
+  };
+  if (USAGE_FIELD_KEYS.every((k) => fields[k] === null)) return null;
+  return fields;
+}
+
+/** 按来源优先级逐字段取第一个非 null 值，缺字段继续往下一个来源找。 */
+function mergeUsageCandidates(
+  candidates: readonly unknown[]
+): RawUsageFields {
+  const result: RawUsageFields = {
+    inputTotalTokens: null,
+    inputUncachedTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+  };
+  for (const candidate of candidates) {
+    const fields = readUsageObject(candidate);
+    if (!fields) continue;
+    for (const key of USAGE_FIELD_KEYS) {
+      if (result[key] === null && fields[key] !== null) result[key] = fields[key];
+    }
+  }
+  return result;
+}
+
+/** 从 providerMetadata 里收集各供应商的 `usage` 对象（gateway 优先）。 */
+function providerUsageObjects(metadata: unknown): unknown[] {
+  const meta = asObject(metadata);
+  if (!meta) return [];
+  const out: unknown[] = [];
+  const gatewayUsage = asObject(meta.gateway)?.usage;
+  if (gatewayUsage !== undefined) out.push(gatewayUsage);
+  for (const [key, value] of Object.entries(meta)) {
+    if (key === "gateway") continue;
+    const usage = asObject(value)?.usage;
+    if (usage !== undefined) out.push(usage);
+  }
+  return out;
+}
+
+/**
+ * 网关原始响应体里的 usage：`step.response.body.usage` 与
+ * `body.providerMetadata.<provider>.usage`。只读数字字段，**绝不保留正文**。
+ */
+function responseBodyUsageObjects(response: unknown): unknown[] {
+  const body = asObject(asObject(response)?.body);
+  if (!body) return [];
+  const out: unknown[] = [];
+  if (body.usage !== undefined) out.push(body.usage);
+  out.push(...providerUsageObjects(body.providerMetadata));
+  return out;
+}
+
+/**
+ * 逐步读取 token 明细。来源按优先级：
+ *   1. `providerMetadata.anthropic.usage`（Anthropic 原始字段，最全，行为不变）
+ *   2. `step.usage`（AI SDK 归一化；形状对得上时最省事）
+ *   3. `step.usage.raw`（SDK 归一化时保留的原始 usage，若上游给了）
+ *   4. `providerMetadata.<provider>.usage`（gateway / DeepSeek / OpenAI …）
+ *   5. `step.response.body.usage`（网关原始响应体：**DeepSeek 经网关时
+ *      step.usage 被压塌为空，真正数值在这里**）
+ * 每个字段独立取第一个非 null 值；一个数字都读不到就是 `null`，**不填 0、
+ * 不按 cost 反推**。
  */
 function readStepTokens(
   step: RecordableStep
 ): Pick<
   StepUsageRecord,
+  | "inputTotalTokens"
   | "inputUncachedTokens"
   | "cacheReadTokens"
   | "cacheWriteTokens"
   | "outputTokens"
   | "reasoningTokens"
 > {
-  const meta = step.providerMetadata as
-    | { anthropic?: { usage?: Record<string, unknown> } }
-    | undefined;
-  const a = meta?.anthropic?.usage;
-  if (a) {
+  const meta = asObject(step.providerMetadata);
+  const anthropicUsage = asObject(asObject(meta?.anthropic)?.usage);
+  if (anthropicUsage) {
+    const inputUncachedTokens = numOrNull(anthropicUsage.input_tokens);
+    const cacheReadTokens = numOrNull(anthropicUsage.cache_read_input_tokens);
+    const cacheWriteTokens = numOrNull(
+      anthropicUsage.cache_creation_input_tokens
+    );
+    const parts = [inputUncachedTokens, cacheReadTokens, cacheWriteTokens];
     return {
-      inputUncachedTokens: numOrNull(a.input_tokens),
-      cacheReadTokens: numOrNull(a.cache_read_input_tokens),
-      cacheWriteTokens: numOrNull(a.cache_creation_input_tokens),
-      outputTokens: numOrNull(a.output_tokens),
-      reasoningTokens: numOrNull(a.reasoning_output_tokens),
+      // Anthropic 的 input_tokens 是非缓存输入，总量要自己加回来。
+      inputTotalTokens: parts.some((p) => p !== null)
+        ? parts.reduce<number>((sum, p) => sum + (p ?? 0), 0)
+        : null,
+      inputUncachedTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      outputTokens: numOrNull(anthropicUsage.output_tokens),
+      reasoningTokens: numOrNull(anthropicUsage.reasoning_output_tokens),
     };
   }
-  const u = step.usage as LooseUsage | undefined;
-  if (!u || typeof u !== "object") return { ...NULL_TOKENS };
-  const read =
-    numOrNull(u.inputTokenDetails?.cacheReadTokens) ??
-    numOrNull(u.cachedInputTokens);
-  const noCache = numOrNull(u.inputTokenDetails?.noCacheTokens);
-  const inputTotal = numOrNull(u.inputTokens);
-  const inputUncached =
-    noCache ??
-    (inputTotal !== null && read !== null
-      ? Math.max(inputTotal - read, 0)
-      : inputTotal);
-  return {
-    inputUncachedTokens: inputUncached,
-    cacheReadTokens: read,
-    cacheWriteTokens: numOrNull(u.inputTokenDetails?.cacheWriteTokens),
-    outputTokens: numOrNull(u.outputTokens),
-    reasoningTokens:
-      numOrNull(u.outputTokenDetails?.reasoningTokens) ??
-      numOrNull(u.reasoningTokens),
-  };
+  return mergeUsageCandidates([
+    step.usage,
+    asObject(step.usage)?.raw,
+    ...providerUsageObjects(step.providerMetadata),
+    ...responseBodyUsageObjects(step.response),
+  ]);
 }
 
 function readStepIdentity(step: RecordableStep): {
   providerId: string | null;
+  upstreamProviderId: string | null;
   generationId: string | null;
   requestId: string | null;
 } {
-  const resp = step.response as
-    | { id?: unknown; modelId?: unknown; headers?: unknown }
-    | undefined;
-  const headers = (resp?.headers ?? {}) as Record<string, unknown>;
-  const meta = step.providerMetadata as
-    | { gateway?: { generationId?: unknown } }
-    | undefined;
+  const resp = asObject(step.response);
+  const headers = (asObject(resp?.headers) ?? {}) as Record<string, unknown>;
+  const body = asObject(resp?.body);
+  const meta = asObject(step.providerMetadata);
+  const gateway = asObject(meta?.gateway);
+  const bodyGateway = asObject(asObject(body?.providerMetadata)?.gateway);
   const responseId = typeof resp?.id === "string" ? resp.id : null;
   const metaId =
-    typeof meta?.gateway?.generationId === "string"
-      ? meta.gateway.generationId
+    typeof gateway?.generationId === "string" ? gateway.generationId : null;
+  const bodyMetaId =
+    typeof bodyGateway?.generationId === "string"
+      ? bodyGateway.generationId
       : null;
+  const providerFromGateway =
+    typeof gateway?.provider === "string" ? gateway.provider : null;
+  const providerFromBody =
+    typeof body?.provider === "string" ? body.provider : null;
+  const providerFromBodyGateway =
+    typeof bodyGateway?.provider === "string" ? bodyGateway.provider : null;
   return {
-    providerId: typeof resp?.modelId === "string" ? resp.modelId : null,
-    generationId: responseId ?? metaId,
+    providerId:
+      (typeof resp?.modelId === "string" ? resp.modelId : null) ??
+      (typeof body?.modelId === "string" ? body.modelId : null),
+    upstreamProviderId:
+      providerFromGateway ?? providerFromBody ?? providerFromBodyGateway ?? null,
+    generationId: responseId ?? metaId ?? bodyMetaId,
     requestId:
       typeof headers["x-vercel-id"] === "string" ? headers["x-vercel-id"] : null,
   };
@@ -449,29 +656,47 @@ function stepRecordFromStep(
 
 /** embedding 没有 step hook：整个调用就是一步，tokens 只有总量。 */
 function embeddingStepRecord(result: unknown): StepUsageRecord {
-  const r = result as
-    | {
-        usage?: { tokens?: unknown };
-        providerMetadata?: unknown;
-        response?: { headers?: unknown };
-      }
-    | undefined;
-  const headers = (r?.response?.headers ?? {}) as Record<string, unknown>;
-  const meta = r?.providerMetadata as
-    | { gateway?: { generationId?: unknown } }
-    | undefined;
+  const r = asObject(result);
+  const response = asObject(r?.response);
+  const headers = (asObject(response?.headers) ?? {}) as Record<string, unknown>;
+  const body = asObject(response?.body);
+  const gateway = asObject(asObject(r?.providerMetadata)?.gateway);
+  const bodyGateway = asObject(asObject(body?.providerMetadata)?.gateway);
+  const usageFields = mergeUsageCandidates([
+    asObject(r?.usage),
+    ...providerUsageObjects(r?.providerMetadata),
+    ...responseBodyUsageObjects(r?.response),
+  ]);
+  const tokens = numOrNull(asObject(r?.usage)?.tokens);
+  const providerFromGateway =
+    typeof gateway?.provider === "string" ? gateway.provider : null;
+  const providerFromBody =
+    typeof body?.provider === "string" ? body.provider : null;
+  const providerFromBodyGateway =
+    typeof bodyGateway?.provider === "string" ? bodyGateway.provider : null;
   return {
     index: 0,
     ...NULL_TOKENS,
-    inputUncachedTokens: numOrNull(r?.usage?.tokens),
+    // embedding 的 `usage.tokens` 就是输入总量（无缓存概念时两栏同源）。
+    inputTotalTokens: tokens ?? usageFields.inputTotalTokens,
+    inputUncachedTokens: tokens ?? usageFields.inputUncachedTokens,
+    cacheReadTokens: usageFields.cacheReadTokens,
+    cacheWriteTokens: usageFields.cacheWriteTokens,
+    outputTokens: usageFields.outputTokens,
+    reasoningTokens: usageFields.reasoningTokens,
     costUsd: readGatewayCost(r?.providerMetadata),
     finishReason: null,
     durationMs: null,
     providerId: null,
+    upstreamProviderId:
+      providerFromGateway ?? providerFromBody ?? providerFromBodyGateway ?? null,
     generationId:
-      typeof meta?.gateway?.generationId === "string"
-        ? meta.gateway.generationId
-        : null,
+      (typeof gateway?.generationId === "string"
+        ? gateway.generationId
+        : null) ??
+      (typeof bodyGateway?.generationId === "string"
+        ? bodyGateway.generationId
+        : null),
     requestId:
       typeof headers["x-vercel-id"] === "string"
         ? headers["x-vercel-id"]
@@ -852,6 +1077,76 @@ export function runWithLedgerLabels<T>(
 /** 当前标签；没有就全 null。 */
 export function currentLedgerLabels(): EvalLedgerLabels {
   return labelStorage.getStore() ?? EMPTY_LABELS;
+}
+
+/**
+ * 主生成输出上限的**评测专用开关**。
+ *
+ * ⚠️ **只用于一次性的定向成本实验，不是已采纳的生产优化，也绝不是生产默认。**
+ * 实验假设：单回合主生成的 output / reasoning 占了大头，给主生成显式加
+ * `maxOutputTokens` 或许能显著降本；先用一个可关、可在报告里看到的开关量一次，
+ * 再决定值不值得做成生产默认（production 不读这个变量）。
+ *
+ * 两道闸**缺一不可**，任何一道不满足就当没开：
+ *
+ * 1. **异步上下文里必须有评测台账**（`runWithEvalLedger`）。生产路径没有台账，
+ *    `evalMaxOutputTokensOption()` 直接返回空对象，**连环境变量都不读**——
+ *    所以哪怕 shell 里设了这个变量，生产/本地正常对话的参数也逐字不变。
+ * 2. **`COLIVING_EVAL_MAX_OUTPUT_TOKENS` 必须是合法正整数**。未设、空串、
+ *    `0`、负数、小数、非数、超过安全上限，一律当作没开。
+ *
+ * 注意这是**参数级开关**，不是计价开关：它只在评测 runner 显式设了变量时生效，
+ * SDK 内部的 step / transport retry 不在它管辖范围（同 budget 的既有边界）。
+ */
+export const EVAL_MAX_OUTPUT_TOKENS_ENV = "COLIVING_EVAL_MAX_OUTPUT_TOKENS";
+
+/**
+ * 安全上限（**笔误闸，不是模型能力断言**）：正常实验只会在几千这个量级；
+ * 超过它几乎只可能是打错（比如多敲了几个 0），拒绝比默默按超大值跑更安全。
+ */
+export const EVAL_MAX_OUTPUT_TOKENS_CEILING = 131072;
+
+export type EvalMaxOutputTokensParse =
+  | { status: "unset" }
+  | { status: "invalid"; raw: string; reason: string }
+  | { status: "valid"; value: number };
+
+/**
+ * 解析环境变量原文。**纯函数**，不读 `process.env`、不看台账，方便离线测试。
+ * `unset` 与 `invalid` 分开：CLI 可以把"设了但非法"明确报错，而"没设"是正常的基线。
+ */
+export function parseEvalMaxOutputTokens(
+  raw: string | undefined | null
+): EvalMaxOutputTokensParse {
+  if (raw === undefined || raw === null) return { status: "unset" };
+  const text = raw.trim();
+  if (text === "") return { status: "invalid", raw, reason: "是空值" };
+  const value = Number(text);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    return { status: "invalid", raw, reason: "不是正整数" };
+  }
+  if (value > EVAL_MAX_OUTPUT_TOKENS_CEILING) {
+    return {
+      status: "invalid",
+      raw,
+      reason: `超过安全上限 ${EVAL_MAX_OUTPUT_TOKENS_CEILING}`,
+    };
+  }
+  return { status: "valid", value };
+}
+
+/**
+ * 给主生成 `generateText` 展开的参数片段：只有「台账在 **且** 变量合法」才返回
+ * `{ maxOutputTokens }`，否则返回 `{}`——展开空对象等于没写，生产参数逐字不变。
+ * **不抛错**：非法值在评测 runner 启动时会被拦下，这里只当没开，绝不让生产路径因
+ * 一个环境变量而失败。
+ */
+export function evalMaxOutputTokensOption(): { maxOutputTokens?: number } {
+  if (!currentEvalLedger()) return {}; // 生产：无台账，不读环境变量、不传参数
+  const parsed = parseEvalMaxOutputTokens(
+    process.env[EVAL_MAX_OUTPUT_TOKENS_ENV]
+  );
+  return parsed.status === "valid" ? { maxOutputTokens: parsed.value } : {};
 }
 
 /**

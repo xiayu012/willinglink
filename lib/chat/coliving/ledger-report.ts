@@ -30,6 +30,7 @@ export type LedgerTokenTotal = {
 };
 
 export type LedgerTokenTotals = {
+  inputTotalTokens: LedgerTokenTotal;
   inputUncachedTokens: LedgerTokenTotal;
   cacheReadTokens: LedgerTokenTotal;
   cacheWriteTokens: LedgerTokenTotal;
@@ -39,6 +40,7 @@ export type LedgerTokenTotals = {
 
 /** 一份没有明细可用时的 token 汇总：每类都是"未知"，不是 0。 */
 export const NO_TOKEN_TOTALS: LedgerTokenTotals = {
+  inputTotalTokens: { known: null, hasUnknown: false },
   inputUncachedTokens: { known: null, hasUnknown: false },
   cacheReadTokens: { known: null, hasUnknown: false },
   cacheWriteTokens: { known: null, hasUnknown: false },
@@ -63,12 +65,16 @@ export type LedgerSummary = {
  * 让展示层能把"部分已知"和"完整总数"分开。全 null → `known` 是 null（未知），
  * 不显示成 0。
  */
-function sumTokenTotal(values: readonly (number | null)[]): LedgerTokenTotal {
+function sumTokenTotal(
+  values: readonly (number | null | undefined)[]
+): LedgerTokenTotal {
   let sum = 0;
   let knownCount = 0;
   let hasUnknown = false;
   for (const v of values) {
-    if (v === null) {
+    // 旧报告（v1/v2 早期）没有新字段：undefined 与 null 一样是"未回报"，
+    // 不能当 0 参与求和（否则会出现 NaN）。
+    if (v === null || v === undefined) {
       hasUnknown = true;
       continue;
     }
@@ -93,6 +99,7 @@ export function summarizeGenerations(
       records.find((g) => g.transportObservability)?.transportObservability ??
       "不可观测（本 SDK 未暴露 transport retry 次数）",
     tokens: {
+      inputTotalTokens: sumTokenTotal(steps.map((s) => s.inputTotalTokens)),
       inputUncachedTokens: sumTokenTotal(
         steps.map((s) => s.inputUncachedTokens)
       ),
@@ -210,6 +217,7 @@ export function renderLedgerPanelHtml(
     cell("generation（模型生成批次，不是 HTTP 请求数）", String(generations)),
     cell("已完成 step", stepsText),
     cell("transport attempts", transportText),
+    cell("输入总量 token", formatTokenTotal(tokens.inputTotalTokens)),
     cell("非缓存输入 token", formatTokenTotal(tokens.inputUncachedTokens)),
     cell("缓存读 token", formatTokenTotal(tokens.cacheReadTokens)),
     cell("缓存写 token", formatTokenTotal(tokens.cacheWriteTokens)),
@@ -246,6 +254,11 @@ export function renderLedgerPanelHtml(
         `<td>${escapeHtml(STATUS_LABEL[g.status] ?? g.status)}` +
         `${g.errorName ? `（${escapeHtml(g.errorName)}）` : ""}</td>` +
         `<td>${g.completedSteps}</td>` +
+        `<td>${escapeHtml(
+          g.steps.find((s) => s.upstreamProviderId)?.upstreamProviderId ??
+            "未知"
+        )}</td>` +
+        `<td>${escapeHtml(formatTokenTotal(stepTokens.inputTotalTokens))}</td>` +
         `<td>${escapeHtml(formatTokenTotal(stepTokens.inputUncachedTokens))}</td>` +
         `<td>${escapeHtml(formatTokenTotal(stepTokens.cacheReadTokens))}</td>` +
         `<td>${escapeHtml(formatTokenTotal(stepTokens.cacheWriteTokens))}</td>` +
@@ -275,7 +288,8 @@ export function renderLedgerPanelHtml(
       ? `<div class="cost-sub">逐 generation 明细</div>` +
         `<table class="cost-table wide"><thead><tr>` +
         `<th>#</th><th>stage</th><th>model</th><th>类型</th><th>状态</th><th>step</th>` +
-        `<th>非缓存输入</th><th>缓存读</th><th>缓存写</th><th>输出</th><th>推理</th>` +
+        `<th>上游 provider</th><th>输入总量</th><th>非缓存输入</th>` +
+        `<th>缓存读</th><th>缓存写</th><th>输出</th><th>推理</th>` +
         `<th>已知金额</th><th>耗时</th><th>未知</th>` +
         `</tr></thead><tbody>${detailRows}</tbody></table>`
       : "";

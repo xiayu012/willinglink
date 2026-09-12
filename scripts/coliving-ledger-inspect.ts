@@ -49,6 +49,12 @@ type FakeStepInput = {
   /** Anthropic 原始 usage（providerMetadata.anthropic.usage）。 */
   anthropic?: Record<string, unknown>;
   usage?: unknown;
+  /** 追加到 providerMetadata.<key>.usage 的供应商 usage（如 deepseek）。 */
+  providerUsages?: Record<string, Record<string, unknown>>;
+  /** 追加到 providerMetadata.gateway 的字段（如 provider/generationId）。 */
+  gatewayMeta?: Record<string, unknown>;
+  /** 网关原始响应体（step.response.body）；只用于读 usage/provider，不存正文。 */
+  body?: unknown;
   finishReason?: string;
   modelId?: string;
   responseId?: string;
@@ -57,8 +63,17 @@ type FakeStepInput = {
 function fakeStep(input: FakeStepInput = {}) {
   const providerMetadata: Record<string, unknown> = {};
   if (input.cost !== undefined) providerMetadata.gateway = { cost: input.cost };
+  if (input.gatewayMeta !== undefined) {
+    providerMetadata.gateway = {
+      ...(providerMetadata.gateway as Record<string, unknown> | undefined),
+      ...input.gatewayMeta,
+    };
+  }
   if (input.anthropic !== undefined) {
     providerMetadata.anthropic = { usage: input.anthropic };
+  }
+  for (const [key, usage] of Object.entries(input.providerUsages ?? {})) {
+    providerMetadata[key] = { usage };
   }
   return {
     finishReason: input.finishReason ?? "stop",
@@ -68,6 +83,7 @@ function fakeStep(input: FakeStepInput = {}) {
       id: input.responseId ?? "resp-1",
       modelId: input.modelId ?? "m",
       headers: { "x-vercel-id": "req-1" },
+      ...(input.body !== undefined ? { body: input.body } : {}),
     },
   };
 }
@@ -143,6 +159,9 @@ async function main() {
       assert.equal(s0.cacheWriteTokens, 50);
       assert.equal(s0.outputTokens, 300);
       assert.equal(s0.reasoningTokens, 10);
+      // Anthropic 的 input_tokens 是非缓存输入；总量 = 1000 + 200 + 50。
+      assert.equal(s0.inputTotalTokens, 1250);
+      assert.equal(s0.upstreamProviderId, null, "Anthropic 原始路径不编造供应商");
       assert.equal(s0.finishReason, "stop");
       assert.equal(s0.providerId, "m");
       assert.equal(s0.generationId, "resp-1");
@@ -479,6 +498,7 @@ async function main() {
             steps: [
               {
                 index: 0,
+                inputTotalTokens: null,
                 inputUncachedTokens: null,
                 cacheReadTokens: null,
                 cacheWriteTokens: null,
@@ -488,6 +508,7 @@ async function main() {
                 finishReason: "stop",
                 durationMs: null,
                 providerId: "m",
+                upstreamProviderId: null,
                 generationId: "g",
                 requestId: "rq",
               },
@@ -742,6 +763,281 @@ async function main() {
         "金额不能重复累计成 0.20"
       );
       assert.equal(g.steps[0].inputUncachedTokens, 11);
+    }
+  );
+
+  // ── Gateway/DeepSeek：网关 usage 形状与 SDK 声明 spec 不一致时的回退 ────
+  // 真实成因：@ai-sdk/gateway 声明 spec v3，但把扁平 usage 原样透传；SDK 按
+  // v3 嵌套读 `inputTokens.total` → 全是 undefined，step.usage 被压塌成空壳。
+  // 唯一还保有数值的是网关原始响应体 `step.response.body.usage` 与供应商
+  // 元数据。以下用例证明能从这些来源读回，且缺字段仍是 null、不由 cost 反推。
+  const collapsedUsage = {
+    inputTokens: undefined,
+    inputTokenDetails: {
+      noCacheTokens: undefined,
+      cacheReadTokens: undefined,
+      cacheWriteTokens: undefined,
+    },
+    outputTokens: undefined,
+    outputTokenDetails: { reasoningTokens: undefined },
+    reasoningTokens: undefined,
+    cachedInputTokens: undefined,
+  };
+
+  await checkAsync(
+    "V9-1 step.usage 被压塌为空 → 从 response.body.usage 读回（spec v2 扁平）",
+    async () => {
+      const ledger = new GatewayCostLedger({});
+      await runWithEvalLedger(ledger, () =>
+        trackedGatewayCall("main", "deepseek/deepseek-v4.1-flash", (rec) =>
+          fakeGenerateText(rec, [
+            fakeStep({
+              cost: "0.012",
+              usage: collapsedUsage,
+              body: {
+                usage: {
+                  inputTokens: 100,
+                  outputTokens: 20,
+                  cachedInputTokens: 30,
+                },
+                providerMetadata: { gateway: { provider: "deepseek" } },
+              },
+            }),
+          ])
+        )
+      );
+      const s = ledger.snapshot().generationRecords[0].steps[0];
+      assert.equal(s.inputTotalTokens, 100);
+      assert.equal(s.cacheReadTokens, 30);
+      assert.equal(s.inputUncachedTokens, 70, "非缓存输入 = 总量 − 缓存读");
+      assert.equal(s.outputTokens, 20);
+      assert.equal(s.upstreamProviderId, "deepseek");
+      assert.equal(s.costUsd, 0.012, "cost 照旧从 gateway 元数据读");
+    }
+  );
+
+  await checkAsync(
+    "V9-2 DeepSeek snake_case 元数据回退：prompt_cache_hit/miss 分别进缓存读/非缓存",
+    async () => {
+      const ledger = new GatewayCostLedger({});
+      await runWithEvalLedger(ledger, () =>
+        trackedGatewayCall("main", "deepseek/deepseek-v4.1-flash", (rec) =>
+          fakeGenerateText(rec, [
+            fakeStep({
+              cost: "0.004",
+              usage: collapsedUsage,
+              providerUsages: {
+                deepseek: {
+                  prompt_tokens: 50,
+                  completion_tokens: 6,
+                  prompt_cache_hit_tokens: 10,
+                  prompt_cache_miss_tokens: 40,
+                },
+              },
+            }),
+          ])
+        )
+      );
+      const s = ledger.snapshot().generationRecords[0].steps[0];
+      assert.equal(s.inputTotalTokens, 50);
+      assert.equal(s.cacheReadTokens, 10);
+      assert.equal(s.inputUncachedTokens, 40);
+      assert.equal(s.outputTokens, 6);
+    }
+  );
+
+  await checkAsync(
+    "V9-3 spec v3 嵌套 usage（step.usage.raw）：total/noCache/cacheRead/reasoning 读得出",
+    async () => {
+      const ledger = new GatewayCostLedger({});
+      await runWithEvalLedger(ledger, () =>
+        trackedGatewayCall("main", "m", (rec) =>
+          fakeGenerateText(rec, [
+            fakeStep({
+              cost: "0.02",
+              usage: {
+                raw: {
+                  inputTokens: {
+                    total: 80,
+                    noCache: 60,
+                    cacheRead: 20,
+                    cacheWrite: 0,
+                  },
+                  outputTokens: { total: 12, reasoning: 4 },
+                },
+              },
+            }),
+          ])
+        )
+      );
+      const s = ledger.snapshot().generationRecords[0].steps[0];
+      assert.equal(s.inputTotalTokens, 80);
+      assert.equal(s.inputUncachedTokens, 60);
+      assert.equal(s.cacheReadTokens, 20);
+      assert.equal(s.cacheWriteTokens, 0, "明确回报的 0 是已知 0，不是未知");
+      assert.equal(s.outputTokens, 12);
+      assert.equal(s.reasoningTokens, 4);
+    }
+  );
+
+  await checkAsync(
+    "V9-4 OpenAI 风格 details.cached_tokens：缓存读与非缓存输入都对得上",
+    async () => {
+      const ledger = new GatewayCostLedger({});
+      await runWithEvalLedger(ledger, () =>
+        trackedGatewayCall("main", "m", (rec) =>
+          fakeGenerateText(rec, [
+            fakeStep({
+              cost: "0.03",
+              usage: collapsedUsage,
+              providerUsages: {
+                openai: {
+                  prompt_tokens: 200,
+                  completion_tokens: 30,
+                  prompt_tokens_details: { cached_tokens: 128 },
+                  completion_tokens_details: { reasoning_tokens: 7 },
+                },
+              },
+            }),
+          ])
+        )
+      );
+      const s = ledger.snapshot().generationRecords[0].steps[0];
+      assert.equal(s.inputTotalTokens, 200);
+      assert.equal(s.cacheReadTokens, 128);
+      assert.equal(s.inputUncachedTokens, 72);
+      assert.equal(s.outputTokens, 30);
+      assert.equal(s.reasoningTokens, 7);
+    }
+  );
+
+  await checkAsync(
+    "V9-5 所有 usage 来源都缺：六类 token（含输入总量）全 null，绝不从 cost 反推",
+    async () => {
+      const ledger = new GatewayCostLedger({});
+      await runWithEvalLedger(ledger, () =>
+        trackedGatewayCall("main", "m", (rec) =>
+          fakeGenerateText(rec, [fakeStep({ cost: "0.02" })])
+        )
+      );
+      const g = ledger.snapshot().generationRecords[0];
+      const s = g.steps[0];
+      assert.equal(s.inputTotalTokens, null);
+      assert.equal(s.inputUncachedTokens, null);
+      assert.equal(s.cacheReadTokens, null);
+      assert.equal(s.cacheWriteTokens, null);
+      assert.equal(s.outputTokens, null);
+      assert.equal(s.reasoningTokens, null);
+      assert.equal(s.upstreamProviderId, null);
+      assert.equal(s.costUsd, 0.02, "cost 有值也不能反推出 token");
+      assert.equal(g.unknownCost, false, "只有 token 未知、cost 已知，不因此标 unknown");
+
+      // 展示层口径：token 全未知显示「未知」，不是 0、不是 NaN。
+      const totals = summarizeGenerations([g]).tokens;
+      assert.equal(totals.inputTotalTokens.known, null);
+      assert.equal(
+        formatTokenTotal(totals.inputTotalTokens),
+        TOKEN_UNKNOWN
+      );
+    }
+  );
+
+  await checkAsync(
+    "V9-6 网关按 step 给 cost、body 才有 usage：token 与 cost 同时落地，路由可定位",
+    async () => {
+      const ledger = new GatewayCostLedger({});
+      await runWithEvalLedger(ledger, () =>
+        trackedGatewayCall("main", "deepseek/deepseek-v4.1-flash", (rec) =>
+          fakeGenerateText(rec, [
+            fakeStep({
+              usage: collapsedUsage,
+              gatewayMeta: { cost: "0.005", provider: "deepseek" },
+              body: {
+                modelId: "deepseek-v4.1-flash",
+                usage: { prompt_tokens: 9, completion_tokens: 3 },
+              },
+            }),
+          ])
+        )
+      );
+      const s = ledger.snapshot().generationRecords[0].steps[0];
+      assert.equal(s.costUsd, 0.005);
+      assert.equal(s.upstreamProviderId, "deepseek", "providerMetadata.gateway.provider 优先");
+      assert.equal(s.inputTotalTokens, 9);
+      assert.equal(s.outputTokens, 3);
+    }
+  );
+
+  // 旧报告兼容：v2 早期的 step 记录没有 inputTotalTokens/upstreamProviderId，
+  // 汇总/展示不能因此出现 NaN 或假装 0。
+  check(
+    "V9-7 旧 v2 明细缺新字段：输入总量显示「未知」，不产生 NaN、不当 0",
+    () => {
+      const legacyStep = {
+        index: 0,
+        inputUncachedTokens: 100,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        outputTokens: 20,
+        reasoningTokens: null,
+        costUsd: 0.01,
+        finishReason: "stop",
+        durationMs: null,
+        providerId: "m",
+        generationId: "g",
+        requestId: "rq",
+      } as unknown as import("../lib/chat/coliving/gateway-ledger").StepUsageRecord;
+      const legacyRecord = {
+        seq: 1,
+        runId: null,
+        scenarioId: null,
+        turnIndex: null,
+        stage: "main",
+        modelId: "m",
+        operationKind: "text-generation",
+        status: "completed",
+        steps: [legacyStep],
+        completedSteps: 1,
+        knownCostUsd: 0.01,
+        unknownCostSteps: 0,
+        unknownCost: false,
+        durationMs: 3,
+        transportAttempts: null,
+        transportObservability: TRANSPORT_OBSERVABILITY_NOTE,
+      } as unknown as import("../lib/chat/coliving/gateway-ledger").GenerationRecord;
+      const totals = summarizeGenerations([legacyRecord]).tokens;
+      assert.equal(totals.inputTotalTokens.known, null);
+      assert.equal(totals.inputTotalTokens.hasUnknown, true);
+      assert.equal(
+        formatTokenTotal(totals.inputTotalTokens),
+        TOKEN_UNKNOWN,
+        "缺字段按未知，不按 0"
+      );
+      assert.equal(totals.inputUncachedTokens.known, 100, "老字段照旧可读");
+
+      // 旧报告 HTML 也要能渲染：新列显示「未知」，不出现 NaN。
+      const legacySnapshot = {
+        schemaVersion: LEDGER_SCHEMA_VERSION,
+        maxCostUsd: null,
+        maxModelCalls: null,
+        maxGenerations: null,
+        calls: 1,
+        generations: 1,
+        knownCostUsd: 0.01,
+        unknownCostCalls: 0,
+        unknownCostGenerations: 0,
+        stopped: false,
+        stopReason: null,
+        byStage: [],
+        byModel: [],
+        generationRecords: [legacyRecord],
+      } as LedgerSnapshot;
+      const html = renderLedgerPanelHtml(legacySnapshot);
+      assert.ok(html.includes("输入总量"), "明细表要有输入总量列");
+      assert.ok(html.includes(TOKEN_UNKNOWN), "缺字段的输入总量显示未知");
+      assert.ok(!html.includes("NaN"), "旧明细不能渲染出 NaN");
+      assert.ok(html.includes("未知"), "缺 upstreamProviderId 显示未知，不显示 undefined");
+      assert.ok(!html.includes("undefined"), "不得把 undefined 直接漏进 HTML");
     }
   );
 

@@ -64,6 +64,12 @@ type ScenarioResult = {
    * 缺了不是错，面板会明说"本报告没有计费台账"，不会把未知当 0。
    */
   cost?: LedgerSnapshot;
+  /**
+   * 本次跑批生效的主生成输出上限（`COLIVING_EVAL_MAX_OUTPUT_TOKENS`），没启用
+   * 或旧报告缺席就是 undefined。**纯数字，不含住户内容**；只是让报告能区分
+   * "这次限了输出"和"这次没限"。不是生产优化标识。
+   */
+  evalMaxOutputTokens?: number | null;
   ms: number;
 };
 
@@ -372,6 +378,11 @@ function renderScenario(r: ScenarioResult): string {
   // 计费证据（generation / step / transport / token / cost）——放在对话
   // 之前，跟"结构性失败"挨着，方便一眼看到这一场的花销与未知项。
   const costPanel = renderLedgerPanelHtml(r.cost);
+  // 评测定向实验（主生成 maxOutputTokens）是否生效——只标数值，不存正文。
+  const evalCapNote =
+    typeof r.evalMaxOutputTokens === "number"
+      ? `<div class="cost-note">主生成输出上限：${r.evalMaxOutputTokens}（评测定向实验，不是生产优化）</div>`
+      : "";
 
   // 失败的默认展开、通过的默认折叠——用户先看有问题的
   return `<details class="scenario${ok ? "" : " failing"}" id="s-${slug(r.id)}"${ok ? "" : " open"}>
@@ -380,6 +391,7 @@ function renderScenario(r: ScenarioResult): string {
         ${source}
         ${failures}
         ${costPanel}
+        ${evalCapNote}
         <div class="chat">${turns}</div>
         ${orphanHtml}
       </div>
