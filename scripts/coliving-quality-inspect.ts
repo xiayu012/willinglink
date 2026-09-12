@@ -3914,6 +3914,34 @@ async function main() {
     }
   });
 
+  /**
+   * 第十六阶段：群体约谈合格例的**代理人称**哨兵。旧合格例写成「我们几个想跟你聊聊」，
+   * 让 AI 混进住户群体用第一人称说话——收件人读到的是"AI 也在这群人里"，而不是
+   * "这几个人托 AI 来约我"。这是措辞/人称错误，不是要恢复 LLM 复审。
+   *
+   * 只锚定**这一条通用合格例**：它必须用第三人称点明是哪几位住户在约，且不得含
+   * 那条误导性的第一人称形式。**不做全局「我们」禁令**——住户原始交办里说「我们商量了
+   * 一阵」是自然说法，其它语境也可能合法使用（原始交办保留原样即是证据）。
+   * 仍是源码级字符串检查：它**不证明**默认模型会照做，真实措辞由实跑与人工验收判断。
+   */
+  check("relay 群体约谈合格例：第三人称点明住户在约，且不含 AI 混入群体的「我们几个想跟你聊聊」", () => {
+    const relayDoc = readFileSync("lib/ai/brains/coliving/doctrine/domain/relay.md", "utf8");
+    // 第三人称人类归属：约人的必须是可核查的住户（名字 + "住户"），不是 AI 自称。
+    assert(
+      relayDoc.includes("和另外两位住户想跟你聊聊"),
+      "群体约谈合格例要用第三人称点明住户在约（如「阿明和另外两位住户想跟你聊聊」）"
+    );
+    assert(
+      !relayDoc.includes("我们几个想跟你聊聊"),
+      "群体约谈合格例不得用第一人称「我们几个想跟你聊聊」——那会让 AI 听起来属于住户群体"
+    );
+    // 正常反例：住户原始交办里的「我们商量了一阵」是自然的第一人称，不得被一并禁掉。
+    assert(
+      relayDoc.includes("我们商量了一阵"),
+      "原始交办里的住户第一人称「我们」是自然说法，不得被这条哨兵误伤"
+    );
+  });
+
   const previous = process.env.COLIVING_JUDGE_OFF;
   process.env.COLIVING_JUDGE_OFF = "1";
   const off = await judgeConversation({ scenarioId: "off", source: "offline", roster: [], turns: bad });
