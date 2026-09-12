@@ -179,11 +179,11 @@ async function membership() {
     console.log(`✓ ${inName} 已搬入（onboarded_at 已设，头两周会主动接触）`);
   }
 
-  // 给某个人在某个渠道登记地址：同一个人可以有手机号 + 企业微信 UserID，
+  // 给某个人在某个渠道登记地址：合租房生产只有短信（kind 默认 sms），
   // person 只有一个 —— 身份不因换渠道而改变。
   const contactFor = argOf("--contact");
   if (contactFor) {
-    const kind = argOf("--kind") ?? "wecom";
+    const kind = argOf("--kind") ?? "sms";
     const value = argOf("--value");
     if (!value) {
       console.log("✗ --contact 需要配 --value（该渠道里的地址）");

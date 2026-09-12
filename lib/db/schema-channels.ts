@@ -23,9 +23,9 @@ export const channelIdentity = pgTable(
     userId: uuid("userId")
       .notNull()
       .references(() => user.id),
-    /** web / xhs / sms / wecom，见 lib/chat/types.ts 的 CHANNELS */
+    /** web / xhs / sms，见 lib/chat/types.ts 的 CHANNELS */
     channel: varchar("channel", { length: 32 }).notNull(),
-    /** 该渠道里这个人的唯一 id：xhs userId、手机号、wecom external_userid */
+    /** 该渠道里这个人的唯一 id：xhs userId、手机号 */
     externalUserId: varchar("externalUserId", { length: 128 }).notNull(),
     /** 同渠道多账号时区分是哪个客服号收到的；现在可以全是 null */
     accountId: varchar("accountId", { length: 128 }),

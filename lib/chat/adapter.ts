@@ -9,7 +9,7 @@ import type { ChannelId, TurnResult } from "./types";
  * adapter 的公共骨架。
  *
  * 每个渠道的 route 只做三件事：**解析自己的字段 → 调 handleInboundMessage →
- * 把结果转成自己平台要的格式**（JSON / TwiML / 企业微信 XML）。身份、会话、
+ * 把结果转成自己平台要的格式**（JSON / TwiML）。身份、会话、
  * 模型、工具、存库全在下面这一条链里，渠道不重复实现。
  */
 

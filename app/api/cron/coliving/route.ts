@@ -10,7 +10,7 @@ import { markCommunication, sendSmsOrSkip } from "@/lib/chat/coliving/deliver";
  * 功能，因此 `runOutreach()` 现在直接返回空数组，下方投递循环空转。
  *
  * **保留这条路由与投递结构**：投递写的仍是已授权排队消息的既有链路
- * （Twilio / 企业微信），本次不改。要重新开放主动发起，改 outreach.ts。
+ * （Twilio 短信，合租房唯一实时渠道），本次不改。要重新开放主动发起，改 outreach.ts。
  *
  * 认证：Vercel Cron 会带 `Authorization: Bearer $CRON_SECRET`。
  * 没设 CRON_SECRET 时只允许本机调用，避免裸奔。

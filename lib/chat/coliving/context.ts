@@ -154,9 +154,8 @@ export async function buildContext(
 
   lines.push("## 当前渠道");
   lines.push(
-    channel === "wecom"
-      ? "企业微信。回复短一些，控制在 200 字以内。"
-      : "短信（SMS）。中文每 70 字计一条，尽量控制在 140 字符内。"
+    "短信（SMS）——这是合租房唯一的实时通信渠道。中文每 70 字计一条，" +
+      "尽量控制在 140 字符内。"
   );
   lines.push(
     "不发链接、不要求上传文件或注册。**短信不渲染 markdown**：星号、井号会原样" +

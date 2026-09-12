@@ -2,7 +2,7 @@
  * No database imports, no send path. Run with NODE_OPTIONS=--conditions=react-server.
  */
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { config } from "dotenv";
 import { assembleSystemPrompt } from "../lib/ai/brains";
@@ -15,6 +15,7 @@ import {
   type JudgeTurn,
 } from "../lib/chat/coliving/evals/judge";
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
+import { CHANNELS } from "../lib/chat/types";
 import {
   countAcceptedOutbound,
   evaluateReplyReview,
@@ -1214,12 +1215,10 @@ async function main() {
     // 但只要还有任何一条已授权 queued outbound（含后续新加的受限功能，如个人物品
     // 提醒）要发出去，就必须在最终投递路由再查一次「生成期间是否已有新入站」——
     // 这是对全部 queued outbound 的最后一道投递保护，防止用过期上下文发出的消息
-    // 覆盖住户最新一句。谁产生 queued outbound 都不能绕过这两个出口。
+    // 覆盖住户最新一句。合租房唯一投递出口是 Twilio 短信路由。
     const twilioDeliverySrc = readFileSync("app/api/twilio/messages/route.ts", "utf8");
-    const wecomDeliverySrc = readFileSync("app/api/wecom/messages/route.ts", "utf8");
     for (const [label, deliverySrc] of [
       ["twilio", twilioDeliverySrc],
-      ["wecom", wecomDeliverySrc],
     ] as const) {
       assert(
         deliverySrc.includes("hasNewInboundSince("),
@@ -1419,16 +1418,6 @@ async function main() {
     const repoSrc = readFileSync("lib/chat/coliving/repo.ts", "utf8");
     assert(repoSrc.includes("(expects_reply = true) desc, sent_at desc limit 1"),
       "pendingCommunication 必须优先 expects_reply=true 再按时间排序");
-  });
-  check("wecom route applies same pre-send race gate as twilio route", () => {
-    // Fix 4: WeCom 投递路径必须与 Twilio 语义一致，有 hasNewInboundSince 竞态门禁。
-    const wecomSrc = readFileSync("app/api/wecom/messages/route.ts", "utf8");
-    assert(wecomSrc.includes("hasNewInboundSince"), "wecom route 必须 import hasNewInboundSince");
-    assert(wecomSrc.includes("deliverWithGate"), "wecom route 必须有 deliverWithGate");
-    assert(wecomSrc.includes("outcome.turnStartedAt"), "wecom route 必须使用 turnStartedAt");
-    assert(wecomSrc.includes('status: "skipped"'), "wecom route 必须 mark skipped");
-    // 日志不得打印地址（m.to），只允许 communicationId/personId
-    assert(!wecomSrc.includes("已有新入站：\", m.to"), "wecom route 日志不能打印 m.to 地址");
   });
   check("route.ts applies pre-send race gate for outbound messages", () => {
     const routeSrc = readFileSync("app/api/twilio/messages/route.ts", "utf8");
@@ -4845,6 +4834,105 @@ async function main() {
         `只有独立 CLI 能 import outreach，评测路径不得依赖它：${f}`
       );
     }
+  });
+
+  /**
+   * ── 短信是合租房唯一实时渠道（老板 2026-09-12 彻底放弃企业微信）─────────
+   *
+   * 目标不是"少一个渠道名"，而是**保证企业微信的运行路径真的没了**：
+   * CHANNELS 不含 wecom、三条已知运行文件已删除、package 没有自检命令、
+   * proxy 不再放行 /api/wecom，且 app/、lib/ 与 scripts/ 的非注释代码里不再
+   * 出现 wecom/WECOM（本检查文件为写断言必须含该字面量，自身排除；解释
+   * "已移除"的注释允许保留；迁移历史不属运行时，另行排除）。
+   * Twilio 短信路由与个人物品受限提醒必须原样保留并可投递。
+   */
+  check("短信唯一：CHANNELS 不再含 wecom，企业微信运行路径全部删除", () => {
+    assert.deepEqual(
+      [...CHANNELS],
+      ["web", "xhs", "sms"],
+      "CHANNELS 不得再包含 wecom（合租房只剩短信）"
+    );
+    for (const p of [
+      "app/api/wecom/messages/route.ts",
+      "lib/chat/wecom.ts",
+      "scripts/wecom-selftest.ts",
+    ]) {
+      assert(!existsSync(p), `企业微信运行文件必须删除：${p}`);
+    }
+    const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    assert(
+      !Object.keys(pkg.scripts ?? {}).some((k) => /wecom/i.test(k)),
+      "package.json 不得再保留 wecom:* 命令"
+    );
+    const proxySrc = readFileSync("proxy.ts", "utf8");
+    assert(!proxySrc.includes("/api/wecom"), "proxy.ts 不得再放行 /api/wecom");
+
+    // 运行时正文扫描：app/、lib/、scripts/（排除迁移历史与本检查文件自身），
+    // 只查非注释行，避免把"wecom 已移除"的说明性注释误判成残留运行路径。
+    // 本检查文件必须写出 "/api/wecom"、wecom:* 等字面量才能断言"不得存在"，
+    // 那是断言文本不是可达入口，故按路径排除。
+    const selfPath = "scripts/coliving-quality-inspect.ts";
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name).replace(/\\/g, "/");
+        if (e.isDirectory()) {
+          if (
+            e.name === "node_modules" ||
+            e.name.startsWith(".") ||
+            p.includes("lib/db/migrations")
+          ) {
+            continue;
+          }
+          walk(p);
+        } else if (/\.tsx?$/.test(e.name) && p !== selfPath) {
+          const lines = readFileSync(p, "utf8").split(/\r?\n/);
+          lines.forEach((line, i) => {
+            const t = line.trim();
+            if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) {
+              return;
+            }
+            if (/wecom/i.test(line)) hits.push(`${p}:${i + 1}`);
+          });
+        }
+      }
+    };
+    walk("app");
+    walk("lib");
+    walk("scripts");
+    assert.equal(
+      hits.length,
+      0,
+      `运行时代码不得残留 wecom 调用/字面量：${hits.join(", ")}`
+    );
+  });
+
+  check("短信唯一：Twilio 投递路径与个人物品受限提醒仍保留", () => {
+    const twilioSrc = readFileSync("app/api/twilio/messages/route.ts", "utf8");
+    assert(
+      twilioSrc.includes('channel: "sms"'),
+      "Twilio 路由必须仍以 sms 渠道跑合租大脑"
+    );
+    assert(
+      twilioSrc.includes("hasNewInboundSince") &&
+        twilioSrc.includes("deliverWithGate"),
+      "Twilio 短信投递的发送前竞态门禁必须保留"
+    );
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes("deliverPersonalItemReminder"),
+      "唯一受约束的第三方出站（个人物品提醒）必须仍在 turn.ts 接入"
+    );
+    const reminderSrc = readFileSync(
+      "lib/chat/coliving/personal-item-reminder.ts",
+      "utf8"
+    );
+    assert(
+      reminderSrc.includes("PERSONAL_ITEM_REMINDER_TEXT"),
+      "个人物品提醒必须仍发写死正文（不接受自由文本）"
+    );
   });
 
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);

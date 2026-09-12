@@ -1,13 +1,15 @@
 /**
  * 多渠道聊天的公共类型。
  *
- * 一句话原则：**WillingLink 的 conversation 才是聊天本体**，网页/小红书/短信/
- * 企业微信只是同一个 conversation 的不同窗口。所以这里没有"某渠道的会话"这种
+ * 一句话原则：**WillingLink 的 conversation 才是聊天本体**，网页/小红书/短信
+ * 只是同一个 conversation 的不同窗口。所以这里没有"某渠道的会话"这种
  * 概念，只有「一条消息从哪个渠道进来的」。
+ *
+ * 合租房的实时通信渠道**只有短信**；要接一个新渠道 = 加一个值 + 写一个 adapter。
  */
 
 /** 已规划的渠道。新增渠道 = 加一个值 + 写一个 adapter，其它都不用动。 */
-export const CHANNELS = ["web", "xhs", "sms", "wecom"] as const;
+export const CHANNELS = ["web", "xhs", "sms"] as const;
 
 export type ChannelId = (typeof CHANNELS)[number];
 
@@ -20,7 +22,7 @@ export function isChannelId(value: unknown): value is ChannelId {
 /** 某渠道上的一个外部身份，例如 { channel: "sms", externalUserId: "+14085551234" } */
 export type ExternalIdentity = {
   channel: ChannelId;
-  /** 该渠道里这个人的唯一 id：xhs userId / 手机号 / wecom external_userid */
+  /** 该渠道里这个人的唯一 id：xhs userId / 手机号 */
   externalUserId: string;
   /**
    * 同一渠道下的多账号场景：哪个客服号/公众号/发件号收到的。

@@ -31,8 +31,8 @@ import type { InboundTurn, TurnResult } from "./types";
  * 现状（有意为之的半成品，接下一个渠道时按这个顺序推进）：
  * - `buildTurnSetup()` 已经是网页 `/api/chat` 和这里的**唯一**一份
  *   模型/提示词/工具配置。以后换模型、加工具只改这一处，两边同时生效。
- * - `runChatTurn()` 是非流式整轮，给 webhook 型渠道（小红书私信、Twilio、
- *   企业微信）用——它们要的是一段最终文本，不是 SSE。
+ * - `runChatTurn()` 是非流式整轮，给 webhook 型渠道（小红书私信、Twilio
+ *   短信）用——它们要的是一段最终文本，不是 SSE。
  * - 网页那条路**仍然自己 streamText**（SSE、resumable stream、标题生成、
  *   工具审批续跑都在那），只是配置从这里拿。把网页也搬进来收益不大、风险不小，
  *   等真有第二个流式渠道时再说。
@@ -165,7 +165,7 @@ export function buildTurnSetup({
  *
  * | 函数 | 读历史 | 有工具 | 写库 | 用在哪 |
  * |---|---|---|---|---|
- * | `runChatTurn`        | ✅ 最近20条 | ✅ | ✅ | **对话**：私信、短信、企微 |
+ * | `runChatTurn`        | ✅ 最近20条 | ✅ | ✅ | **对话**：私信、短信 |
  * | `runPostScopedTurn`  | ❌         | ✅ | ✅ | **单帖**：评论草稿 |
  * | `transformText`      | ❌         | ❌ | ❌ | **纯变换**：压缩、改写 |
  *

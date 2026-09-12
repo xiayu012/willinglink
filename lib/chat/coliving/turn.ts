@@ -1177,9 +1177,9 @@ export function buildGeneratorSystemMessages(input: {
 }
 
 export async function runColivingTurn(args: {
-  /** 从哪个渠道来：sms / wecom / xhs。决定认人用哪种地址、回信走哪条路 */
+  /** 从哪个渠道来。合租房生产只有短信（`sms`），决定认人用哪种地址、回信走哪条路 */
   channel?: string;
-  /** 该渠道里的发信人地址：短信是手机号，企业微信是 UserID */
+  /** 该渠道里的发信人地址：短信是手机号 */
   from: string;
   text: string;
   /** 仅测试用：临时覆盖模型，便于 A/B */

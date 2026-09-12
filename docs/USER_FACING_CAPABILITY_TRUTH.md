@@ -5,6 +5,18 @@
 > 建立于 2026-09-12 老板「具体功能逐项开放」严格口径。
 > 同目录相关：`.claude/CONCRETE_FUNCTIONS.md`（具体功能总册）、`.claude/PROJECT_STATE.md`。
 
+## 通信渠道：合租房只有短信
+
+- 老板 2026-09-12 决定**彻底放弃企业微信**，合租房的实时通信渠道**只有短信（SMS，
+  Twilio 路由）**。`web` / `xhs` 是其它产品能力，不属于合租房实时渠道，保留不动。
+- 企业微信的运行时已整体移除：`app/api/wecom/messages/route.ts`、`lib/chat/wecom.ts`、
+  `scripts/wecom-selftest.ts` 删除，`wecom:selftest` 命令、`proxy.ts` 的 `/api/wecom`
+  放行、`CHANNELS` 里的 `wecom` 全部去掉。数据库迁移历史里的 `wecom` 取值保留作历史兼容，
+  但**新的运行时不得再宣称或加载企业微信渠道**。
+- 免费结构闸 `scripts/coliving-quality-inspect.ts` 守住这条：`CHANNELS` 不含 wecom、
+  三条运行文件不存在、package 无自检命令、proxy 无路由、运行时代码无 wecom 残留，
+  同时确认 Twilio 短信投递与个人物品受限提醒仍可投递。
+
 ## 唯一允许发给另一个住户的功能
 
 **个人物品使用提醒** —— `lib/chat/coliving/personal-item-reminder.ts`

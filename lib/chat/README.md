@@ -1,13 +1,12 @@
 # 多渠道聊天（半成品骨架）
 
-一句话原则：**WillingLink 的 conversation 才是聊天本体**，网页、小红书、短信、
-企业微信只是同一个 conversation 的不同窗口。
+一句话原则：**WillingLink 的 conversation 才是聊天本体**，网页、小红书、短信
+只是同一个 conversation 的不同窗口。合租房的实时通信渠道**只有短信**。
 
 ```
 网页    /api/chat            → （直接用 buildTurnSetup，保留 SSE）
 小红书  /api/xhs/messages    → XHS adapter    ┐
-Twilio  /api/twilio/messages → Twilio adapter ├→ handleInboundMessage → Chat Engine
-企微    /api/wecom/messages  → WeCom adapter  ┘
+Twilio  /api/twilio/messages → Twilio adapter ┴→ handleInboundMessage → Chat Engine
 ```
 
 ## 现在有什么
@@ -23,8 +22,7 @@ Twilio  /api/twilio/messages → Twilio adapter ├→ handleInboundMessage → 
 | `xhs-dm.ts` | 私信渠道的提示词 / 模型 / 收联系方式识别 / 出站排版（分割线+1000字） | 可用，提示词与识别器必须同步改 |
 | `app/api/xhs/messages` | 小红书私信 adapter，**已接通** | MVP：收 `{id, text}`，异步投递 |
 | `jijyun.ts` | 出站投递到集简云 webhook | 可用，URL 走环境变量 |
-| `app/api/twilio/messages` | 短信 adapter | 骨架，缺验签与 TwiML |
-| `app/api/wecom/messages` | 企微 adapter | 骨架，缺验签/解密/异步推送 |
+| `app/api/twilio/messages` | 短信 adapter（合租房唯一实时渠道） | 骨架，缺验签与 TwiML |
 
 ## 跨渠道上下文是怎么成立的
 
@@ -58,7 +56,7 @@ Twilio  /api/twilio/messages → Twilio adapter ├→ handleInboundMessage → 
 4. **消息打渠道标签**：跑 SQL 第 2 段，然后把 `channel` / `externalMessageId`
    两列补进 `lib/db/schema.ts` 的 `message` 定义，`runChatTurn` 里存消息时带上。
    顺序不能反：drizzle 会按 schema 定义查列，库里没列会直接报错。
-5. **接 Twilio / 企微**：照 xhs 那个 adapter 抄，各自补验签与回复格式。
+5. **接 Twilio**：照 xhs 那个 adapter 抄，补齐验签与回复格式。合租房只用短信。
 
 ## 有意没做的事
 

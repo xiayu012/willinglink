@@ -32,12 +32,11 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 渠道 adapter（Twilio / 企业微信 / 未来其它）走各平台自己的验签，不是会话
+  // 渠道 adapter（Twilio / 未来其它）走各平台自己的验签，不是会话
   // cookie，别被 guest-auth 重定向掉。路由自身默认关闭
   // （CHANNEL_ADAPTERS_ENABLED），验签在各 adapter 里补。
   if (
     pathname.startsWith("/api/twilio/") ||
-    pathname.startsWith("/api/wecom/") ||
     // 房东入库：本地脚本用 CRON_SECRET Bearer 打进来，同样不是会话 cookie。
     // 漏了这条的表现是 307 跳到 /api/auth/guest 再 405，路由压根没跑到。
     pathname.startsWith("/api/coliving/")
