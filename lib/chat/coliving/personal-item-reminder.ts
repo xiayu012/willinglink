@@ -2,10 +2,6 @@ import "server-only";
 
 import { assertCanWrite } from "./guard";
 import * as repo from "./repo";
-import {
-  hasRelayedReminderAskSignal,
-  looksLikeRelayedReminderAsk,
-} from "./reminder-ask";
 
 /**
  * **已开放的具体功能：个人物品使用提醒（唯一允许发给别的住户的受约束出站）。**
@@ -43,13 +39,6 @@ export const PERSONAL_ITEM_REMINDER_TEXT =
  */
 export const PERSONAL_ITEM_REMINDER_FORM =
   "提醒 <室友名字>：使用我的个人物品前先问我";
-
-/**
- * 近似请求（不是窄命令形态，但明确让 AI 提醒某位指定室友、主题是
- * 「用我的个人物品前先问我」）统一回这句短指引：如实说**没有发送**，
- * 并给出这唯一一种固定说法。零第三方出站、不过模型。
- */
-export const PERSONAL_ITEM_APPROXIMATE_GUIDANCE = `我没有把这条发给对方。个人物品提醒只能按固定说法发：「${PERSONAL_ITEM_REMINDER_FORM}」。`;
 
 /** 回给发起人的真话收据：只说做成了什么，不复述内部过程。 */
 export function personalItemReminderReceipt(recipientName: string): string {
@@ -95,54 +84,6 @@ function normalizeBody(raw: string): string {
 export function looksLikePersonalItemReminder(text: string): boolean {
   const t = text.trim().replace(LOOSE_POLITE, "");
   return LOOSE_LEAD.test(t) && LOOSE_PERSONAL_ITEM.test(t);
-}
-
-/**
- * 明确属于**其它未开放能力 / 混合议题**的信号。命中即不吞：深夜洗衣（另有
- * 模块）、卫生/头发、费用分摊、规则制定、去留协调、一般噪音等。
- */
-const PERSONAL_ITEM_APPROX_FOREIGN =
-  /(?:头发|地漏|卫生|水费|电费|分摊|摊钱|公用|公摊|规矩|规则|全屋|大家都|换住|搬走|退租|押金|深夜|半夜|大半夜|夜里|夜间|晚上|入夜|凌晨|洗衣机|烘干机|洗烘|洗衣服|烘衣服|洗衣|烘干|噪音|音乐|电视|外放|音量|清洁|打扫|垃圾|厨房|做饭|访客|过夜)/;
-
-/** 「用/借/拿我的个人物品」的动作词。 */
-const PERSONAL_ITEM_USE =
-  /(?:使用|用|借用?|借|拿|动|碰|翻|穿)/;
-/** 「先问我/打招呼/征得同意」的征询线索。 */
-const PERSONAL_ITEM_ASK =
-  /(?:问|打招呼|同意|先说|说一声|讲一声|告知|经过我|通过我|征得)/;
-
-/** 这一项功能的独有主题：用我的个人物品前先问我。 */
-function isPersonalItemTopic(t: string): boolean {
-  return (
-    LOOSE_PERSONAL_ITEM.test(t) &&
-    PERSONAL_ITEM_USE.test(t) &&
-    PERSONAL_ITEM_ASK.test(t)
-  );
-}
-
-/**
- * 近似请求的**便宜预筛**（不查名册）：主题 + 请求语气 + 非讨论/非混合。
- * 先跑它，只有疑似才去读成员表。
- */
-export function hasPersonalItemAskSignal(text: string): boolean {
-  return hasRelayedReminderAskSignal(text, {
-    topicCue: isPersonalItemTopic,
-    foreignCue: PERSONAL_ITEM_APPROX_FOREIGN,
-  });
-}
-
-/**
- * 完整判定：见 `looksLikeRelayedReminderAsk`。`memberNames` 传的是**除当前
- * 说话人以外**的名册姓名（判定「指定室友」用）。
- */
-export function looksLikeApproximatePersonalItemAsk(
-  text: string,
-  memberNames: readonly string[]
-): boolean {
-  return looksLikeRelayedReminderAsk(text, memberNames, {
-    topicCue: isPersonalItemTopic,
-    foreignCue: PERSONAL_ITEM_APPROX_FOREIGN,
-  });
 }
 
 /**
@@ -217,22 +158,6 @@ export async function deliverPersonalItemReminder(args: {
   text: string;
 }): Promise<PersonalItemReminderOutcome> {
   if (!looksLikePersonalItemReminder(args.text)) {
-    // 不是窄命令形态，但可能是「明确让 AI 提醒某位指定室友」的近似自然语言
-    // 请求：只回一句未发送指引，零第三方出站、不过模型。先做不查名册的预筛，
-    // 只有疑似才读成员表，避免每条无关消息都查一次。
-    if (hasPersonalItemAskSignal(args.text)) {
-      const others = (
-        await repo.getMembers(args.householdId, args.channel)
-      )
-        .filter((m) => m.personId !== args.senderPersonId)
-        .map((m) => m.name);
-      if (looksLikeApproximatePersonalItemAsk(args.text, others)) {
-        return {
-          kind: "guidance",
-          reply: PERSONAL_ITEM_APPROXIMATE_GUIDANCE,
-        };
-      }
-    }
     return { kind: "none" };
   }
 
