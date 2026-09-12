@@ -9,16 +9,22 @@
  *   pnpm coliving-eval -- --judge-off        # 跳过语义验收，只跑结构性
  *   pnpm coliving-eval -- --judge-advisory   # 语义验收照跑，但 high 不计入门禁
  *   pnpm coliving-eval -- --guidance concise-coordination-v1   # 实验组：加成功轨迹
- *   pnpm coliving-eval -- --max-cost-usd 0.5 --max-model-calls 200   # 预算闸
+ *   pnpm coliving-eval -- --max-cost-usd 0.5 --max-generations 200   # 预算闸
  *
- * `--max-cost-usd` / `--max-model-calls` 是**仅评测**的开支闸（见
- * `lib/chat/coliving/gateway-ledger.ts`）：两个都不传就是原来不设限的完整
- * 跑批；调用数是硬上限，金额按 gateway 实际回报的花费判断（软硬混合）。
- * **两个上限都是整次跑批共享的总上限**（只建一份 `BatchBudget`），不是每个
- * 场景各一份——否则 N 个场景会把总预算放大 N 倍。每个场景仍保有自己的本地
- * 台账（stage/model 分解），终端汇总不会重复计费。报告与终端汇总都记实际
- * 调用数、已知花费、拿不到 cost 的调用数；预算中途触限也会把已花的钱和
- * 已跑完的轮次写进报告，并附上整批共享预算的停止原因。
+ * `--max-cost-usd` / `--max-generations`（旧名 `--max-model-calls`，语义一直是
+ * 这个）是**仅评测**的开支闸（见 `lib/chat/coliving/gateway-ledger.ts`）：
+ * 两个都不传就是原来不设限的完整跑批；generation 数是硬上限，金额按 gateway
+ * 实际回报的花费判断（软硬混合）。**两个上限都是整次跑批共享的总上限**
+ * （只建一份 `BatchBudget`），不是每个场景各一份——否则 N 个场景会把总预算
+ * 放大 N 倍。每个场景仍保有自己的本地台账（stage/model 分解 + 逐 generation
+ * 明细），终端汇总不会重复计费。
+ *
+ * **generation ≠ HTTP 请求**：一个 generation 内部还有多个 step（带工具往返）
+ * 和 SDK 的 transport retry；后者本 SDK 不可观测，报告里记 `null` 并注明，
+ * 不猜、也不拿 generation 数冒充请求数。报告与终端汇总都记 generation 数、
+ * 已完成 step 数、tokens/cache、已知花费、拿不到 cost 的 generation 数；
+ * 预算中途触限也会把已花的钱和已跑完的轮次写进报告，并附上整批共享预算的
+ * 停止原因。
  *
  * `--guidance` 默认不启用；只接受 `lib/chat/coliving/evals/guidance.ts` 里
  * 已登记的 id，未知 id 立即报错。报告会记录本次用的是哪个 guidance id
@@ -68,8 +74,15 @@ import {
   isEvalBudgetExceeded,
   mergeLedgerSnapshots,
   runWithEvalLedger,
+  runWithLedgerLabels,
   type LedgerSnapshot,
 } from "../lib/chat/coliving/gateway-ledger";
+import {
+  formatKnownCost,
+  formatTokenTotal,
+  summarizeGenerations,
+  TRANSPORT_UNOBSERVABLE,
+} from "../lib/chat/coliving/ledger-report";
 
 // ── CLI args ─────────────────────────────────────────────────────────────
 function argValue(name: string): string | null {
@@ -121,20 +134,37 @@ const GUIDANCE_LABEL = GUIDANCE_ID && GUIDANCE_TEXT ? GUIDANCE_ID.trim() : null;
 /**
  * **评测预算闸（仅评测，生产不经过这里）。**
  *
- * `--max-cost-usd <正数>` / `--max-model-calls <正整数>` 都是可选的；两个都
+ * `--max-cost-usd <正数>` / `--max-generations <正整数>` 都是可选的；两个都
  * 不传就是原来"不设上限"的完整跑批行为，逐字不变。非法值（0、负数、非数）
  * 立即报错退出，**不静默退回不设限**——那会把"以为有闸"记成"没闸"。
  *
- * 上限语义见 `lib/chat/coliving/gateway-ledger.ts`：调用数是硬上限；金额是
- * 软硬混合（按 gateway 实际回报的已知花费判断，达到线后拦下一次）。
+ * `names[0]` 是首选名，其余是**兼容旧名**（`--max-model-calls` 的语义一直
+ * 就是 generation 上限，只是名字不准）。同时只接受传其中一个：两个都传且
+ * 值不同时报错，不静默取其一。
+ *
+ * 上限语义见 `lib/chat/coliving/gateway-ledger.ts`：generation 数是硬上限；
+ * 金额是软硬混合（按 gateway 实际回报的已知花费判断，达到线后拦下一次）。
+ * **两者都只管 generation**——管不住一个 generation 内部的 step 与 transport
+ * retry，别当 HTTP 请求级配额看。
  */
 function parseOptionalLimit(
-  name: string,
+  names: readonly [string, ...string[]],
   options: { integer: boolean }
 ): number | null {
-  // 没传这个 flag 才是"不设限"；传了却缺值/给错值一律报错退出，
+  // 没传任何一个才是"不设限"；传了却缺值/给错值一律报错退出，
   // 不静默当成没传——那会把"以为有闸"记成"没闸"。
-  if (!process.argv.includes(`--${name}`)) return null;
+  const present = names.filter((n) => process.argv.includes(`--${n}`));
+  if (present.length === 0) return null;
+  if (present.length > 1) {
+    console.error(
+      `--${names[0]} 与旧名 ${present
+        .slice(1)
+        .map((n) => `--${n}`)
+        .join("、")} 不能同时传；只传 --${names[0]} 即可`
+    );
+    process.exit(2);
+  }
+  const name = present[0];
   const raw = argValue(name);
   const value = Number(raw);
   const valid =
@@ -149,8 +179,11 @@ function parseOptionalLimit(
   }
   return value;
 }
-const MAX_COST_USD = parseOptionalLimit("max-cost-usd", { integer: false });
-const MAX_MODEL_CALLS = parseOptionalLimit("max-model-calls", { integer: true });
+const MAX_COST_USD = parseOptionalLimit(["max-cost-usd"], { integer: false });
+const MAX_MODEL_CALLS = parseOptionalLimit(
+  ["max-generations", "max-model-calls"],
+  { integer: true }
+);
 
 /**
  * **整批共享预算（唯一一份）。** 两个上限的语义是**整次跑批**的总上限，
@@ -402,18 +435,24 @@ async function runScenario(
    * 已经花掉的钱**：下面据此返回一份带 `cost` 的失败结果，报告照写。
    */
   let loopBudgetStop: string | null = null;
-  for (const t of scenario.turns) {
+  for (const [i, t] of scenario.turns.entries()) {
     const livePhone = phoneRewrite[t.from] ?? t.from;
     const said = rewritePhonesInText(t.text, phoneRewrite);
     // guidance 只有显式 `--guidance <id>` 时才有值；不传就是基线，
     // 生成器看到的 system 与生产逐字一致（见 turn.ts 里共用的
     // buildGeneratorSystemMessages：无 guidance 时严格 doctrine → runtime）。
     try {
-      last = await turn.runColivingTurn({
-        from: livePhone,
-        text: said,
-        guidance: GUIDANCE_TEXT,
-      });
+      // 每轮单独打 turnIndex 标签：这一轮里所有 generation（主生成、
+      // 强制发信、重写、事实复核、最终修正、工具里的 embedding）都继承
+      // 它；run/scenario 标签由外层继承。turn 边界只在这一次调用内生效，
+      // 出了这个 run 就回到 scenario 级，判定器（judge）不会被误标成某轮。
+      last = await runWithLedgerLabels({ turnIndex: i }, () =>
+        turn.runColivingTurn({
+          from: livePhone,
+          text: said,
+          guidance: GUIDANCE_TEXT,
+        })
+      );
     } catch (error) {
       if (isEvalBudgetExceeded(error)) {
         loopBudgetStop = error.message;
@@ -628,7 +667,15 @@ async function runScenarioSafely(
    */
   const ledger = new GatewayCostLedger({}, batchBudget);
   try {
-    return await runWithEvalLedger(ledger, () => runScenario(scenario, ledger));
+    // scenario 标签包住整场：这场里每一轮、每一次判定（judge）都继承
+    // scenarioId；turnIndex 由 `runScenario` 在轮边界单独打。并发场景
+    // 各在自己的异步上下文里，标签不串场。runId 由 `main()` 在整批外层
+    // 继承下来（这里不覆盖）。
+    return await runWithEvalLedger(ledger, () =>
+      runWithLedgerLabels({ scenarioId: scenario.id }, () =>
+        runScenario(scenario, ledger)
+      )
+    );
   } catch (error) {
     const reason = (() => {
       if (error instanceof Error) {
@@ -700,13 +747,21 @@ async function main() {
       `预算=${
         MAX_COST_USD === null && MAX_MODEL_CALLS === null
           ? "不设限"
-          : `金额上限 ${MAX_COST_USD ?? "无"}、调用上限 ${MAX_MODEL_CALLS ?? "无"}`
+          : `金额上限 ${MAX_COST_USD ?? "无"}、generation 上限 ${MAX_MODEL_CALLS ?? "无"}`
       }…\n`
   );
 
+  /**
+   * 整批的 runId：只用来把同一次跑批的 generation 归到一起，**不含任何
+   * 住户内容**（就是时间戳）。整批包一层标签上下文，各场景在里面继承；
+   * 并发场景仍各在自己的 scenario 上下文里，互不串场。
+   */
+  const RUN_ID = `run-${new Date().toISOString()}`;
   const start = Date.now();
-  const results = await runWithConcurrency(scenarios, CONCURRENCY, (s) =>
-    runScenarioSafely(s, BATCH_BUDGET)
+  const results = await runWithLedgerLabels({ runId: RUN_ID }, () =>
+    runWithConcurrency(scenarios, CONCURRENCY, (s) =>
+      runScenarioSafely(s, BATCH_BUDGET)
+    )
   );
   const totalMs = Date.now() - start;
 
@@ -787,26 +842,46 @@ async function main() {
    */
   const merged = mergeLedgerSnapshots(results.map((r) => r.cost));
   const totals = budgetSnapshot ?? merged;
+  const summary = summarizeGenerations(merged.generationRecords);
   const caps =
     totals.maxCostUsd === null && totals.maxModelCalls === null
       ? "不设限"
-      : `金额上限 ${totals.maxCostUsd ?? "无"}、调用上限 ${totals.maxModelCalls ?? "无"}`;
+      : `金额上限 ${totals.maxCostUsd ?? "无"}、generation 上限 ${totals.maxModelCalls ?? "无"}`;
   console.log(
-    `\n计费（Gateway 实际回报）：预算 ${caps}；实际调用 ${totals.calls} 次；` +
-      `已知花费 $${totals.knownCostUsd.toFixed(6)}；` +
-      `未知花费调用 ${totals.unknownCostCalls} 次` +
+    `\n计费（Gateway 实际回报）：预算 ${caps}；` +
+      `generation ${totals.generations} 个（模型生成批次，**不是 HTTP 请求数**）；` +
+      `已完成 step ${summary.completedSteps} 个；` +
+      `已知花费 ${formatKnownCost(totals.knownCostUsd, totals.unknownCostGenerations > 0)}；` +
+      `未知花费 generation ${totals.unknownCostGenerations} 个` +
+      `${totals.unknownCostGenerations > 0 ? "（已知金额只是下界）" : ""}` +
       `${totals.stopped ? `；**已因触限停止**（${totals.stopReason ?? ""}）` : ""}`
   );
-  for (const bucket of [...merged.byStage].sort((a, b) => b.calls - a.calls)) {
+  console.log(
+    `    token：非缓存输入 ${formatTokenTotal(summary.tokens.inputUncachedTokens)}、` +
+      `缓存读 ${formatTokenTotal(summary.tokens.cacheReadTokens)}、` +
+      `缓存写 ${formatTokenTotal(summary.tokens.cacheWriteTokens)}、` +
+      `输出 ${formatTokenTotal(summary.tokens.outputTokens)}、` +
+      `推理 ${formatTokenTotal(summary.tokens.reasoningTokens)}`
+  );
+  // transport 次数本 SDK 不可观测 → 永远 null；这里明确写"不可观测"，
+  // 不显示成 0，也不拿 generation 数顶替。
+  console.log(
+    `    transport attempts：${TRANSPORT_UNOBSERVABLE}——${summary.transportObservability}`
+  );
+  for (const bucket of [...merged.byStage].sort(
+    (a, b) => b.generations - a.generations
+  )) {
     console.log(
-      `    - stage ${bucket.key}：${bucket.calls} 次，$${bucket.knownCostUsd.toFixed(6)}` +
-        `${bucket.unknownCostCalls ? `，未知 ${bucket.unknownCostCalls} 次` : ""}`
+      `    - stage ${bucket.key}：${bucket.generations} 个 generation，${formatKnownCost(bucket.knownCostUsd, bucket.unknownCostCalls > 0)}` +
+        `${bucket.unknownCostCalls ? `，未知 ${bucket.unknownCostCalls} 个` : ""}`
     );
   }
-  for (const bucket of [...merged.byModel].sort((a, b) => b.calls - a.calls)) {
+  for (const bucket of [...merged.byModel].sort(
+    (a, b) => b.generations - a.generations
+  )) {
     console.log(
-      `    - model ${bucket.key}：${bucket.calls} 次，$${bucket.knownCostUsd.toFixed(6)}` +
-        `${bucket.unknownCostCalls ? `，未知 ${bucket.unknownCostCalls} 次` : ""}`
+      `    - model ${bucket.key}：${bucket.generations} 个 generation，${formatKnownCost(bucket.knownCostUsd, bucket.unknownCostCalls > 0)}` +
+        `${bucket.unknownCostCalls ? `，未知 ${bucket.unknownCostCalls} 个` : ""}`
     );
   }
 

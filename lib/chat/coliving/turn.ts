@@ -3426,7 +3426,7 @@ export async function runColivingTurn(args: {
    * 准则那一段逐字不变，可以缓存（写入 1.25 倍价，命中 0.1 倍价）；
    * 运行时状态每轮都变，留在断点之外，否则一变就整段落空。
    */
-  const result = await trackedGatewayCall("main", modelId, () =>
+  const result = await trackedGatewayCall("main", modelId, (rec) =>
   generateText({
     abortSignal: turnAbortSignal(),
     model: getLanguageModel(modelId),
@@ -3440,6 +3440,8 @@ export async function runColivingTurn(args: {
     tools: activeTools,
     // 交付了正文就收工；没交付则最多跑到步数上限
     stopWhen: [hasToolCall("sendReply"), stepCountIs(MAX_STEPS)],
+    // 评测台账逐步留证；生产（无台账）时是空对象，参数逐字不变。
+    ...rec.stepOptions,
   }));
 
   for (const step of result.steps) {
@@ -3470,7 +3472,7 @@ export async function runColivingTurn(args: {
      * 想好的结论交付成一句正文。这比"猜哪段文字是正文"可靠得多。
      */
     try {
-      const forced = await trackedGatewayCall("forced-sendReply", modelId, () =>
+      const forced = await trackedGatewayCall("forced-sendReply", modelId, (rec) =>
       generateText({
         abortSignal: turnAbortSignal(),
         model: getLanguageModel(modelId),
@@ -3492,6 +3494,7 @@ export async function runColivingTurn(args: {
         ],
         tools: { sendReply: tools.sendReply },
         toolChoice: { type: "tool", toolName: "sendReply" },
+        ...rec.stepOptions,
       }));
       // 补上：这次强制重试自己的工具调用之前从没被记进 toolsUsed——
       // 安全网确实兜住了、消息也送达了，但事后完全看不出这一轮其实是
@@ -3580,7 +3583,7 @@ export async function runColivingTurn(args: {
       .filter((n): n is string => !!n);
     if (names.length > 0) {
       try {
-        const forcedContact = await trackedGatewayCall("forced-contact", modelId, () =>
+        const forcedContact = await trackedGatewayCall("forced-contact", modelId, (rec) =>
         generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
@@ -3605,6 +3608,7 @@ export async function runColivingTurn(args: {
           tools: { contactPerson: tools.contactPerson },
           toolChoice: { type: "tool", toolName: "contactPerson" },
           stopWhen: stepCountIs(names.length),
+          ...rec.stepOptions,
         }));
         // 同一个盲区（2026-09-05 泛化排班硬规则时才发现原来不止一处）：
         // 这次强制补发自己的工具调用之前没被记进 toolsUsed，外部看不出
@@ -4346,7 +4350,7 @@ export async function runColivingTurn(args: {
         stage: "redo",
         defaultModelId: modelId,
       });
-      const redoResult = await trackedGatewayCall("redo", redoModelId, () =>
+      const redoResult = await trackedGatewayCall("redo", redoModelId, (rec) =>
       generateText({
         abortSignal: turnAbortSignal(),
         // 第一次重写：一律用默认生产模型。只有 relay 的"最终聚焦修正"
@@ -4416,6 +4420,7 @@ export async function runColivingTurn(args: {
         // 仍然远低于主生成的 MAX_STEPS=6——这是补救性的单次重写，
         // 不该比正常一轮更奢侈。
         stopWhen: [hasToolCall("sendReply"), stepCountIs(4)],
+        ...rec.stepOptions,
       }));
       /**
        * **同一个盲区，第三处发现（2026-09-05）：** 主生成、MAX_STEPS
@@ -4493,7 +4498,7 @@ export async function runColivingTurn(args: {
          * `contactPerson` 本身就是核心链路常驻工具（见工具分层注释），
          * 不受路由影响，不需要额外补。
          */
-        const retryResult = await trackedGatewayCall("fact-retry", modelId, () =>
+        const retryResult = await trackedGatewayCall("fact-retry", modelId, (rec) =>
         generateText({
           abortSignal: turnAbortSignal(),
           model: getLanguageModel(modelId),
@@ -4530,6 +4535,7 @@ export async function runColivingTurn(args: {
           toolChoice: "required",
           // 可能要先调 pickSchedule 再 chooseSchedule 再 sendReply，给够步数余量
           stopWhen: [hasToolCall("sendReply"), stepCountIs(4)],
+          ...rec.stepOptions,
         }));
         // 同一个盲区第四处——这条循环本身是这次泛化才新写的，写的时候
         // 就该顺手聚合，结果还是漏了，说明这个盲区已经不是"忘了"这么
@@ -4693,7 +4699,7 @@ export async function runColivingTurn(args: {
               stage: "finalFix",
               defaultModelId: modelId,
             });
-            const finalFix = await trackedGatewayCall("finalFix", finalFixModelId, () =>
+            const finalFix = await trackedGatewayCall("finalFix", finalFixModelId, (rec) =>
             generateText({
               abortSignal: turnAbortSignal(),
               // **relay 最终聚焦修正升级强模型的地方。** 走到这里意味着初稿和
@@ -4745,6 +4751,7 @@ export async function runColivingTurn(args: {
               ...(finalNeedsAction
                 ? { stopWhen: [hasToolCall("sendReply"), stepCountIs(4)] }
                 : {}),
+              ...rec.stepOptions,
             }));
             for (const step of finalFix.steps) {
               for (const call of step.toolCalls ?? []) {

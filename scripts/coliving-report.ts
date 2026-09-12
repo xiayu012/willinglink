@@ -25,6 +25,10 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+// 计费面板是**纯函数模块**（只用 `import type` 引 gateway-ledger，运行时不
+// 依赖 server-only 的台账），所以普通 tsx 脚本也能安全 import。
+import { renderLedgerPanelHtml } from "../lib/chat/coliving/ledger-report";
+import type { LedgerSnapshot } from "../lib/chat/coliving/gateway-ledger";
 
 // ── 输入数据契约（由 coliving-eval 产出，本脚本只读不改） ────────────────
 type TurnRecord = {
@@ -55,6 +59,11 @@ type ScenarioResult = {
   failures: string[];
   turns: TurnRecord[];
   judge: { pass: boolean; verified: boolean; findings: JudgeFinding[] };
+  /**
+   * 本场景的计费台账快照（新版报告有；旧报告整个字段缺席）。**可选**：
+   * 缺了不是错，面板会明说"本报告没有计费台账"，不会把未知当 0。
+   */
+  cost?: LedgerSnapshot;
   ms: number;
 };
 
@@ -174,6 +183,9 @@ function loadReport(file: string): ScenarioResult[] {
               }))
             : [],
       },
+      // 计费台账原样透传（面板自己兼容新版/旧版/缺席三态）；这里不深拷，
+      // 渲染是只读的。旧报告没有这个字段 → undefined，面板显示"无台账"。
+      cost: (o.cost as LedgerSnapshot | undefined) ?? undefined,
       ms: typeof o.ms === "number" ? o.ms : 0,
     });
   }
@@ -357,12 +369,17 @@ function renderScenario(r: ScenarioResult): string {
     .map((t, i) => renderTurn(t, i, byTurn.get(i) ?? []))
     .join("");
 
+  // 计费证据（generation / step / transport / token / cost）——放在对话
+  // 之前，跟"结构性失败"挨着，方便一眼看到这一场的花销与未知项。
+  const costPanel = renderLedgerPanelHtml(r.cost);
+
   // 失败的默认展开、通过的默认折叠——用户先看有问题的
   return `<details class="scenario${ok ? "" : " failing"}" id="s-${slug(r.id)}"${ok ? "" : " open"}>
       <summary><span class="sid">${escapeHtml(r.id)}</span>${badges}</summary>
       <div class="scenario-body">
         ${source}
         ${failures}
+        ${costPanel}
         <div class="chat">${turns}</div>
         ${orphanHtml}
       </div>
@@ -616,6 +633,36 @@ h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
 .sev-low { border-color: var(--border); background: var(--low-bg); }
 .sev-low .sev { background: var(--low); color: var(--panel); }
 .sev-low, .sev-low .finding-head { color: var(--low); }
+
+/* ── 计费证据面板 ── */
+.cost { margin-bottom: 14px; font-size: 13px; }
+.cost > summary {
+  cursor: pointer; color: var(--muted); padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.cost-body {
+  padding: 10px 12px; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.cost-note { color: var(--muted); font-size: 12px; margin: 6px 0 0; white-space: pre-wrap; }
+.cost-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 4px 14px;
+}
+.cost-item { display: flex; gap: 8px; align-items: baseline; }
+.cost-item .ck { color: var(--muted); }
+.cost-item .cv { font-variant-numeric: tabular-nums; font-weight: 600; }
+.cost-table {
+  width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cost-table th, .cost-table td {
+  text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.cost-table th { color: var(--muted); font-weight: 600; }
+.cost-table.wide { display: block; overflow-x: auto; }
+.cost-sub { font-weight: 600; color: var(--muted); margin-top: 10px; }
 
 @media (max-width: 640px) {
   .bubble { max-width: 92%; }

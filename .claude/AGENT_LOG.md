@@ -6394,3 +6394,11 @@ CODEX_TASK：给自包含协商状态机接「薄 LLM 意图解析」，用 5 �
 - 不新增僵硬成熟度或固定生命周期；任务能力可按新证据扩展、修正、拆分、合并、改名或撤销旧判断。实质改动同步维护当前边界和受影响的回归证据。
 
 ---
+# 2026-09-11 · 成本工程任务 A：逐层计费证据已验收
+
+- **Claude Code 实现证据**：Claude Sonnet medium 实际编辑 `gateway-ledger.ts`、`ledger-report.ts`、turn/critic/judge/embedding 接点、eval/report CLI 与独立 inspect。v2 快照按 generation 保存已完成 step、token/cache/cost/finish/provider id、总耗时和 run/scenario/turn 标签；transport retry 与逐 step 耗时不可观测时为 null。
+- **Codex 第一轮复审退回**：发现混合已知/未知 token 会被显示成完整总数，以及成功结果缺 `result.steps` 会丢 hook/顶层证据。Claude 修正并新增 V8-1、V8-2a/b/c 行为测试；正常 result steps 与 hook 不重复累计。
+- **Codex 独立验证**：`pnpm.cmd coliving:ledger-inspect` 16 项通过；`pnpm.cmd coliving:quality` 141 项通过；旧 `2026-09-06T05-44-16-633Z.json` 实际渲染成功并明确“无台账/未知不按 0”；`git diff --check` 通过；`tsc --noEmit` 仅既有 `speech-input.tsx:55-56` 两条 TS2717。
+- **边界**：没有运行 `coliving-eval`，没有 Vercel/模型费用、数据库写入或真实发送；未改 prompt/doctrine/模型路由/住户可见行为。A 不解决跨进程共享预算，后者仍是 B。一次性 V8 任务卡与复审卡在验收后删除，避免死任务干扰后续模型。
+
+---

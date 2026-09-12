@@ -315,7 +315,7 @@ export async function critique(args: CriticInput): Promise<Verdict> {
     hasSafetySensitiveTopic(args.facts);
   try {
     const modelId = criticModelId(forceSensitive, args.forceStrong);
-    const result = await trackedGatewayCall("critic", modelId, () =>
+    const result = await trackedGatewayCall("critic", modelId, (rec) =>
       generateText({
       abortSignal: AbortSignal.timeout(CRITIC_TIMEOUT_MS),
       model: getLanguageModel(modelId),
@@ -354,6 +354,7 @@ export async function critique(args: CriticInput): Promise<Verdict> {
             "打回原因解析成了乱码，喂给重写模型时更糟）。",
         },
       ],
+      ...rec.stepOptions,
       })
     );
 
@@ -577,7 +578,7 @@ export async function critiqueBatch(
   }
   try {
     const batchModelId = criticModelId(forceSensitive, forceStrong);
-    const result = await trackedGatewayCall("critic-batch", batchModelId, () =>
+    const result = await trackedGatewayCall("critic-batch", batchModelId, (rec) =>
       generateText({
       abortSignal: AbortSignal.timeout(CRITIC_TIMEOUT_MS),
       model: getLanguageModel(batchModelId),
@@ -618,6 +619,7 @@ export async function critiqueBatch(
             "直接说是哪句话——引号会把 JSON 撑破（真出过）。",
         },
       ],
+      ...rec.stepOptions,
       })
     );
 

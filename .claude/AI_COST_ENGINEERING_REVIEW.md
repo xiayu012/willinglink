@@ -1,6 +1,6 @@
 # AI 工程成本审查与长期执行队列
 
-审查日期：2026-09-11（本地）；代码基线：`9a65fe5`。状态：**调查与派单已完成，下面的工程修复尚未实现**。
+审查日期：2026-09-11（本地）；代码基线：`9a65fe5`。状态：**任务 A 已验收；B/C/D/E/S 仍是可动态调整的候选队列**。
 用途：后续 5.6/Codex 恢复工作时直接使用，不依赖本轮聊天。本文不进入生产提示词，不另造任务能力或业务 SOP。
 
 ## 给老板的结论
@@ -136,9 +136,23 @@ AI Gateway 技能用于导航；其中“无程序化 metrics API”等描述与
 
 ## 给后续 5.6 的执行任务
 
-以下是基于本次代码审查的**工程提案**，不是 doctrine 原文，也不是行业规定。顺序可随证据调整；一次只派一个有边界的任务给 Claude Code。默认先 A，下一轮 B；安全发现 F8 可以独立提前。
+以下是基于本次代码审查的**工程提案**，不是 doctrine 原文，也不是行业规定。顺序可随证据调整；一次只派一个有边界的任务给 Claude Code。A 已完成；后续从 B/C/D/E/S 按新证据选择，安全发现 F8 可以独立提前。
 
-### A · 补齐计费单位和证据（优先，尚未实现）
+### A · 补齐计费单位和证据（2026-09-11 已验收）
+
+- Claude Code 实现现有 ledger 的 v2 明细、step hook、embedding 纳管、run/scenario/turn 标签、终端与 HTML 报告以及 mocked 行为测试；没有改 prompt、doctrine、模型路由或住户可见行为。
+- 新报告严格区分 generation、已完成 step 与当前 SDK 不可观测的 transport attempts；token/cost 缺失保持 unknown，混合已知 token 明示“部分已知，下界”，成功返回缺 `steps` 时保留 hook 或顶层证据。
+- 保留旧 `calls`/`max-model-calls` 和 v1 快照读取；新 CLI 准确命名为 `--max-generations`，旧参数继续兼容。预算仍只限制 generation，不冒充 HTTP 请求级硬限额。
+- Codex 独立验证：`coliving:ledger-inspect` 16/16、`coliving:quality` 141/141、旧 JSON 报告可生成 HTML、`git diff --check` 通过；tsc 只有既有 `speech-input.tsx:55-56` 两条 TS2717。本任务零 Vercel/模型调用、零数据库写入、零真实发送。
+- 仍然不可观测：SDK 内部 transport retry 次数、逐 step 耗时；均保存为 null 并带说明。跨进程共享预算仍属于 B，没有在 A 中假装解决。
+
+| 调用范围 | A 的状态 | 说明 |
+|---|---|---|
+| `turn.ts` 主生成、补回复、补联系、redo、事实重试、最终修正 | 已纳管 | 共六类 stage，文本 generation 使用 step hook |
+| `critic.ts` 单条/批量审稿 | 已纳管 | 独立 generation，不并入父调用重复计费 |
+| `evals/judge.ts` 语义判定 | 已纳管 | 继承 run/scenario，turnIndex 为空 |
+| `embedding.ts` 单条/批量向量化 | 已纳管 | 作为独立 embedding generation；只有上游实际提供的总 token/cost |
+| `outreach.ts`、rental、XHS、coordination 及其它产品入口 | 未纳管 | 不属于当前 coliving-eval 可达链；A 不宣称全项目覆盖 |
 
 - 范围：现有 gateway-ledger、评测报告与相关调用边界；不要新建通用 agent 框架，不先改 prompt/路由。
 - 在现有台账上区分 generation/step/可观测的 transport attempt；Gateway 内部重试若不可观测就标未知，不伪称全部 HTTP 已计数。
@@ -197,4 +211,4 @@ AI Gateway 技能用于导航；其中“无程序化 metrics API”等描述与
 
 ## 当前接棒点
 
-下一次老板说继续此成本工作线：先派 **A**，不重跑 corpus-031，不执行 V7 的历史 19 阶段，不重复搭“已有缓存/已有台账/已有历史重审”。发现本审查与新代码不符，改证据和计划，不硬按旧方案实施。
+下一次老板说继续此成本工作线：A 已完成，不重做；从 **B/C/D/E/S** 中按当时证据选择一个有界任务，不自动全队列执行，不重跑 corpus-031。发现本审查与新代码不符，改证据和计划，不硬按旧方案实施。

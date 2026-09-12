@@ -618,7 +618,7 @@ export async function judgeConversation(args: {
 
   try {
     const judgeModel = judgeModelId();
-    const result = await trackedGatewayCall("judge", judgeModel, () =>
+    const result = await trackedGatewayCall("judge", judgeModel, (rec) =>
       generateText({
       abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
       model: getLanguageModel(judgeModel),
@@ -657,6 +657,7 @@ export async function judgeConversation(args: {
             "不要为了显得有产出硬找。",
         },
       ],
+      ...rec.stepOptions,
       })
     );
 

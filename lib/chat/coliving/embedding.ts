@@ -2,6 +2,7 @@ import "server-only";
 
 import { embed, embedMany } from "ai";
 import { getEmbeddingModel } from "@/lib/ai/providers";
+import { trackedGatewayCall } from "./gateway-ledger";
 
 /**
  * 判例与资料的向量化。
@@ -24,10 +25,15 @@ export function toVectorLiteral(v: number[]): string {
 }
 
 export async function embedOne(text: string): Promise<number[]> {
-  const { embedding } = await embed({
-    model: getEmbeddingModel(modelId()),
-    value: text,
-  });
+  const id = modelId();
+  // embedding 没有 step hook：整个调用是一步，走台账的 embedding 口径
+  // （tokens 只有总量、无缓存明细）。生产无台账时原样透传。
+  const { embedding } = await trackedGatewayCall(
+    "embed",
+    id,
+    () => embed({ model: getEmbeddingModel(id), value: text }),
+    { kind: "embedding" }
+  );
   return embedding;
 }
 
@@ -35,9 +41,12 @@ export async function embedBatch(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) {
     return [];
   }
-  const { embeddings } = await embedMany({
-    model: getEmbeddingModel(modelId()),
-    values: texts,
-  });
+  const id = modelId();
+  const { embeddings } = await trackedGatewayCall(
+    "embed-batch",
+    id,
+    () => embedMany({ model: getEmbeddingModel(id), values: texts }),
+    { kind: "embedding" }
+  );
   return embeddings;
 }
