@@ -42,7 +42,7 @@ import {
   uncoveredBlockedPersonIds,
   scheduleInquiryConfirmation,
 } from "../lib/chat/coliving/turn";
-// 严格口径后唯一保留的受约束第三方出站：只测其确定性解析/固定文本/收据，
+// 严格口径后保留的两项受约束第三方出站：只测其确定性解析/固定文本/收据，
 // 不涉及任何模型调用，也不触发任何写入。
 import {
   looksLikePersonalItemReminder,
@@ -51,6 +51,13 @@ import {
   personalItemReminderReceipt,
   recognizePersonalItemReminder,
 } from "../lib/chat/coliving/personal-item-reminder";
+import {
+  looksLikeNightLaundryReminder,
+  NIGHT_LAUNDRY_REMINDER_FORM,
+  NIGHT_LAUNDRY_REMINDER_TEXT,
+  nightLaundryReminderReceipt,
+  recognizeNightLaundryReminder,
+} from "../lib/chat/coliving/night-laundry-reminder";
 // 只留离线视图选择器：生产已只生成，quality 脚本不再断言批判器生产接线/选型。
 import { selectCriticRubric } from "../lib/chat/coliving/critic";
 import {
@@ -1494,9 +1501,10 @@ async function main() {
   check("运行时上下文不再预先宣传默认未暴露的查询工具", () => {
     const ctx = readFileSync("lib/chat/coliving/context.ts", "utf8");
     assert(!ctx.includes("你还能查什么"), "查询工具默认不暴露后，上下文不应再宣传它们");
-    // 严格口径后不再有泛用主动联系人；上下文只保留「个人物品提醒」这一种受约束功能。
+    // 严格口径后不再有泛用主动联系人；上下文只保留两项受约束功能。
     assert(!ctx.includes("你可以主动联系这屋里的其他人"), "撤掉泛用主动联系人后不得再宣传它");
-    assert(ctx.includes("个人物品使用提醒"), "唯一受约束的第三方功能必须在上下文里如实陈述");
+    assert(ctx.includes("个人物品使用提醒"), "个人物品提醒必须在上下文里如实陈述");
+    assert(ctx.includes("夜间洗衣提醒"), "夜间洗衣提醒必须在上下文里如实陈述");
   });
   check("stale-skipped contactPerson outbound does not count as contacted in judge trace", () => {
     // 旧回合跳过的消息不能出现在 outbound 里；judge 不会看到"已联系"
@@ -1770,12 +1778,18 @@ async function main() {
     // 指引句里嵌的是带占位符的固定句式，因此必然命中「个人物品」正向哨兵。
     assert(PERSONAL_ITEM_REMINDER_FORM.includes("个人物品"));
 
-    // 第 3、4 轮：未开放的深夜洗衣 / 浴室头发 → 落回普通对话，零第三方出站。
+    // 第 3、4 轮：自由文本的深夜洗衣 / 浴室头发 → 落回普通对话，零第三方出站。
+    // 这两轮都不是窄命令形态，所以新增的夜间洗衣提醒（见 corpus-034）也不会命中。
     for (const [i, turn] of scenario.turns.slice(2).entries()) {
       assert.equal(
         looksLikePersonalItemReminder(turn.text),
         false,
         `第${i + 3}轮不是个人物品提醒，必须落回普通对话`
+      );
+      assert.equal(
+        looksLikeNightLaundryReminder(turn.text),
+        false,
+        `第${i + 3}轮不是夜间洗衣提醒的窄命令形态，必须落回普通对话`
       );
       assert.deepEqual(
         turn.expect?.mustNotContactNames,
@@ -1817,6 +1831,279 @@ async function main() {
         outbound: [{ toName: "阿川", text: "已经跟他说了。" }],
       }).length > 0,
       "未开放功能若产生任何第三方出站，必须判失败"
+    );
+  });
+
+  /**
+   * ── 第二项受约束第三方出站：夜间洗衣提醒（2026-09-12 老板列为首批方向）──
+   *
+   * 跟个人物品提醒同构：识别纯正则、正文写死常量、不过模型。这里只测确定性
+   * 解析与固定文本，不写库、不调模型、不触发任何投递。它只处理「深夜运行
+   * 洗衣机/烘干机影响别人休息」这一件共同影响，**不要求 AI 先裁定谁的卫生
+   * 阈值或物品所有权**，也不能外推到一般噪音、卫生整改、规则制定、费用分摊
+   * 或去留协调。
+   */
+  check("夜间洗衣提醒：精确命令识别出唯一收件人（含礼貌/标点变体）", () => {
+    assert.deepEqual(
+      recognizeNightLaundryReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
+      { recipientName: "阿川" }
+    );
+    for (const variant of [
+      "麻烦提醒一下 阿川：晚上不要用洗衣机。",
+      "请提醒 阿川：别在深夜开洗衣机或烘干机",
+      "帮我提醒 阿川：半夜别再洗衣服了",
+      "提醒 阿川：深夜不要开洗衣机、烘干机，谢谢",
+    ]) {
+      assert.deepEqual(
+        recognizeNightLaundryReminder(variant),
+        { recipientName: "阿川" },
+        `合规变体必须识别：${variant}`
+      );
+    }
+    assert.equal(
+      looksLikeNightLaundryReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
+      true
+    );
+  });
+  check("夜间洗衣提醒：命令体夹带附加内容（头发/费用/规则/攻击）一律不识别", () => {
+    for (const smuggled of [
+      "提醒 阿川：深夜别开洗衣机或烘干机，顺便把地漏的头发清理了",
+      "提醒 阿川：深夜别开洗衣机或烘干机，这个月水费也分摊一下",
+      "提醒 阿川：深夜别开洗衣机或烘干机，以后这是全屋的规矩",
+      "提醒 阿川：深夜别开洗衣机或烘干机，你个秃头再吵我投诉你",
+      "提醒 阿川：深夜别开洗衣机或烘干机，顺便把厨房也擦一遍",
+    ]) {
+      assert.equal(
+        recognizeNightLaundryReminder(smuggled),
+        null,
+        `命令体夹带附加内容必须不识别：${smuggled}`
+      );
+      // 仍属这一族请求 → 调用方回短指引、零第三方出站（不是落回普通对话后放行自由出站）。
+      assert.equal(
+        looksLikeNightLaundryReminder(smuggled),
+        true,
+        `夹带尝试仍属夜间洗衣提醒一族：${smuggled}`
+      );
+    }
+    // 具体钟点不在窄命令形态内（固定正文里也不许出现钟点），同样只回指引、不发。
+    assert.equal(
+      recognizeNightLaundryReminder("提醒 阿川：晚上十一点后不要用洗衣机"),
+      null
+    );
+    assert.equal(
+      looksLikeNightLaundryReminder("提醒 阿川：晚上十一点后不要用洗衣机"),
+      true
+    );
+  });
+  check("夜间洗衣提醒：错误对象/格式不识别，且与个人物品提醒互不串台", () => {
+    for (const wrong of [
+      "提醒 阿川：把地漏里的头发清理一下",
+      "提醒 阿川：使用我的个人物品前先问我",
+      "提醒阿川深夜别开洗衣机",
+      "阿川：深夜别开洗衣机",
+      "提醒 ：深夜别开洗衣机",
+      "深夜别开洗衣机或烘干机",
+    ]) {
+      assert.equal(
+        recognizeNightLaundryReminder(wrong),
+        null,
+        `错误对象/格式必须不识别：${wrong}`
+      );
+    }
+    // 两项功能互不识别对方的命令与宽松线索（新增第二项不得让第一项回退出错）。
+    assert.deepEqual(
+      recognizePersonalItemReminder("提醒 阿川：使用我的个人物品前先问我"),
+      { recipientName: "阿川" }
+    );
+    assert.equal(
+      recognizeNightLaundryReminder("提醒 阿川：使用我的个人物品前先问我"),
+      null
+    );
+    assert.equal(
+      recognizePersonalItemReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
+      null
+    );
+    assert.equal(
+      looksLikeNightLaundryReminder("提醒 阿川：使用我的个人物品前先问我"),
+      false
+    );
+    assert.equal(
+      looksLikePersonalItemReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
+      false
+    );
+  });
+  check("夜间洗衣提醒：固定第三方正文不含姓名、来源、具体钟点或夹带内容", () => {
+    assert.equal(
+      NIGHT_LAUNDRY_REMINDER_TEXT,
+      "深夜使用洗衣机或烘干机容易影响他人休息，请尽量避开深夜时段。"
+    );
+    for (const forbidden of [
+      "阿川", "小禾", "头发", "地漏", "水费", "费用", "规矩", "规则",
+      "全屋", "凌晨", "四点", "点钟",
+    ]) {
+      assert(
+        !NIGHT_LAUNDRY_REMINDER_TEXT.includes(forbidden),
+        `固定第三方正文不得含「${forbidden}」：${NIGHT_LAUNDRY_REMINDER_TEXT}`
+      );
+    }
+    assert.equal(
+      NIGHT_LAUNDRY_REMINDER_FORM,
+      "提醒 <室友名字>：深夜别开洗衣机或烘干机"
+    );
+    const receipt = nightLaundryReminderReceipt("阿川");
+    assert(
+      receipt.includes("阿川") &&
+        receipt.includes("深夜") &&
+        (receipt.includes("洗衣机") || receipt.includes("烘干机")),
+      `收据必须点名收件人并复述固定功能：${receipt}`
+    );
+  });
+  check("夜间洗衣提醒：两项受约束出站都在主生成前接线，只报各自路径名", () => {
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const personalIdx = turnSrc.indexOf("await deliverPersonalItemReminder(");
+    const laundryIdx = turnSrc.indexOf("await deliverNightLaundryReminder(");
+    const mainGenIdx = turnSrc.indexOf('trackedGatewayCall("main"');
+    assert(personalIdx > 0, "个人物品提醒必须在 turn.ts 接线");
+    assert(laundryIdx > personalIdx, "夜间洗衣提醒必须接在个人物品提醒之后");
+    assert(mainGenIdx > laundryIdx, "两项受约束出站都必须在主生成之前");
+    assert(turnSrc.includes('toolName: "personalItemReminder"'));
+    assert(turnSrc.includes('toolName: "nightLaundryReminder"'));
+  });
+  check("corpus-034 严格口径：合规夜间提醒恰有一条固定出站，夹带/自由文本零第三方", () => {
+    const raw = JSON.parse(
+      readFileSync(
+        "lib/chat/coliving/evals/scenarios/corpus-034-night-laundry-reminder-2026-09-12.json",
+        "utf8"
+      )
+    );
+    const scenario = validateScenario(raw, "corpus-034.json");
+    assert.equal(
+      scenario.turns.length,
+      4,
+      "corpus-034 应有四轮：合规/夹带/个人物品回归/自由文本"
+    );
+
+    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // 第 1 轮：合规夜间洗衣命令 → 唯一固定出站 + 真话收据。
+    const t1 = scenario.turns[0];
+    assert.deepEqual(t1.expect?.mustUseTools, ["nightLaundryReminder"]);
+    assert.deepEqual(t1.expect?.mustContactNames, ["阿川"]);
+    assert.deepEqual(t1.expect?.mustNotContactNames, ["小禾"]);
+    assert.equal(
+      recognizeNightLaundryReminder(t1.text)?.recipientName,
+      "阿川",
+      "第 1 轮必须能被确定性识别为发给阿川的夜间洗衣提醒"
+    );
+    assert.deepEqual(
+      t1.expect?.outboundMustMatch?.[0],
+      `^${escapeRegExp(NIGHT_LAUNDRY_REMINDER_TEXT)}$`,
+      "出站正文锚定正则必须逐字来自 NIGHT_LAUNDRY_REMINDER_TEXT"
+    );
+    for (const pattern of t1.expect?.outboundMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
+        `第 1 轮正向哨兵「${pattern}」必须命中固定正文：${NIGHT_LAUNDRY_REMINDER_TEXT}`
+      );
+    }
+    for (const pattern of t1.expect?.outboundMustNotMatch ?? []) {
+      assert(
+        !new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
+        `固定正文不得命中第 1 轮反向哨兵「${pattern}」`
+      );
+    }
+    const receipt = nightLaundryReminderReceipt("阿川");
+    for (const pattern of t1.expect?.replyMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(receipt),
+        `第 1 轮收据必须命中「${pattern}」：${receipt}`
+      );
+    }
+    // 判法自检：固定正文作为唯一出站时判过；发给当前人 / 正文被夹带必须判失败。
+    assert.deepEqual(
+      evaluateTurnExpectation(t1.expect, {
+        toolsUsed: ["nightLaundryReminder"],
+        reply: receipt,
+        outbound: [{ toName: "阿川", text: NIGHT_LAUNDRY_REMINDER_TEXT }],
+      }),
+      [],
+      "合规夜间洗衣提醒出站不该被判失败"
+    );
+    assert(
+      evaluateTurnExpectation(t1.expect, {
+        toolsUsed: ["nightLaundryReminder"],
+        reply: receipt,
+        outbound: [{ toName: "小禾", text: NIGHT_LAUNDRY_REMINDER_TEXT }],
+      }).length > 0,
+      "出站发给当前人小禾必须判失败"
+    );
+    assert(
+      evaluateTurnExpectation(t1.expect, {
+        toolsUsed: ["nightLaundryReminder"],
+        reply: receipt,
+        outbound: [
+          { toName: "阿川", text: `${NIGHT_LAUNDRY_REMINDER_TEXT}顺便把头发清了` },
+        ],
+      }).length > 0,
+      "出站正文被夹带、不再逐字等于常量必须判失败"
+    );
+
+    // 第 2 轮：命令体夹带 → 整体不识别（走短指引），零第三方出站。
+    const t2 = scenario.turns[1];
+    assert(looksLikeNightLaundryReminder(t2.text), "第 2 轮仍属夜间洗衣提醒一族");
+    assert.equal(
+      recognizeNightLaundryReminder(t2.text),
+      null,
+      "夹带头发/水费/全屋规矩的命令体必须整体不识别"
+    );
+    assert.deepEqual(t2.expect?.mustNotContactNames, ["阿川", "小禾"]);
+    assert(
+      (t2.expect?.mustNotUseTools ?? []).includes("nightLaundryReminder") &&
+        (t2.expect?.mustNotUseTools ?? []).includes("personalItemReminder") &&
+        (t2.expect?.mustNotUseTools ?? []).includes("contactPerson"),
+      "夹带轮不得走任何第三方出站工具"
+    );
+    assert(
+      evaluateTurnExpectation(t2.expect, {
+        toolsUsed: [],
+        reply: "好的。",
+        outbound: [{ toName: "阿川", text: "好。" }],
+      }).length > 0,
+      "夹带轮若产生任何第三方出站必须判失败"
+    );
+
+    // 第 3 轮：个人物品提醒不回归——第二项功能不得遮蔽第一项。
+    const t3 = scenario.turns[2];
+    assert.deepEqual(
+      recognizeNightLaundryReminder(t3.text),
+      null,
+      "个人物品命令不得被夜间洗衣识别"
+    );
+    assert.deepEqual(recognizePersonalItemReminder(t3.text), {
+      recipientName: "阿川",
+    });
+    assert.deepEqual(t3.expect?.mustUseTools, ["personalItemReminder"]);
+    assert.deepEqual(t3.expect?.mustContactNames, ["阿川"]);
+    for (const pattern of t3.expect?.outboundMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(PERSONAL_ITEM_REMINDER_TEXT),
+        `个人物品正向哨兵必须命中其固定正文：${pattern}`
+      );
+    }
+
+    // 第 4 轮：自由文本深夜洗衣（不是窄命令形态）→ 零第三方出站。
+    const t4 = scenario.turns[3];
+    assert.equal(
+      looksLikeNightLaundryReminder(t4.text),
+      false,
+      "自由文本不是窄命令形态，必须落回普通对话"
+    );
+    assert.equal(looksLikePersonalItemReminder(t4.text), false);
+    assert.deepEqual(t4.expect?.mustNotContactNames, ["阿川", "小禾"]);
+    assert(
+      (t4.expect?.mustNotUseTools ?? []).includes("nightLaundryReminder") &&
+        (t4.expect?.mustNotUseTools ?? []).includes("contactPerson"),
+      "自由文本轮不得调用任何第三方出站工具"
     );
   });
 
@@ -4846,11 +5133,11 @@ async function main() {
    * "已移除"的注释允许保留；迁移历史不属运行时，另行排除）。
    * Twilio 短信路由与个人物品受限提醒必须原样保留并可投递。
    */
-  check("短信唯一：CHANNELS 不再含 wecom，企业微信运行路径全部删除", () => {
+  check("短信唯一：CHANNELS 只剩 web/sms，企业微信运行路径全部删除", () => {
     assert.deepEqual(
       [...CHANNELS],
-      ["web", "xhs", "sms"],
-      "CHANNELS 不得再包含 wecom（合租房只剩短信）"
+      ["web", "sms"],
+      "CHANNELS 只能含 web/sms（企业微信与小红书私信均已下线）"
     );
     for (const p of [
       "app/api/wecom/messages/route.ts",
@@ -4906,6 +5193,80 @@ async function main() {
       hits.length,
       0,
       `运行时代码不得残留 wecom 调用/字面量：${hits.join(", ")}`
+    );
+  });
+
+  /**
+   * ── 小红书私信下线，房源采集与评论草稿保留（老板 2026-09-12 严格口径）───────
+   *
+   * 收窄的是"实时消息通道"：私信 adapter（/api/xhs/messages）、私信提示词与
+   * 出站排版（lib/chat/xhs-dm.ts）、集简云出站（lib/chat/jijyun.ts）运行文件
+   * 全部删除，`xhs` 只作为评论草稿的帖主身份命名空间留在 `ConversationSource`
+   * 里，不再是 `CHANNELS` 的实时渠道。
+   * 房源采集与帖子评论草稿是**其它产品能力，必须仍在**——不能连它们一起删掉。
+   */
+  check("小红书私信下线：私信/集简云运行文件已删除，房源采集与评论草稿保留", () => {
+    for (const p of [
+      "app/api/xhs/messages/route.ts",
+      "lib/chat/xhs-dm.ts",
+      "lib/chat/jijyun.ts",
+      "lib/chat/redact-contact.ts",
+    ]) {
+      assert(!existsSync(p), `小红书私信运行文件必须删除：${p}`);
+    }
+    assert(
+      !(CHANNELS as readonly string[]).includes("xhs"),
+      "CHANNELS 不得含 xhs（私信通道已下线，xhs 只是评论草稿的身份命名空间）"
+    );
+    for (const p of [
+      "app/api/xhs/rental-ingest/route.ts",
+      "app/api/xhs/comment-reply/route.ts",
+    ]) {
+      assert(existsSync(p), `小红书房源采集/评论草稿路由必须保留：${p}`);
+    }
+    // 运行时代码不得残留私信专属标识（XHS_DM 模型名、JIJYUN 出站 webhook）。
+    // 只查非注释行（本检查文件为写断言必须含这些字面量，按路径排除；
+    // 解释"已移除"的注释允许保留；迁移历史不属运行时，另行排除）。
+    const selfPath = "scripts/coliving-quality-inspect.ts";
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name).replace(/\\/g, "/");
+        if (e.isDirectory()) {
+          if (
+            e.name === "node_modules" ||
+            e.name.startsWith(".") ||
+            p.includes("lib/db/migrations")
+          ) {
+            continue;
+          }
+          walk(p);
+        } else if (/\.tsx?$/.test(e.name) && p !== selfPath) {
+          const lines = readFileSync(p, "utf8").split(/\r?\n/);
+          lines.forEach((line, i) => {
+            const t = line.trim();
+            if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) {
+              return;
+            }
+            if (/XHS_DM|JIJYUN/i.test(line)) hits.push(`${p}:${i + 1}`);
+          });
+        }
+      }
+    };
+    walk("app");
+    walk("lib");
+    walk("scripts");
+    assert.equal(
+      hits.length,
+      0,
+      `运行时代码不得残留小红书私信标识（XHS_DM / JIJYUN）：${hits.join(", ")}`
+    );
+    const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    assert(
+      !Object.keys(pkg.scripts ?? {}).some((k) => /xhs.?dm|jijyun/i.test(k)),
+      "package.json 不得再保留小红书私信命令"
     );
   });
 

@@ -1,0 +1,90 @@
+{
+  "id": "corpus-034-night-laundry-reminder-2026-09-12",
+  "source": "老板 2026-09-12「具体功能逐项开放」第二批方向：夜间洗衣提醒（老板把它列为首批方向之一）。它可处理的共同影响只有一件——深夜运行洗衣机/烘干机影响别人休息，不要求 AI 先裁定谁的卫生阈值或物品所有权。按严格口径，这个功能也做成程序化受约束模块（lib/chat/coliving/night-laundry-reminder.ts）：纯正则识别窄命令、正文写死常量、校验全过才发、整条链路不调 LLM，且不能从这里外推到一般噪音、一般清洁、规则制定、费用或去留协调。本场景隔离检验四种确定性边界，全部只查结构性事实与文本范围，不宣称语言质量：（1）合规命令「提醒 阿川：深夜别开洗衣机或烘干机」必须恰好产生一条发给阿川的固定出站，且回给发起人一条真话收据；（2）命令体夹带额外诉求（清理地漏头发 / 分摊水费 / 立全屋规矩）时，识别整体失败，零第三方出站，只回一句短的结构化指引；（3）个人物品提醒不因新增第二项功能而回归：同一条合规个人物品命令仍恰好产生它自己的那条固定出站；（4）深夜洗衣的自由文本请求（不是窄命令形态）仍走普通对话，不得产生任何第三方出站。第 1/2/3 条完全走代码（纯正则、固定常量、不调模型）；第 4 条走普通模型对话，靠 activeTools 里已经没有 contactPerson、也没有任何兜底出站来保证第三方出站为零。明确不做：不把一般噪音、卫生整改、规则制定、费用分摊或去留协调包装成新能力，不恢复 generic contactPerson/outreach。机械断言边界：只查发给谁、有没有出站、固定正文是否逐字命中模块常量、以及出站里不得出现收件人姓名或夹带内容；这些证明不了出站读起来自然或语气是否合适，那留给 semantic judge 与人工逐轮阅读。已预置两人确认姓名与既有 AI 协调员介绍，隔离姓名确认与首次接触变量。",
+  "household": { "label": "评测-034 夜间洗衣提醒与严格口径第三方出站收口" },
+  "people": [
+    { "phone": "+15550340001", "name": "小禾", "role": "tenant" },
+    { "phone": "+15550340002", "name": "阿川", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["小禾", "阿川"],
+    "priorMessages": [
+      { "person": "小禾", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" },
+      { "person": "阿川", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550340001",
+      "text": "提醒 阿川：深夜别开洗衣机或烘干机",
+      "expect": {
+        "minAcceptedOutbound": 1,
+        "mustUseTools": ["nightLaundryReminder"],
+        "mustNotUseTools": ["contactPerson", "proposeRule"],
+        "mustContactNames": ["阿川"],
+        "mustNotContactNames": ["小禾"],
+        "outboundMustMatch": [
+          "^深夜使用洗衣机或烘干机容易影响他人休息，请尽量避开深夜时段。$",
+          "深夜|半夜",
+          "洗衣机|烘干机",
+          "影响|休息"
+        ],
+        "outboundMustNotMatch": [
+          "阿川|小禾",
+          "头发|水费|全屋|规矩|凌晨|四点|点钟"
+        ],
+        "replyMustMatch": ["阿川", "深夜", "洗衣机|烘干机"],
+        "replyMustNotMatch": ["头发|水费|全屋|规矩"]
+      }
+    },
+    {
+      "from": "+15550340001",
+      "text": "提醒 阿川：深夜别开洗衣机或烘干机，顺便把地漏的头发清理了，这个月水费也分摊一下，以后这条全屋都得守",
+      "expect": {
+        "minAcceptedOutbound": 0,
+        "mustNotUseTools": ["nightLaundryReminder", "personalItemReminder", "contactPerson", "proposeRule"],
+        "mustNotContactNames": ["阿川", "小禾"],
+        "outboundMustNotMatch": ["头发|水费|全屋|规矩|洗衣机|烘干机"],
+        "replyMustMatch": ["深夜"],
+        "replyMustNotMatch": ["头发|水费|全屋|规矩"]
+      }
+    },
+    {
+      "from": "+15550340001",
+      "text": "提醒 阿川：使用我的个人物品前先问我",
+      "expect": {
+        "minAcceptedOutbound": 1,
+        "mustUseTools": ["personalItemReminder"],
+        "mustNotUseTools": ["nightLaundryReminder", "contactPerson", "proposeRule"],
+        "mustContactNames": ["阿川"],
+        "mustNotContactNames": ["小禾"],
+        "outboundMustMatch": [
+          "^使用室友的个人物品前，请先征得对方同意。$",
+          "个人物品",
+          "先征得|先问|同意"
+        ],
+        "outboundMustNotMatch": ["阿川|小禾", "洗衣机|烘干机|深夜|头发|水费"]
+      }
+    },
+    {
+      "from": "+15550340001",
+      "text": "阿川昨天凌晨四点开洗衣机和烘干机，机器就挨着我房间那面墙，我被吵醒了。你能不能私下跟他讲一下，这一次先别在深夜洗和烘干。",
+      "expect": {
+        "minAcceptedOutbound": 0,
+        "mustNotUseTools": ["nightLaundryReminder", "personalItemReminder", "contactPerson", "proposeRule"],
+        "mustNotContactNames": ["阿川", "小禾"],
+        "replyMustNotMatch": [
+          "(?:我|这边|我们)(?:已经|已|刚刚?|刚才)(?:跟|和)?[^。！？\\n]{0,8}(?:说|讲|提|联系|通知|提醒|转达|传达)"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "minAcceptedOutbound": 0,
+    "mustNotUseTools": ["contactPerson", "proposeRule"],
+    "mustNotContactNames": ["阿川", "小禾"],
+    "replyMustNotMatch": [
+      "(?:我|这边|我们)(?:已经|已|刚刚?|刚才)(?:跟|和)?[^。！？\\n]{0,8}(?:说|讲|提|联系|通知|提醒|转达|传达)"
+    ]
+  }
+}

@@ -17,6 +17,7 @@ import {
 import { assertCanWrite } from "./guard";
 import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
+import { deliverNightLaundryReminder } from "./night-laundry-reminder";
 import { deliverPersonalItemReminder } from "./personal-item-reminder";
 import * as repo from "./repo";
 import {
@@ -1296,112 +1297,180 @@ export async function runColivingTurn(args: {
   });
 
   /**
-   * **已开放的具体功能：个人物品使用提醒。** 这是严格口径下唯一允许
-   * 发给别的住户的出站路径，必须在普通模型生成**之前**跑：
+   * **已开放的具体功能：受约束第三方出站的公共收口。**
    *
-   *   · 校验全过 → 服务模块写固定第三方出站，这里补一次给当前人的真话回执；
-   *   · 像个人物品提醒但形式/收件人不合规 → 代码直接回短的结构化指引，
+   * 严格口径下允许发给别的住户的出站只有两项固定功能——个人物品使用提醒
+   * （`personal-item-reminder.ts`）与夜间洗衣提醒（`night-laundry-reminder.ts`）。
+   * 两个模块各自做确定性识别、名册校验与写死正文（不调 LLM），这里只把它们的
+   * 结果落成一轮回复：
+   *
+   *   · `sent`   → 服务模块已写固定第三方出站，这里补一次给当前人的真话回执；
+   *   · `guidance` → 形式/收件人不合规，代码直接回短的结构化指引，
    *     **零第三方出站**，不过模型；
-   *   · 完全不像 → 落回下面的普通对话，当前说话人仍得到正常回复。
+   *   · `none`   → 返回 null，落回下面的普通对话，当前说话人仍得到正常回复。
    *
-   * 入站消息与回执各只写一次；第三方 communication 与 decision 由
-   * `personal-item-reminder.ts` 写一次，这里绝不重复。识别、校验、正文
-   * 全部是确定性的（纯正则、固定常量、无 LLM）。
+   * 入站消息与回执各只写一次；第三方 communication 与 decision 由各自模块
+   * 写一次，这里绝不重复。
    */
-  {
-    const reminder = await deliverPersonalItemReminder({
-      householdId: sender.householdId,
-      senderPersonId: sender.personId,
-      senderIsTest: sender.isTest,
-      channel,
-      text: args.text,
-    });
-
-    if (reminder.kind !== "none") {
-      // 跟普通回合一致：先把住户这句话作为入站消息落库，再关联回正在回答的沟通。
-      const inboundId = await repo.appendMessage({
-        conversationId,
-        personId: sender.personId,
-        direction: "inbound",
-        channel,
-        body: args.text,
-      });
-      if (inboundId) {
-        await repo.linkResponse({ personId: sender.personId, messageId: inboundId });
-      }
+  const finishConstrainedReminder = async (
+    result:
+      | { kind: "none" }
+      | { kind: "guidance"; reply: string }
+      | {
+          kind: "sent";
+          recipientName: string;
+          recipientPersonId: string;
+          to: string;
+          text: string;
+          communicationId: string;
+          decisionId: string;
+          receiptText: string;
+        },
+    labels: {
+      /** 命中无模型路径时报告的路径名 */
+      toolName: string;
+      receiptPurpose: string;
+      guidancePurpose: string;
+      guidanceIntent: string;
+      guidanceRationale: string;
+    }
+  ): Promise<TurnOutcome | null> => {
+    if (result.kind === "none") {
+      return null;
     }
 
-    if (reminder.kind === "sent") {
+    // 跟普通回合一致：先把住户这句话作为入站消息落库，再关联回正在回答的沟通。
+    const inboundId = await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "inbound",
+      channel,
+      body: args.text,
+    });
+    if (inboundId) {
+      await repo.linkResponse({ personId: sender.personId, messageId: inboundId });
+    }
+
+    if (result.kind === "sent") {
       // 收据本身也算一次 communication（回复给发信人本人）。第三方 communication
       // 已由服务模块写好，这里复用它的 decision，**不再新建 decision**。
       const receiptCommunicationId = await repo.queueCommunication({
         householdId: sender.householdId,
-        decisionId: reminder.decisionId,
+        decisionId: result.decisionId,
         caseId: null,
         toPersonId: sender.personId,
         channel,
-        purpose: "个人物品提醒回执",
-        body: reminder.receiptText,
+        purpose: labels.receiptPurpose,
+        body: result.receiptText,
       });
       await repo.appendMessage({
         conversationId,
         personId: sender.personId,
         direction: "outbound",
         channel,
-        body: reminder.receiptText,
+        body: result.receiptText,
         communicationId: receiptCommunicationId,
       });
       const reminderOutbound: OutboundMessage = {
-        to: reminder.to,
-        personId: reminder.recipientPersonId,
-        text: reminder.text,
-        communicationId: reminder.communicationId,
+        to: result.to,
+        personId: result.recipientPersonId,
+        text: result.text,
+        communicationId: result.communicationId,
       };
       return codeOnlyOutcome({
-        reply: reminder.receiptText,
+        reply: result.receiptText,
         replyCommunicationId: receiptCommunicationId,
         outbound: [reminderOutbound],
-        decisionId: reminder.decisionId,
-        toolsUsed: ["personalItemReminder"],
+        decisionId: result.decisionId,
+        toolsUsed: [labels.toolName],
       });
     }
 
-    if (reminder.kind === "guidance") {
-      // 形式不合规或收件人校验不过：代码直接给短的结构化指引，零第三方出站，
-      // 不落回模型——否则模型可能自由发挥、也可能自称已经联系过对方。
-      const decisionId = await repo.recordDecision({
+    // 形式不合规或收件人校验不过：代码直接给短的结构化指引，零第三方出站，
+    // 不落回模型——否则模型可能自由发挥、也可能自称已经联系过对方。
+    const decisionId = await repo.recordDecision({
+      householdId: sender.householdId,
+      kind: "reply_only",
+      intent: labels.guidanceIntent,
+      rationale: labels.guidanceRationale,
+      modelId: null,
+    });
+    const receiptCommunicationId = await repo.queueCommunication({
+      householdId: sender.householdId,
+      decisionId,
+      caseId: null,
+      toPersonId: sender.personId,
+      channel,
+      purpose: labels.guidancePurpose,
+      body: result.reply,
+    });
+    await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "outbound",
+      channel,
+      body: result.reply,
+      communicationId: receiptCommunicationId,
+    });
+    return codeOnlyOutcome({
+      reply: result.reply,
+      replyCommunicationId: receiptCommunicationId,
+      outbound: [],
+      decisionId,
+    });
+  };
+
+  /**
+   * **已开放的具体功能（1）：个人物品使用提醒。**
+   * **已开放的具体功能（2）：夜间洗衣提醒。**
+   *
+   * 两者都必须在普通模型生成**之前**跑；命中即收工，不调 LLM。命令体夹带
+   * 任何额外诉求都整体不认，绝不外发（零第三方出站）。
+   */
+  {
+    const outcome = await finishConstrainedReminder(
+      await deliverPersonalItemReminder({
         householdId: sender.householdId,
-        kind: "reply_only",
-        intent: "个人物品提醒指引（程序生成，未调用模型）",
-        rationale:
+        senderPersonId: sender.personId,
+        senderIsTest: sender.isTest,
+        channel,
+        text: args.text,
+      }),
+      {
+        toolName: "personalItemReminder",
+        receiptPurpose: "个人物品提醒回执",
+        guidancePurpose: "个人物品提醒指引",
+        guidanceIntent: "个人物品提醒指引（程序生成，未调用模型）",
+        guidanceRationale:
           "像是个人物品提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
-        modelId: null,
-      });
-      const receiptCommunicationId = await repo.queueCommunication({
-        householdId: sender.householdId,
-        decisionId,
-        caseId: null,
-        toPersonId: sender.personId,
-        channel,
-        purpose: "个人物品提醒指引",
-        body: reminder.reply,
-      });
-      await repo.appendMessage({
-        conversationId,
-        personId: sender.personId,
-        direction: "outbound",
-        channel,
-        body: reminder.reply,
-        communicationId: receiptCommunicationId,
-      });
-      return codeOnlyOutcome({
-        reply: reminder.reply,
-        replyCommunicationId: receiptCommunicationId,
-        outbound: [],
-        decisionId,
-      });
+      }
+    );
+    if (outcome) {
+      return outcome;
     }
-    // kind === "none"：不是个人物品提醒，落回下面的普通对话。
+  }
+
+  {
+    const outcome = await finishConstrainedReminder(
+      await deliverNightLaundryReminder({
+        householdId: sender.householdId,
+        senderPersonId: sender.personId,
+        senderIsTest: sender.isTest,
+        channel,
+        text: args.text,
+      }),
+      {
+        toolName: "nightLaundryReminder",
+        receiptPurpose: "夜间洗衣提醒回执",
+        guidancePurpose: "夜间洗衣提醒指引",
+        guidanceIntent: "夜间洗衣提醒指引（程序生成，未调用模型）",
+        guidanceRationale:
+          "像是夜间洗衣提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
+      }
+    );
+    if (outcome) {
+      return outcome;
+    }
   }
 
   /**

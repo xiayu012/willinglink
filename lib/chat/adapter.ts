@@ -16,7 +16,7 @@ import type { ChannelId, TurnResult } from "./types";
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Xhs-Token",
+  "Access-Control-Allow-Headers": "Content-Type",
 };
 
 export function jsonWithCors(body: unknown, status = 200) {
@@ -29,12 +29,6 @@ export function jsonWithCors(body: unknown, status = 200) {
  */
 export function adaptersEnabled(): boolean {
   return process.env.CHANNEL_ADAPTERS_ENABLED === "1";
-}
-
-/** 可选的共享密钥，与 /api/xhs 系列同款 */
-export function checkToken(request: Request): boolean {
-  const expected = process.env.XHS_API_TOKEN?.trim();
-  return !expected || request.headers.get("x-xhs-token") === expected;
 }
 
 export type InboundMessage = {

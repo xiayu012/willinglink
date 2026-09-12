@@ -19,8 +19,7 @@
 ## 为什么不同步回 TwiML 正文
 
 Twilio 对 webhook 只等约 15 秒，而一轮带 1–2 万字符准则的对话可能压线。
-所以**立刻回空 TwiML，回复走出站 API**——跟 `/api/xhs/messages` 踩过的是同一个坑
-（见 `lib/chat/README.md` 与 AGENT_LOG 里 60 秒被硬杀那次）。
+所以**立刻回空 TwiML，回复走出站 API**（踩坑经过见 AGENT_LOG 里 60 秒被硬杀那次）。
 
 ## 两种大脑
 

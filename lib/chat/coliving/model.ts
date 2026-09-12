@@ -3,7 +3,6 @@
  *
  * 各条链路的模型互相独立，别在这里"顺手统一"：
  *   · 租房搜索      `lib/ai/models.ts` 的 DEFAULT_CHAT_MODEL
- *   · 小红书私信    `lib/chat/xhs-dm.ts` 的 XHS_DM_MODEL
  *   · 合租房管理员  这里
  *
  * 默认 `deepseek/deepseek-v4.1-flash`（老板 2026-09-11 拍板：**全链路统一到

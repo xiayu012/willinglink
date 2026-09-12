@@ -17,7 +17,8 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Anonymous XHS ingestion should not be redirected to guest auth.
+  // 小红书**房源采集与帖子评论草稿**（不是实时消息渠道，私信/出站通道已下线）
+  // 走自己的 token 鉴权，别被 guest-auth 重定向掉。
   if (pathname.startsWith("/api/xhs/")) {
     return NextResponse.next();
   }

@@ -23,13 +23,16 @@ export const channelIdentity = pgTable(
     userId: uuid("userId")
       .notNull()
       .references(() => user.id),
-    /** web / xhs / sms，见 lib/chat/types.ts 的 CHANNELS */
+    /**
+     * 来源命名空间：实时渠道 web / sms（见 lib/chat/types.ts 的 `CHANNELS`），
+     * 以及帖子评论草稿的帖主身份命名空间 `xhs`（非实时渠道，见 `ConversationSource`）。
+     */
     channel: varchar("channel", { length: 32 }).notNull(),
-    /** 该渠道里这个人的唯一 id：xhs userId、手机号 */
+    /** 该来源里这个人的唯一 id：手机号，或帖主命名空间里的小红书 userId */
     externalUserId: varchar("externalUserId", { length: 128 }).notNull(),
     /** 同渠道多账号时区分是哪个客服号收到的；现在可以全是 null */
     accountId: varchar("accountId", { length: 128 }),
-    /** 该渠道里显示的昵称，例如小红书帖主的用户名。只为好认，不参与判重 */
+    /** 该来源里显示的昵称，例如帖主的用户名。只为好认，不参与判重 */
     displayName: varchar("displayName", { length: 128 }),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
   },

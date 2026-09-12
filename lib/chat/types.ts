@@ -1,15 +1,17 @@
 /**
  * 多渠道聊天的公共类型。
  *
- * 一句话原则：**WillingLink 的 conversation 才是聊天本体**，网页/小红书/短信
+ * 一句话原则：**WillingLink 的 conversation 才是聊天本体**，网页/短信
  * 只是同一个 conversation 的不同窗口。所以这里没有"某渠道的会话"这种
  * 概念，只有「一条消息从哪个渠道进来的」。
  *
- * 合租房的实时通信渠道**只有短信**；要接一个新渠道 = 加一个值 + 写一个 adapter。
+ * 老板 2026-09-12 决定：外部**实时消息只做短信（SMS，Twilio）**。小红书私信/
+ * 出站通道已整体下线（`xhs` 不再进 `CHANNELS`）；小红书的**房源采集**与
+ * **帖子评论草稿**仍保留，后者只借 conversation 存帖主身份，见 `ConversationSource`。
  */
 
-/** 已规划的渠道。新增渠道 = 加一个值 + 写一个 adapter，其它都不用动。 */
-export const CHANNELS = ["web", "xhs", "sms"] as const;
+/** 实时通信渠道。新增渠道 = 加一个值 + 写一个 adapter，其它都不用动。 */
+export const CHANNELS = ["web", "sms"] as const;
 
 export type ChannelId = (typeof CHANNELS)[number];
 
@@ -19,17 +21,27 @@ export function isChannelId(value: unknown): value is ChannelId {
   );
 }
 
-/** 某渠道上的一个外部身份，例如 { channel: "sms", externalUserId: "+14085551234" } */
+/**
+ * 会写进 conversation 的来源标签。比 `ChannelId` 多一个 `"xhs"`。
+ *
+ * `"xhs"` 在这里**不是实时消息渠道**：没有 webhook、没有 adapter、没有出站
+ * 路径。它只是 `/api/xhs/comment-reply`（帖子评论草稿）把同一个帖主的帖子
+ * 归到同一条 conversation 的身份命名空间——评论草稿不是私信、不属下线范围，
+ * 所以这个标签保留。**任何入站/出站消息通道仍必须用 `ChannelId`。**
+ */
+export type ConversationSource = ChannelId | "xhs";
+
+/** 某个来源上的一个外部身份，例如 { channel: "sms", externalUserId: "+14085551234" } */
 export type ExternalIdentity = {
-  channel: ChannelId;
-  /** 该渠道里这个人的唯一 id：xhs userId / 手机号 */
+  channel: ConversationSource;
+  /** 该来源里这个人的唯一 id：手机号（帖主身份命名空间里则是小红书 userId） */
   externalUserId: string;
   /**
-   * 同一渠道下的多账号场景：哪个客服号/公众号/发件号收到的。
-   * 现在全填 null 也能跑，留着是因为以后接第二个小红书号时不用改表。
+   * 同一渠道下的多账号场景：哪个客服号/发件号收到的。
+   * 现在全填 null 也能跑，留着是为了以后同一渠道接第二个账号时不用改表。
    */
   accountId?: string | null;
-  /** 该渠道里的昵称（小红书帖主用户名等）。只为好认，不参与判重 */
+  /** 该来源里的昵称（帖主用户名等）。只为好认，不参与判重 */
   displayName?: string | null;
 };
 
@@ -40,7 +52,7 @@ export type InboundTurn = {
   /** 用户这次说的话（纯文本；富媒体以后再说） */
   text: string;
   /** 消息来源，只是标签，**不因此拆会话** */
-  channel: ChannelId;
+  channel: ConversationSource;
   /**
    * 渠道自己的消息 id，用来防重复投递（webhook 重试很常见）。
    * 现在只是存下来，去重逻辑等接真实 webhook 时再补。

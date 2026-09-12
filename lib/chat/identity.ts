@@ -10,13 +10,15 @@ import type { ExternalIdentity } from "./types";
 /**
  * 外部身份 → 内部 user。
  *
- * 一个人可能同时是 xhs:847392、sms:+1408...、web:<uuid>，这些都指向同一个内部
- * user，于是他在哪个渠道说话都进同一条 conversation。
+ * 一个人可能同时是 sms:+1408...、web:<uuid>，这些都指向同一个内部 user，于是
+ * 他在哪个窗口说话都进同一条 conversation。**合租房的外部实时消息只有短信**；
+ * 小红书私信/出站通道已下线，只剩帖子评论草稿仍用 `xhs` 命名空间给帖主建身份
+ * （不是实时渠道，见 `lib/chat/types.ts` 的 `ConversationSource`）。
  *
  * 现在的策略最简单：**没见过的外部身份就建一个 guest user 绑上去**。以后要做
- * "小红书用户后来提供了手机号 → 合并到同一个内部 user"，就是把两行
- * ChannelIdentity 的 userId 改成同一个（SQL 文件里有说明）；合并策略、冲突
- * 处理等真有第二个渠道再定，现在不预设。
+ * "同一个人换了手机号 → 合并到同一个内部 user"，就是把两行 ChannelIdentity 的
+ * userId 改成同一个（SQL 文件里有说明）；合并策略、冲突处理等真需要时再定，
+ * 现在不预设。
  */
 
 // 单独建连接：lib/db/queries.ts 的 db 是模块私有的，而这张表还没并进 schema.ts
@@ -62,7 +64,7 @@ export async function findUserIdByIdentity(
     if (!row) {
       return null;
     }
-    // 昵称会改（小红书改名很常见），看到新的就更新；没拿到就别覆盖成空
+    // 昵称会改（帖主改名很常见），看到新的就更新；没拿到就别覆盖成空
     if (identity.displayName && identity.displayName !== row.displayName) {
       await db
         .update(channelIdentity)
@@ -116,8 +118,8 @@ export async function resolveInternalUserId(
 
 /**
  * 把一个外部身份挂到已有的内部 user 上（身份合并用）。
- * 例如小红书用户后来发来手机号，确认是同一个人：
- *   linkIdentity({ channel: "sms", externalUserId: "+1408..." }, xhsUserId)
+ * 例如同一个人先用网页、后来发来手机号，确认是同一个人：
+ *   linkIdentity({ channel: "sms", externalUserId: "+1408..." }, userId)
  */
 export async function linkIdentity(
   identity: ExternalIdentity,
