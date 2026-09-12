@@ -12,6 +12,16 @@
 
 ---
 
+## 2026-09-11 · Astra 成本架构审查与后续 5.6 交接（仅文档）
+
+- 老板要求审实际代码、参考但不照信外部 AI 建议，把工作长期交给后续 5.6。新增 `.claude/AI_COST_ENGINEERING_REVIEW.md` 并接入状态、任务入口、路线图、Doctrine 地图；未改生产代码/提示词。
+- 已有缓存、台账、历史 judge 重审。实际缺口是包装器计数与 step/重试错层、主生成 usage 未贯通全链及报告、embedding 未纳管、跨进程预算不共享；不重建已有组件。
+- 发现 relay 合格示例与第一人称身份规则矛盾，最后七轮报告仍有 T3 范围扩大、T7 归属错误。旧通过报告不覆盖，新增复审纠正；一次 Sonnet 失败不构成普遍选型结论。
+- 已核对八份报告合计已纳管 Gateway cost $4.338301891；这不是账户完整对账，unknown=0 不能证明无未纳管调用。本轮没有付费推理、Claude 调用、数据库写入或短信。
+- 下一接棒 A：先补计费证据。后续所有实现仍由 Claude Code sonnet/medium 编辑，Codex 独立验收；本次仅开发协调文档，由 Codex 维护。
+
+---
+
 ## 2026-09-11 · Reddit 连续一对一传话 corpus-031 与整轮成本闸
 
 - Codex 直接把 Notion Reddit 第一人称故事转成 7 轮 AI-facing relay 语料；Claude Code 按双模型门禁实现 doctrine、critic、judge、schema、运行时修正和评测成本账本，Codex 独立审查与运行。
