@@ -41,18 +41,25 @@ import {
   isUnsolicitedContactClaim,
   uncoveredBlockedPersonIds,
   scheduleInquiryConfirmation,
+  TRUTHFUL_UNSENT_REPLY,
 } from "../lib/chat/coliving/turn";
 // 严格口径后保留的两项受约束第三方出站：只测其确定性解析/固定文本/收据，
 // 不涉及任何模型调用，也不触发任何写入。
 import {
+  hasPersonalItemAskSignal,
+  looksLikeApproximatePersonalItemAsk,
   looksLikePersonalItemReminder,
+  PERSONAL_ITEM_APPROXIMATE_GUIDANCE,
   PERSONAL_ITEM_REMINDER_FORM,
   PERSONAL_ITEM_REMINDER_TEXT,
   personalItemReminderReceipt,
   recognizePersonalItemReminder,
 } from "../lib/chat/coliving/personal-item-reminder";
 import {
+  hasNightLaundryAskSignal,
+  looksLikeApproximateNightLaundryAsk,
   looksLikeNightLaundryReminder,
+  NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE,
   NIGHT_LAUNDRY_REMINDER_FORM,
   NIGHT_LAUNDRY_REMINDER_TEXT,
   nightLaundryReminderReceipt,
@@ -1204,6 +1211,15 @@ async function main() {
       "普通回复的假完成真相保护必须保留"
     );
     assert(turnSrc.includes("TRUTHFUL_UNSENT_REPLY"), "假完成必须替换成真话未发送说明");
+    // 泛化文字必须如实覆盖两项功能，不得再退回「只有个人物品提醒这一种」的
+    // 旧措辞（否则会把已开放的夜间洗衣提醒也说成做不到），且必须说没发。
+    assert(
+      TRUTHFUL_UNSENT_REPLY.includes("个人物品") &&
+        TRUTHFUL_UNSENT_REPLY.includes("夜间洗衣") &&
+        /没(?:有)?(?:把|发)/.test(TRUTHFUL_UNSENT_REPLY) &&
+        !TRUTHFUL_UNSENT_REPLY.includes("这一种"),
+      `未发送说明必须如实泛化到两项功能：${TRUTHFUL_UNSENT_REPLY}`
+    );
     assert(
       !/contactPerson:\s*tool\(/.test(turnSrc),
       "生产不得再定义泛用 contactPerson 工具"
@@ -1778,8 +1794,9 @@ async function main() {
     // 指引句里嵌的是带占位符的固定句式，因此必然命中「个人物品」正向哨兵。
     assert(PERSONAL_ITEM_REMINDER_FORM.includes("个人物品"));
 
-    // 第 3、4 轮：自由文本的深夜洗衣 / 浴室头发 → 落回普通对话，零第三方出站。
-    // 这两轮都不是窄命令形态，所以新增的夜间洗衣提醒（见 corpus-034）也不会命中。
+    // 第 3、4 轮：自由文本的深夜洗衣 / 浴室头发 → 零第三方出站。
+    // 两轮都不是窄命令形态。第 3 轮（深夜洗衣）现在收口到确定性的本地指引入口
+    // （零第三方出站、不过模型）；第 4 轮（浴室头发）仍落回普通对话。
     for (const [i, turn] of scenario.turns.slice(2).entries()) {
       assert.equal(
         looksLikePersonalItemReminder(turn.text),
@@ -2091,19 +2108,256 @@ async function main() {
       );
     }
 
-    // 第 4 轮：自由文本深夜洗衣（不是窄命令形态）→ 零第三方出站。
+    // 第 4 轮：自由文本深夜洗衣（不是窄命令形态）→ 确定性本地指引，零第三方出站。
     const t4 = scenario.turns[3];
     assert.equal(
       looksLikeNightLaundryReminder(t4.text),
       false,
-      "自由文本不是窄命令形态，必须落回普通对话"
+      "自由文本不是窄命令形态，不走合规出站路径"
+    );
+    assert.equal(
+      recognizeNightLaundryReminder(t4.text),
+      null,
+      "第 4 轮原句必须认不出固定发送（只走近似指引，不产生第三方出站）"
     );
     assert.equal(looksLikePersonalItemReminder(t4.text), false);
+    assert(
+      hasNightLaundryAskSignal(t4.text),
+      "corpus-034 原句必须被夜间洗衣近似请求信号命中"
+    );
+    assert(
+      looksLikeApproximateNightLaundryAsk(t4.text, ["阿川"]),
+      "corpus-034 原句必须收口到夜间洗衣本地指引"
+    );
+    // 对完整名册（含说话人小禾）判定也必须为真，结论不因名册范围而变。
+    assert(
+      looksLikeApproximateNightLaundryAsk(t4.text, ["小禾", "阿川"]),
+      "对完整名册判定必须同样收口"
+    );
     assert.deepEqual(t4.expect?.mustNotContactNames, ["阿川", "小禾"]);
     assert(
       (t4.expect?.mustNotUseTools ?? []).includes("nightLaundryReminder") &&
+        (t4.expect?.mustNotUseTools ?? []).includes("personalItemReminder") &&
         (t4.expect?.mustNotUseTools ?? []).includes("contactPerson"),
-      "自由文本轮不得调用任何第三方出站工具"
+      "自由文本轮不得调用任何第三方出站工具（整条链路不调模型、无工具）"
+    );
+    // 指引要说真话（没有发送）并给出唯一命令模板。
+    assert(
+      /没(?:有)?(?:把|发)/.test(NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE) &&
+        NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE.includes(
+          NIGHT_LAUNDRY_REMINDER_FORM
+        ),
+      `夜间洗衣近似指引必须含“没有发送”与唯一模板：${NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE}`
+    );
+    for (const pattern of t4.expect?.replyMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE),
+        `第 4 轮指引必须命中「${pattern}」：${NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE}`
+      );
+    }
+    for (const pattern of t4.expect?.replyMustNotMatch ?? []) {
+      assert(
+        !new RegExp(pattern).test(NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE),
+        `第 4 轮指引不得命中反向哨兵「${pattern}」`
+      );
+    }
+    // 判法自检：以指引为回复、零第三方出站、无工具时必须判过；一旦出现第三方
+    // 出站必须判失败。这里只验结构事实，不宣称指引文字的自然度。
+    assert.deepEqual(
+      evaluateTurnExpectation(t4.expect, {
+        toolsUsed: [],
+        reply: NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE,
+        outbound: [],
+      }),
+      [],
+      "确定性未发送指引 + 零第三方出站不该被判失败"
+    );
+    assert(
+      evaluateTurnExpectation(t4.expect, {
+        toolsUsed: [],
+        reply: NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE,
+        outbound: [{ toName: "阿川", text: "好。" }],
+      }).length > 0,
+      "第 4 轮若产生任何第三方出站必须判失败"
+    );
+  });
+
+  /**
+   * ── 两项受约束提醒的「近似请求」本地指引入口（2026-09-12）──────────────
+   *
+   * 老板口径：明确想让 AI 对指定室友执行该动作、但没按固定命令写的近似请求，
+   * 在确定性入口收口——只回当前用户「没有发送 + 唯一模板」，零第三方出站、
+   * 不过模型；纯抱怨 / 评理 / 讨论 / 未点名对象 / 一般噪音 / 卫生头发 / 费用 /
+   * 规则 / 混合议题一律不吞，仍走普通对话。这里只做免费字符串判定。
+   */
+  check("两项受约束提醒：近似请求只给本地指引，不吞普通谈话", () => {
+    const others = ["阿川"];
+    // 命中：corpus-034 原句（夜间洗衣近似请求）。
+    const nightOriginal =
+      "阿川昨天凌晨四点开洗衣机和烘干机，机器就挨着我房间那面墙，我被吵醒了。你能不能私下跟他讲一下，这一次先别在深夜洗和烘干。";
+    assert(
+      looksLikeApproximateNightLaundryAsk(nightOriginal, others),
+      "corpus-034 原句必须收口到夜间洗衣指引"
+    );
+    // 命中：个人物品的明确自然语言请求（点名阿川、明确交办提醒）。
+    const personalAsk =
+      "阿川又直接拿我的毛巾了，麻烦你提醒阿川用我的个人物品前先问我。";
+    assert(
+      hasPersonalItemAskSignal(personalAsk),
+      "个人物品近似请求必须通过不查名册的预筛"
+    );
+    assert(
+      looksLikeApproximatePersonalItemAsk(personalAsk, others),
+      "个人物品的明确自然语言请求必须收口到本地指引"
+    );
+    assert.equal(
+      recognizePersonalItemReminder(personalAsk),
+      null,
+      "个人物品近似请求不是窄命令形态，固定发送识别必须为 null"
+    );
+    // 命中：个人物品的另一种自然说法（用我的东西、先问我）。
+    assert(
+      looksLikeApproximatePersonalItemAsk(
+        "阿川老是直接拿我的东西不打招呼，你能不能跟他说一声，用之前先问我。",
+        others
+      ),
+      "个人物品的明确自然语言请求必须收口到本地指引"
+    );
+    assert(
+      /没(?:有)?(?:把|发)/.test(PERSONAL_ITEM_APPROXIMATE_GUIDANCE) &&
+        PERSONAL_ITEM_APPROXIMATE_GUIDANCE.includes(
+          PERSONAL_ITEM_REMINDER_FORM
+        ),
+      `个人物品近似指引必须含“没有发送”与唯一模板：${PERSONAL_ITEM_APPROXIMATE_GUIDANCE}`
+    );
+
+    // 反例：必须落回普通对话（两个功能都不命中）。
+    const negatives: Array<[string, string]> = [
+      ["纯抱怨", "阿川昨天凌晨四点开洗衣机吵死了，烦死了。"],
+      ["评理/讨论", "阿川老用我的东西，你觉得我该不该跟他说？"],
+      ["未点名对象", "有人半夜用洗衣机，你能不能跟他说一下。"],
+      ["一般噪音", "阿川半夜放音乐外放很吵，你能不能跟他说一下。"],
+      [
+        "卫生/头发",
+        "还有，阿川洗完澡，浴室墙面和地漏里都留着一大把头发，他也不清理。你私下跟他说一声，让他洗完把墙上和地漏里的头发清掉。",
+      ],
+      ["费用议题", "阿川半夜用洗衣机，水费也分摊一下，你跟他说一下。"],
+      ["规则议题", "阿川半夜用洗衣机，你跟他说一下，立个全屋规矩。"],
+      ["混合议题", "跟阿川说用我东西前先问我，另外别半夜用洗衣机。"],
+      ["自己去联系", "阿川半夜用洗衣机，我自己跟他说就行，不用你。"],
+      [
+        "对方已提醒我",
+        "麻烦你提醒我一下就行，阿川已经提醒过我了，深夜别用洗衣机。",
+      ],
+    ];
+    for (const [label, text] of negatives) {
+      assert.equal(
+        looksLikeApproximateNightLaundryAsk(text, others),
+        false,
+        `${label}：夜间洗衣近似入口不得吞掉普通谈话`
+      );
+      assert.equal(
+        looksLikeApproximatePersonalItemAsk(text, others),
+        false,
+        `${label}：个人物品近似入口不得吞掉普通谈话`
+      );
+    }
+
+    // 近似指引常量：只说真话 + 唯一模板，**不得**含第三方出站正文，也不得
+    // 夹带任何附带诉求或收件人姓名（否则等于用指引泄漏未开放内容）。
+    for (const [guidance, thirdPartyBody, label] of [
+      [
+        NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE,
+        NIGHT_LAUNDRY_REMINDER_TEXT,
+        "夜间洗衣",
+      ],
+      [
+        PERSONAL_ITEM_APPROXIMATE_GUIDANCE,
+        PERSONAL_ITEM_REMINDER_TEXT,
+        "个人物品",
+      ],
+    ] as const) {
+      assert(
+        !guidance.includes(thirdPartyBody),
+        `${label}近似指引不得包含第三方出站正文：${guidance}`
+      );
+      for (const attached of [
+        "头发",
+        "水费",
+        "全屋",
+        "规矩",
+        "分摊",
+        "阿川",
+        "小禾",
+      ]) {
+        assert(
+          !guidance.includes(attached),
+          `${label}近似指引不得含收件人或附带诉求「${attached}」：${guidance}`
+        );
+      }
+    }
+
+    // 接线位置：近似判定在各自模块内、由主生成前的 deliver* 调用；命中即
+    // 零模型调用。两个模块都不得 import AI SDK。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const nightSrc = readFileSync(
+      "lib/chat/coliving/night-laundry-reminder.ts",
+      "utf8"
+    );
+    const personalSrc = readFileSync(
+      "lib/chat/coliving/personal-item-reminder.ts",
+      "utf8"
+    );
+    assert(
+      nightSrc.includes(
+        "looksLikeApproximateNightLaundryAsk(args.text, others)"
+      ),
+      "夜间洗衣模块必须调用近似判定（不调模型）"
+    );
+    assert(
+      personalSrc.includes(
+        "looksLikeApproximatePersonalItemAsk(args.text, others)"
+      ),
+      "个人物品模块必须调用近似判定（不调模型）"
+    );
+    // 近似分支必须接在「固定发送识别失败」之后、返回本地 guidance；不得抢在
+    // 合规命令识别之前，也不得回落到模型生成。
+    for (const [src, fixedGuard, signalCall, replyConstant, label] of [
+      [
+        personalSrc,
+        "if (!looksLikePersonalItemReminder(args.text))",
+        "hasPersonalItemAskSignal(",
+        "PERSONAL_ITEM_APPROXIMATE_GUIDANCE",
+        "个人物品",
+      ],
+      [
+        nightSrc,
+        "if (!looksLikeNightLaundryReminder(args.text))",
+        "hasNightLaundryAskSignal(",
+        "NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE",
+        "夜间洗衣",
+      ],
+    ] as const) {
+      const fixedIdx = src.indexOf(fixedGuard);
+      assert(fixedIdx >= 0, `${label}必须先做固定发送识别`);
+      const signalIdx = src.indexOf(signalCall, fixedIdx);
+      assert(signalIdx > fixedIdx, `${label}近似预筛必须在固定发送识别失败之后`);
+      assert(
+        src.indexOf(`reply: ${replyConstant}`, signalIdx) > signalIdx,
+        `${label}近似分支必须返回本地指引常量，不落回普通生成`
+      );
+    }
+    const mainGenIdx = turnSrc.indexOf('trackedGatewayCall("main"');
+    assert(
+      mainGenIdx > 0 &&
+        turnSrc.indexOf("await deliverPersonalItemReminder(") < mainGenIdx &&
+        turnSrc.indexOf("await deliverNightLaundryReminder(") < mainGenIdx,
+      "两项近似入口都必须在主生成之前，命中即零模型调用"
+    );
+    assert(
+      !/generateText|generateObject|streamText/.test(nightSrc) &&
+        !/generateText|generateObject|streamText/.test(personalSrc),
+      "两项受约束模块都不得调用任何模型"
     );
   });
 
