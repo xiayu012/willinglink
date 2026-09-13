@@ -106,14 +106,16 @@ import {
   buildFeatureQaFacts,
   selectBlacklistedCapabilities,
 } from "../lib/chat/coliving/feature-facts";
-// 显式黑名单事实源（当前一项：卫生整改要求）：复用那一次功能路由的 `blocked:<id>` token，
-// 不按关键词阻断；纯代码解析，是「这件事办不了」的唯一起源。
+// 显式黑名单事实源（当前一项：单方面叫别人在洗完澡后清理地漏头发）：复用那一次功能路由的
+// `blocked:<id>` token，不按关键词阻断；纯代码解析 + 条目自己的 qualifier 资格复核，
+// 是「这件事办不了」的唯一起源。
 import {
   BLACKLISTED_CAPABILITIES,
   blacklistRouteToken,
   blacklistedCapabilityByRouteToken,
   blacklistedCapabilityById,
   blacklistedReply,
+  qualifiesShowerDrainCleanupRequest,
 } from "../lib/chat/coliving/blacklist";
 import type {
   FeatureContext,
@@ -2138,21 +2140,21 @@ async function main() {
       assert.equal(stray.replyOnly, false, "清单外字符串不得被当成 reply_only");
 
       // 只差一个条件的邻接反例：同样是点名一位同住人、同样是「要他处理一下」，但主题是
-      // **异味 / 空气**而不是「清走卫生残留」——路由 none 时必须零黑名单命中，落回完整
-      // 协调流程，**不得**被「卫生整改」这条黑名单按关键词误拦。
+      // **异味 / 空气**而不是「清掉地漏里的头发」——路由 none 时必须零黑名单命中，落回
+      // 完整协调流程，**不得**被这条黑名单按关键词误拦。
       const odor = await routeApprovedFeature(
         "屋里一股烂奶酪味，你跟阿杰说让他处理一下",
         textOnly(FEATURE_ROUTE_NONE)
       );
-      assert.equal(odor.blacklisted, null, "异味交办不是卫生整改黑名单主题，不得被拦");
+      assert.equal(odor.blacklisted, null, "异味交办不是这条黑名单主题，不得被拦");
       assert.equal(odor.match, null, "异味交办不是已批准功能");
       assert.equal(odor.replyOnly, false, "异味交办不是 reply_only");
-      // 讨论 / 征询卫生话题（不是交办）同样不得被拦。
+      // 讨论 / 征询地漏头发话题（不是交办）同样不得被拦。
       const discussHygiene = await routeApprovedFeature(
         "浴室地漏的头发没人清理，你怎么看？",
         textOnly(FEATURE_ROUTE_NONE)
       );
-      assert.equal(discussHygiene.blacklisted, null, "讨论 / 征询卫生话题不得被当成交办拦截");
+      assert.equal(discussHygiene.blacklisted, null, "讨论 / 征询话题不得被当成交办拦截");
 
       // 解释性 / JSON / 字段名漂移文本：一律安全当 none，不解析、不猜。
       for (const explained of [
@@ -2171,18 +2173,18 @@ async function main() {
   );
 
   await checkAsync(
-    "卫生整改交办被黑名单收口：纯代码真话、零出站、不进抽取 / 生成；邻接非卫生请求不被误拦",
+    "地漏头发交办被黑名单收口：纯代码真话、零出站、不进抽取 / 生成；邻接非本功能请求不被误拦",
     async () => {
-      const hygiene = BLACKLISTED_CAPABILITIES[0];
+      const drainHair = BLACKLISTED_CAPABILITIES[0];
       // 前门那一次路由选中 blocked:<id>：整轮在功能入口内收口，**不进完整主生成、
       // 不调 contactPerson**——只回一句纯代码真话，零工具、零第三方出站，也不抽取 / 生成。
       const blocked = await runFeature(
         "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
-        { feature_route: blacklistRouteToken(hygiene.id) }
+        { feature_route: blacklistRouteToken(drainHair.id) }
       );
-      assert.equal(blocked.run.mode, "blacklisted", "卫生整改交办必须由黑名单收口");
+      assert.equal(blocked.run.mode, "blacklisted", "地漏头发交办必须由黑名单收口");
       assert.equal(blocked.handling?.status, "handled");
-      assert.equal(blocked.handling?.reply, blacklistedReply(hygiene), "回复必须是纯代码真话");
+      assert.equal(blocked.handling?.reply, blacklistedReply(drainHair), "回复必须是纯代码真话");
       assert.equal(blocked.handling?.sms, null, "黑名单零第三方短信");
       assert.equal(blocked.repo.thirdParty().length, 0, "黑名单不得给任何人出站");
       assert.equal(blocked.repo.decisions.length, 0, "黑名单不产生联系决策（不进主生成）");
@@ -2192,14 +2194,69 @@ async function main() {
         "黑名单只花那一次路由，不抽取、不生成"
       );
       // 邻接反例（只差一个条件）：同样点名一位同住人、同样「让他处理一下」，但主题是
-      // **异味 / 空气**，不是「清走卫生残留」。路由 none → 落回完整协调流程（不是拒绝），
-      // 不得被「卫生整改」这条黑名单按主题词误拦。
+      // **异味 / 空气**，不是「清掉地漏里的头发」。路由 none → 落回完整协调流程（不是拒绝），
+      // 不得被这条黑名单按主题词误拦。
       const odor = await runFeature("屋里一股烂奶酪味，你跟阿杰说让他处理一下", {
         feature_route: FEATURE_ROUTE_NONE,
       });
       assert.equal(odor.run.mode, "none", "异味交办不是黑名单，落回完整流程");
       assert.equal(odor.handling, null, "落回完整流程时前门不产出 handling");
       assert.equal(odor.repo.thirdParty().length, 0, "前门零出站（是否联系交主生成判断）");
+    }
+  );
+
+  await checkAsync(
+    "黑名单资格复核（纯代码）：路由即使选了 blocked:<id>，原话缺必要信号也落回完整流程",
+    async () => {
+      const drainHair = BLACKLISTED_CAPABILITIES[0];
+      // 资格复核判据本身就写在这一个条目上（引擎无主题分支）。
+      // Codex 2026-09-13 退回后补测：明确的**同义清走动作短语**同样要命中（清干净 / 弄掉 /
+      // 清理掉 / 捡走 / 拿走），且都带「叫 / 让 / 请对方办」的交办语义。
+      for (const ok of [
+        "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
+        "你让阿川洗完澡把地漏里的头发弄掉。",
+        "你让阿川把地漏里的头发清理掉。",
+        "叫阿川把地漏里的头发捡走。",
+        "请让阿川把地漏里的头发拿走。",
+      ]) {
+        assert.equal(drainHair.qualifier(ok), true, `应具备本功能必要信号：${ok}`);
+      }
+      // 相邻行为都**不**具备必要信号：即使路由误选 blocked:<id>，也必须落回完整流程，
+      // **不得**被这一项阻断（宁可漏判，不得误杀）。含裸关键词也算不过关。
+      for (const adjacent of [
+        "请叫阿川把浴室墙面的头发清掉。", // 墙面头发：有头发、没地漏
+        "你让阿川把地漏疏通一下。", // 地漏疏通：有地漏、没头发
+        "请让阿川把客厅好好打扫一遍。", // 一般打扫：没有地漏 + 头发
+        "墙上那块污渍让阿川擦掉。", // 污渍
+        "你跟阿杰说让他处理一下屋里的味道。", // 异味
+        "你觉得要不要叫阿川清理地漏的头发？", // 征询，不是交办
+        "地漏又堵了、头发好多，你说我该不该跟阿川提一下？", // 抱怨 / 问看法
+        // Codex 2026-09-13 退回：第一版把「洗 / 弄 / 裸清」当清理信号、把单字「请」当交办，
+        // 会把下面这些纯叙述 / 告知 / 提问误当成交办。收窄后必须全部落回完整流程。
+        "通知阿川，洗完澡后地漏里有头发。", // 只告知存在，没有要求清走
+        "让阿川知道，地漏里有头发，谁弄的还不知道。", // 让=告知对象；弄=来源叙述
+        "请问地漏里的头发怎么清理？", // 疑问句，不是叫一位室友去办
+      ]) {
+        assert.equal(
+          drainHair.qualifier(adjacent),
+          false,
+          `相邻行为不得通过资格复核：${adjacent}`
+        );
+        const run = await runFeature(adjacent, {
+          feature_route: blacklistRouteToken(drainHair.id),
+        });
+        assert.equal(
+          run.run.mode,
+          "none",
+          `资格复核不通过必须当作 none 落回完整流程：${adjacent}`
+        );
+        assert.equal(run.handling, null, `不通过时前门不产出 handling：${adjacent}`);
+        assert.equal(
+          run.repo.thirdParty().length,
+          0,
+          `不通过时前门零出站（是否联系交主生成判断）：${adjacent}`
+        );
+      }
     }
   );
 
@@ -2369,13 +2426,16 @@ async function main() {
       !/\bselectBlacklistedCapabilities\b/.test(blacklistCode),
       "黑名单解析不得依赖问答侧的关键词关联函数"
     );
-    // 老板 2026-09-13 纠正：黑名单**不是空表**——已登记唯一一项「卫生整改要求」。
+    // 老板 2026-09-13 纠正：黑名单**不是空表**——已登记唯一一项
+    // 「单方面叫别人在洗完澡后清理地漏头发」（精确行为，不是"一类主题"）。
     // 但也不得因为"不在已批准清单里"就把别的主题塞进黑名单（只有老板点名要拒绝的才加）。
     assert(
       BLACKLISTED_CAPABILITIES.length === 1 &&
-        BLACKLISTED_CAPABILITIES[0].id === "hygiene-rectification" &&
-        BLACKLISTED_CAPABILITIES[0].label === "卫生整改要求",
-      "当前黑名单只允许登记「卫生整改要求」一项（不是空表）"
+        BLACKLISTED_CAPABILITIES[0].id ===
+          "ask-named-roommate-clean-shower-drain-hair" &&
+        BLACKLISTED_CAPABILITIES[0].label ===
+          "单方面叫别人在洗完澡后清理地漏头发",
+      "当前黑名单只允许登记「单方面叫别人在洗完澡后清理地漏头发」一项（不是空表）"
     );
     assert(
       /const BLACKLISTED_CAPABILITIES[^=]*=\s*\[/.test(blacklistSrc) &&
@@ -2398,6 +2458,28 @@ async function main() {
     assert(
       /mode:\s*"blacklisted"/.test(featureSrc) && /"blacklisted"/.test(featureSrc),
       "features.ts 必须提供 blacklisted 结果模式（纯代码真话回复、零出站）"
+    );
+    // 老板 2026-09-13 纠正：功能是**精确行为不是一类主题**——路由选中 `blocked:<id>` 只是
+    // 模型判断，代码还要过**该条目自己的** `qualifier` 复核必要信号，不通过则落回完整流程。
+    assert(
+      /\bqualifier\b/.test(blacklistCode),
+      "blacklist.ts 的条目必须带自己的纯代码资格复核（qualifier）"
+    );
+    assert(
+      /blacklisted\.qualifier\(/.test(strip(featureSrc)),
+      "features.ts 命中黑名单后必须再过该条目的 qualifier，不通过当作 none"
+    );
+    // Codex 2026-09-13 退回：资格复核第一版把 `洗` / 弄 / 裸 `清` / 裸 `除` 当清理信号，
+    // 于是「洗完澡」「谁弄的」都会满足；单字「请」还会把「请问……」当交办。现在清理信号
+    // 必须是明确的两字以上动作短语，且要与「地漏 + 头发」共现在同一局部片段（单测覆盖）。
+    const cleanAwayDecl = /const CLEAN_AWAY_SIGNAL\s*=\s*\/([^/]*)\//.exec(blacklistCode);
+    assert(
+      cleanAwayDecl !== null && !/洗/.test(cleanAwayDecl[1]),
+      "黑名单资格复核的清理信号不得含单字「洗」（会被「洗完澡」满足）"
+    );
+    assert(
+      /CLEAN_AWAY_SIGNAL/.test(blacklistCode) && /CLAUSE_SPLIT/.test(blacklistCode),
+      "黑名单资格复核必须用明确清走短语 + 局部片段共现（清走动作与地漏+头发同片段）"
     );
     assert(
       !/\bmatchBlacklistedCapabilityId\b/.test(
@@ -2472,39 +2554,50 @@ async function main() {
   const combinedQuestion = "请问为什么连这么简单的功能都没有?那你有什么功能？";
 
   check(
-    "统一功能事实源：卫生整改是唯一「办不了」条目，开放功能来自 APPROVED_FEATURES",
+    "统一功能事实源：地漏头发交办是唯一「办不了」条目，开放功能来自 APPROVED_FEATURES",
     () => {
       // 数据质量不变量：每条黑名单条目的理由锚点必须取自它自己的 reason——
-      // grounding 校验只读这份数据，引擎里没有主题分支。
+      // grounding 校验只读这份数据，引擎里没有主题分支。每条还必须有**自己的**资格复核。
       for (const c of BLACKLISTED_CAPABILITIES) {
         assert(c.validation.reasonAnchors.length > 0, `${c.id} 必须有理由锚点`);
         for (const a of c.validation.reasonAnchors) {
           assert(c.reason.includes(a), `${c.id} 的锚点「${a}」必须取自它自己的 reason`);
         }
         assert(c.routeDescription.length > 0, `${c.id} 必须有路由定义（执行阻断的唯一依据）`);
-        assert(c.keywords.length > 0, `${c.id} 必须保留关键词（只供问答关联，不做执行阻断）`);
+        assert(c.keywords.length > 0, `${c.id} 必须保留关键词（只供问答关联预筛）`);
+        assert(
+          typeof c.qualifier === "function",
+          `${c.id} 必须有自己很小的确定性资格复核（精确行为优先于省代码）`
+        );
       }
-      // 老板 2026-09-13 纠正：「卫生整改要求」是已登记的显式黑名单，不是空表。
+      // 老板 2026-09-13 纠正：黑名单不是空表，且这一项是**精确行为不是一类主题**。
       assert(
         BLACKLISTED_CAPABILITIES.length === 1 &&
-          BLACKLISTED_CAPABILITIES[0].id === "hygiene-rectification" &&
-          BLACKLISTED_CAPABILITIES[0].label === "卫生整改要求",
-        "当前黑名单只登记「卫生整改要求」一项"
+          BLACKLISTED_CAPABILITIES[0].id ===
+            "ask-named-roommate-clean-shower-drain-hair" &&
+          BLACKLISTED_CAPABILITIES[0].label ===
+            "单方面叫别人在洗完澡后清理地漏头发",
+        "当前黑名单只登记「单方面叫别人在洗完澡后清理地漏头发」一项"
       );
-      const hygiene = BLACKLISTED_CAPABILITIES[0];
+      const drainHair = BLACKLISTED_CAPABILITIES[0];
       // 住户可见的内容（名称 + 理由）不得出现任何内部术语。
       assert(
-        !/未开放|白名单|黑名单|路由|模型|提示词/.test(hygiene.label + hygiene.reason),
+        !/未开放|白名单|黑名单|路由|模型|提示词/.test(drainHair.label + drainHair.reason),
         "黑名单条目对住户可见的内容不得含内部术语"
+      );
+      // 名称必须表达**具体动作**，不得退回「卫生整改」这类大类叫法。
+      assert(
+        !/卫生整改|一类|这类/.test(drainHair.label),
+        "黑名单名称不得用「一类主题」式的大类说法"
       );
       // 复用同一次路由：只有精确的 `blocked:<id>` 才命中；裸 id / 表外 id 都不算。
       assert.equal(
-        blacklistedCapabilityByRouteToken(blacklistRouteToken(hygiene.id))?.id,
-        hygiene.id,
+        blacklistedCapabilityByRouteToken(blacklistRouteToken(drainHair.id))?.id,
+        drainHair.id,
         "blocked:<id> 必须命中对应条目"
       );
       assert.equal(
-        blacklistedCapabilityByRouteToken(hygiene.id),
+        blacklistedCapabilityByRouteToken(drainHair.id),
         null,
         "裸 id（无 blocked: 前缀）不算命中"
       );
@@ -2513,27 +2606,31 @@ async function main() {
         null,
         "表里没有的 blocked: id 恒不命中"
       );
-      assert.equal(blacklistedCapabilityById(hygiene.id)?.id, hygiene.id, "按 id 能取回条目");
-      // 问答把「问题」关联到条目：只对**在问这项功能**的问题命中；别的主题 / 闲聊一律不选
-      // （否则会把普通协调请求也误说成「办不了」）。
+      assert.equal(blacklistedCapabilityById(drainHair.id)?.id, drainHair.id, "按 id 能取回条目");
+      // 问答把「问题」关联到条目：只对**在问这项精确功能**的问题命中；别的主题 / 闲聊 / 相邻
+      // 主题一律不选（否则会把普通协调请求、把「清墙面头发 / 疏通地漏」误说成「办不了」）。
       assert.equal(
         selectBlacklistedCapabilities("为什么不能让他清理地漏的头发？")[0]?.id,
-        hygiene.id,
-        "问到卫生整改的问题要关联到该条目"
+        drainHair.id,
+        "问到这项功能的问题要关联到该条目"
       );
       for (const q of [
         "为什么不行",
         "今天天气不错",
-        // 异味 / 空气不是「清走卫生残留」，同一个收件人也不算黑名单主题。
+        // 相邻主题（只差一个条件）不得被关联到本条目。
+        "为什么不能让他清理浴室墙面的头发？",
+        "为什么不能让他把地漏疏通一下？",
+        "为什么不能让他打扫一下卫生？",
+        // 异味 / 空气不是「清掉地漏里的头发」，同一个收件人也不算黑名单主题。
         "屋里一股烂奶酪味，你跟阿杰说让他处理一下",
         combinedQuestion,
       ]) {
         assert.deepEqual(selectBlacklistedCapabilities(q), [], `不该关联黑名单的问题：${q}`);
       }
       // 纯代码真话回复：带 label + 老板给的理由，无内部术语，过通用 grounding 闸。
-      const reply = blacklistedReply(hygiene);
+      const reply = blacklistedReply(drainHair);
       assert(
-        reply.includes(hygiene.label) && reply.includes(hygiene.reason),
+        reply.includes(drainHair.label) && reply.includes(drainHair.reason),
         "黑名单回复必须含条目名称与老板给的理由"
       );
       assert(
@@ -2542,13 +2639,13 @@ async function main() {
       );
       assert.deepEqual(findGroundingViolations(reply), [], "黑名单真话回复必须过 grounding 闸");
       // 事实源：问到黑名单主题时带出该条目；问到能力清单时不带任何「办不了」条目。
-      const hygieneBundle = buildFeatureQaFacts({
+      const drainHairBundle = buildFeatureQaFacts({
         openFeatures: OPEN_FEATURES,
         question: "为什么不能让他清理地漏的头发？",
       });
       assert.equal(
-        hygieneBundle.blacklisted[0]?.id,
-        hygiene.id,
+        drainHairBundle.blacklisted[0]?.id,
+        drainHair.id,
         "问黑名单主题时事实源要带出该条目"
       );
       const bundle = buildFeatureQaFacts({
@@ -2680,7 +2777,7 @@ async function main() {
   await checkAsync(
     "功能问答的「刚才」窄引用：本人紧接追问补上被拒条目，没有引用时不继承",
     async () => {
-      const hygiene = BLACKLISTED_CAPABILITIES[0];
+      const drainHair = BLACKLISTED_CAPABILITIES[0];
       const question = "请问为什么连这么简单的功能都没有?那你有什么功能？";
 
       // 没有引用（其他住户 / 本人后来换过话题 / 隔得太久）：问题本身对不上条目 → 事实源
@@ -2689,7 +2786,7 @@ async function main() {
       assert.equal(noRefBundle.blacklisted.length, 0, "没有引用时问能力清单不得带出黑名单条目");
       const noRefFb = featureQaFallback({ question, openFeatures: OPEN_FEATURES });
       assert(
-        !noRefFb.includes(hygiene.label) && !/卫生整改|看不到|整改/.test(noRefFb),
+        !noRefFb.includes(drainHair.label) && !/卫生整改|地漏|头发|看不到|整改/.test(noRefFb),
         "没有引用时兜底不得凭空说出「刚才被拒」的主题"
       );
 
@@ -2698,16 +2795,20 @@ async function main() {
       const refBundle = buildFeatureQaFacts({
         openFeatures: OPEN_FEATURES,
         question,
-        referencedBlacklistedId: hygiene.id,
+        referencedBlacklistedId: drainHair.id,
       });
-      assert.equal(refBundle.blacklisted[0]?.id, hygiene.id, "引用命中时事实源补上那一条目");
+      assert.equal(
+        refBundle.blacklisted[0]?.id,
+        drainHair.id,
+        "引用命中时事实源补上那一条目"
+      );
       const refFb = featureQaFallback({
         question,
         openFeatures: OPEN_FEATURES,
-        referencedBlacklistedId: hygiene.id,
+        referencedBlacklistedId: drainHair.id,
       });
-      assert(refFb.includes(hygiene.label), "紧接追问的兜底必须说出被拒条目名称");
-      for (const a of hygiene.validation.reasonAnchors) {
+      assert(refFb.includes(drainHair.label), "紧接追问的兜底必须说出被拒条目名称");
+      for (const a of drainHair.validation.reasonAnchors) {
         assert(refFb.includes(a), `紧接追问的兜底必须保留登记原因锚点：${a}`);
       }
       assert(openLabels.every((l) => refFb.includes(l)), "紧接追问仍要列全专门优化功能");
@@ -2718,7 +2819,7 @@ async function main() {
       const okQa = await runFeatureQa({
         text: question,
         openFeatures: OPEN_FEATURES,
-        referencedBlacklistedId: hygiene.id,
+        referencedBlacklistedId: drainHair.id,
         llm: ok.llm,
       });
       assert.equal(okQa!.reply, refFb, "覆盖被拒条目 + 开放功能的正文要接受");
@@ -2729,7 +2830,7 @@ async function main() {
       const badQa = await runFeatureQa({
         text: question,
         openFeatures: OPEN_FEATURES,
-        referencedBlacklistedId: hygiene.id,
+        referencedBlacklistedId: drainHair.id,
         llm: bad.llm,
       });
       assert.equal(badQa!.reply, refFb, "漏掉被拒条目与原因的正文必须回落只含事实的兜底");
@@ -2766,9 +2867,10 @@ async function main() {
       assert.equal(turn.expect?.minAcceptedOutbound, 0, `第${i + 1}轮不设最低出站要求`);
     }
     // 老板 2026-09-13 纠正：第一轮「请叫阿川把地漏的头发清干净」是**已登记的显式黑名单**
-    // （卫生整改要求），由功能前门那次路由选中 `blocked:hygiene-rectification` 后**纯代码
-    // 收口**——零工具、零第三方出站、不进完整主生成。机器断言据此要求：
-    // 不得调 `contactPerson`、不得发给任何人，回复只保留老板给的理由。
+    // （单方面叫别人在洗完澡后清理地漏头发），由功能前门那次路由选中
+    // `blocked:ask-named-roommate-clean-shower-drain-hair` 后、再过该条目自己的纯代码
+    // 资格复核**收口**——零工具、零第三方出站、不进完整主生成。机器断言据此要求：
+    // 不得调 `contactPerson`、不得发给任何人，回复只保留老板给的理由（且用具体功能名）。
     assert.deepEqual(
       scenario.turns[0].expect?.mustNotUseTools,
       ["contactPerson"],
@@ -2781,28 +2883,35 @@ async function main() {
     );
     assert.deepEqual(
       scenario.turns[0].expect?.replyMustMatch,
-      ["卫生整改要求", "看不到", "程度", "整改"],
-      "第一轮回复必须含条目名称与老板给的理由锚点"
+      ["单方面叫别人在洗完澡后清理地漏头发", "看不到", "程度", "整改"],
+      "第一轮回复必须含具体功能名与老板给的理由锚点"
     );
     assert.deepEqual(
       scenario.turns[0].expect?.replyMustNotMatch,
-      ["未开放", "白名单", "黑名单", "路由", "提示词", "不在.{0,6}(能力|功能)清单"],
-      "第一轮回复不得含内部术语"
+      ["卫生整改", "未开放", "白名单", "黑名单", "路由", "提示词", "不在.{0,6}(能力|功能)清单"],
+      "第一轮回复不得含内部术语，也不得退回大类旧称"
     );
     // 第二轮是**同一住户紧接着**的功能边界追问：无工具、无出站；且必须说出刚刚被拒的
-    // 「卫生整改要求」名称与登记原因、并列出全部专门优化功能——由结构化引用 + grounding
+    // 具体功能名与登记原因、并列出全部专门优化功能——由结构化引用 + grounding
     // 共同保证（不是「不继承」，也不是按关键词乱猜主题）。
     assert.deepEqual(scenario.turns[1].expect?.mustNotContactNames, ["阿川", "小禾"], "第二轮不得联系任何人");
     assert.deepEqual(scenario.turns[1].expect?.mustNotUseTools, ["contactPerson"], "第二轮无工具");
     assert.deepEqual(
       scenario.turns[1].expect?.replyMustMatch,
-      ["卫生整改要求", "看不到", "程度", "整改", "个人物品使用提醒", "夜间洗衣提醒"],
-      "第二轮紧接着追问：必须说出被拒条目名称 + 登记原因，并列全专门优化功能"
+      [
+        "单方面叫别人在洗完澡后清理地漏头发",
+        "看不到",
+        "程度",
+        "整改",
+        "个人物品使用提醒",
+        "夜间洗衣提醒",
+      ],
+      "第二轮紧接着追问：必须说出具体功能名 + 登记原因，并列全专门优化功能"
     );
     assert.deepEqual(
       scenario.turns[1].expect?.replyMustNotMatch,
-      ["未开放", "白名单", "黑名单", "路由", "提示词"],
-      "第二轮仍不得出现内部术语"
+      ["卫生整改", "未开放", "白名单", "黑名单", "路由", "提示词"],
+      "第二轮仍不得出现内部术语，也不得退回大类旧称"
     );
     assert.equal(isFeatureQaQuestion(scenario.turns[1].text), true, "第二轮进功能问答");
     assert.equal(
@@ -3226,8 +3335,9 @@ async function main() {
    *     零写入，只回当前住户一两句；失败也只回中性兜底、绝不落回主生成；
    *     **"同时交办两件"不属于 reply_only**——那是 `none`、整条交给完整主流程；
    *   · **黑名单复用同一次路由**：条目作为 `blocked:<id>` 选项摆给模型，只有模型判定
-   *     住户正在交办它时才拦（当前登记唯一一项「卫生整改要求」），纯代码真话回复、
-   *     零出站；表里没有的 id 恒不拦、不加第二次调用；
+   *     住户正在交办它时才拦（当前登记唯一一项「单方面叫别人在洗完澡后清理地漏头发」），
+   *     再过**该条目自己的**纯代码资格复核（缺必要信号则当作 none 落回完整流程），
+   *     纯代码真话回复、零出站；表里没有的 id 恒不拦、不加第二次调用；
    *   · **用量准确累计**：route + 选中功能 extract + compose 三段全计；route none
    *     也计；失败调用已完成 step 的用量也不丢；每条短调用都有正的最大输出上限；
    *   · 收件人由代码绑定原话（模型改不了人）；不可达 → 真话说明、零写入；

@@ -17,13 +17,14 @@ import {
  *    流程（是否该替住户联系某位同屋人，由 doctrine + 本轮 intent 判断）——**不是
  *    不能做**。问答里也要如实这么说。
  * 3. **真正办不了的事只有一个来源**：老板明确登记的**黑名单**
- *    （`blacklist.ts` 的 `BLACKLISTED_CAPABILITIES`，当前是**「卫生整改要求」**一项：
- *    看不到现场严重程度、当前技术不能可靠判断"脏到什么程度才该要求别人整改"）。
- *    与问题**对不上**的条目不得被选中，也不得为它编造原因。
+ *    （`blacklist.ts` 的 `BLACKLISTED_CAPABILITIES`，当前是**「单方面叫别人在洗完澡后
+ *    清理地漏头发」**一项：看不到现场严重程度、当前技术不能可靠判断"脏到什么程度才该
+ *    要求别人整改"）。与问题**对不上**的条目不得被选中，也不得为它编造原因。
  *
- * 本文件只做数据查找，不做主题分叉：黑名单条目自带 `keywords`（关联用）与
- * `validation.reasonAnchors`（通用 grounding 用）。以后新增 / 改写：只改
- * `blacklist.ts` 的数据与 `APPROVED_FEATURES` 登记，问答引擎一行不动。
+ * 本文件只做数据查找，不做主题分叉：黑名单条目自带 `keywords`（关联预筛）、
+ * `qualifier`（与执行阻断同一份精确资格判据）与 `validation.reasonAnchors`（通用
+ * grounding 用）。以后新增 / 改写：只改 `blacklist.ts` 的数据与 `APPROVED_FEATURES`
+ * 登记，问答引擎一行不动。
  *
  * 本文件只 import 同目录的 `blacklist.ts`（后者不 import 任何东西），不会成环。
  */
@@ -53,8 +54,10 @@ export type FeatureQaFactBundle = {
 /**
  * 与**这次问的问题**有关的黑名单条目（数据查找；没有对得上的条目时为空数组）。
  *
- * **本次问题命中关键词优先**；只有问题本身对不上任何条目、但住户**上一轮刚被**这条
- * 黑名单拒绝（`referencedId`，代码写入的结构化 id，不是自由文本）时，才用那一条——
+ * **本次问题命中关键词优先**，且要与**执行阻断同一份精确资格**（`qualifier`）一起满足：
+ * 这样"为什么要我清墙面头发 / 疏通地漏 / 打扫卫生"这类**相邻主题的问题**不会被错误地
+ * 关联到本条目、也就不会被说成"办不了"。只有问题本身对不上任何条目、但住户**上一轮刚被**
+ * 这条黑名单拒绝（`referencedId`，代码写入的结构化 id，不是自由文本）时，才用那一条——
  * 于是「为什么连这么简单都没有?那你有什么功能？」这种**紧接被拒的追问**也能说出名称
  * 与登记原因。**不按关键词猜「刚才」**：引用是否可用由 `repo.latestBlacklistReference`
  * 的收窄查询（本人 + 紧接本人上一条入站 + 72h）决定，这里只做数据查找。
@@ -65,7 +68,9 @@ export function selectBlacklistedCapabilities(
 ): BlacklistedCapability[] {
   const t = (question ?? "").trim();
   const fromQuestion = t
-    ? BLACKLISTED_CAPABILITIES.filter((c) => c.keywords.some((k) => t.includes(k)))
+    ? BLACKLISTED_CAPABILITIES.filter(
+        (c) => c.keywords.some((k) => t.includes(k)) && c.qualifier(t)
+      )
     : [];
   if (fromQuestion.length) return fromQuestion;
   const ref = referencedId ? blacklistedCapabilityById(referencedId) : null;
