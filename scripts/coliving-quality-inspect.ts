@@ -46,41 +46,26 @@ import {
 // 严格口径后保留的两项受约束第三方出站：只测其确定性解析/固定文本/收据，
 // 不涉及任何模型调用，也不触发任何写入。
 import {
-  confirmPersonalItemReminder,
   deliverPersonalItemReminder,
   hasPersonalItemAskSignal,
   looksLikeApproximatePersonalItemAsk,
   looksLikePersonalItemReminder,
-  PERSONAL_ITEM_PROPOSAL_PURPOSE,
   PERSONAL_ITEM_REMINDER_FORM,
   PERSONAL_ITEM_REMINDER_TEXT,
-  personalItemProposalPreview,
   personalItemReminderReceipt,
   recognizePersonalItemReminder,
 } from "../lib/chat/coliving/personal-item-reminder";
 import {
-  confirmNightLaundryReminder,
   deliverNightLaundryReminder,
   hasNightLaundryAskSignal,
   looksLikeApproximateNightLaundryAsk,
   looksLikeNightLaundryReminder,
-  NIGHT_LAUNDRY_PROPOSAL_PURPOSE,
   NIGHT_LAUNDRY_REMINDER_FORM,
   NIGHT_LAUNDRY_REMINDER_TEXT,
-  nightLaundryProposalPreview,
   nightLaundryReminderReceipt,
   recognizeNightLaundryReminder,
 } from "../lib/chat/coliving/night-laundry-reminder";
-import {
-  cancelPendingReminderProposals,
-  parseReminderConfirmation,
-  REMINDER_PROPOSAL_CANCELLED_REPLY,
-  REMINDER_PROPOSAL_FAILED_REPLY,
-  REMINDER_PROPOSAL_PURPOSE,
-  REMINDER_PROPOSAL_STALE_REPLY,
-  REMINDER_PROPOSAL_TTL_HOURS,
-  type ReminderProposalDeps,
-} from "../lib/chat/coliving/reminder-proposal";
+import { type ReminderExecutionDeps } from "../lib/chat/coliving/reminder-execution";
 // 只留离线视图选择器：生产已只生成，quality 脚本不再断言批判器生产接线/选型。
 import { selectCriticRubric } from "../lib/chat/coliving/critic";
 import {
@@ -1812,31 +1797,55 @@ async function main() {
     // 还是那句带占位符的旧句式，真正的用户可见文案由下面的行为测试覆盖。
     assert(PERSONAL_ITEM_REMINDER_FORM.includes("个人物品"));
 
-    // 第 3、4 轮：自由文本的深夜洗衣 / 浴室头发 → 零第三方出站。
-    // 两轮都不是窄命令形态。第 3 轮（深夜洗衣）现在收口到确定性的本地指引入口
-    // （零第三方出站、不过模型）；第 4 轮（浴室头发）仍落回普通对话。
-    for (const [i, turn] of scenario.turns.slice(2).entries()) {
-      assert.equal(
-        looksLikePersonalItemReminder(turn.text),
-        false,
-        `第${i + 3}轮不是个人物品提醒，必须落回普通对话`
-      );
-      assert.equal(
-        looksLikeNightLaundryReminder(turn.text),
-        false,
-        `第${i + 3}轮不是夜间洗衣提醒的窄命令形态，必须落回普通对话`
-      );
-      assert.deepEqual(
-        turn.expect?.mustNotContactNames,
-        ["阿川", "小禾"],
-        `第${i + 3}轮不得产生任何第三方出站`
-      );
+    // 第 3 轮：深夜洗衣的合规自然请求（不是窄命令形态）→ 直接走夜间洗衣的
+    // 受约束执行器，恰好一条固定出站 + 真话收据，不需要二次确认。
+    const t3 = scenario.turns[2];
+    assert.equal(
+      looksLikePersonalItemReminder(t3.text),
+      false,
+      "第 3 轮不是个人物品提醒，不得被个人物品模块收口"
+    );
+    assert.equal(
+      looksLikeNightLaundryReminder(t3.text),
+      false,
+      "第 3 轮不是窄命令形态，走的是合规自然请求入口"
+    );
+    assert(
+      looksLikeApproximateNightLaundryAsk(t3.text, ["阿川"]),
+      "第 3 轮必须被夜间洗衣的合规自然请求判定命中"
+    );
+    assert.deepEqual(t3.expect?.mustUseTools, ["nightLaundryReminder"]);
+    assert.deepEqual(t3.expect?.mustContactNames, ["阿川"]);
+    assert.deepEqual(t3.expect?.mustNotContactNames, ["小禾"]);
+    for (const pattern of t3.expect?.outboundMustMatch ?? []) {
       assert(
-        (turn.expect?.mustNotUseTools ?? []).includes("contactPerson") &&
-          (turn.expect?.mustNotUseTools ?? []).includes("personalItemReminder"),
-        `第${i + 3}轮不得调用任何第三方出站工具`
+        new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
+        `第 3 轮正向哨兵「${pattern}」必须命中固定正文：${NIGHT_LAUNDRY_REMINDER_TEXT}`
       );
     }
+
+    // 第 4 轮：浴室头发 → 零第三方出站，落回普通对话。
+    const t4 = scenario.turns[3];
+    assert.equal(
+      looksLikePersonalItemReminder(t4.text),
+      false,
+      "第 4 轮不是个人物品提醒，必须落回普通对话"
+    );
+    assert.equal(
+      looksLikeNightLaundryReminder(t4.text),
+      false,
+      "第 4 轮不是夜间洗衣提醒的窄命令形态，必须落回普通对话"
+    );
+    assert.deepEqual(
+      t4.expect?.mustNotContactNames,
+      ["阿川", "小禾"],
+      "第 4 轮不得产生任何第三方出站"
+    );
+    assert(
+      (t4.expect?.mustNotUseTools ?? []).includes("contactPerson") &&
+        (t4.expect?.mustNotUseTools ?? []).includes("personalItemReminder"),
+      "第 4 轮不得调用任何第三方出站工具"
+    );
 
     // 判法自检：固定正文作为唯一出站时，第 1 轮应判过；同一条哨兵也能抓住
     // "把收件人姓名写进第三方正文" 这种泄漏。
@@ -1860,7 +1869,7 @@ async function main() {
       "第三方正文里出现收件人姓名必须被哨兵抓住"
     );
     assert(
-      evaluateTurnExpectation(scenario.turns[2].expect, {
+      evaluateTurnExpectation(t4.expect, {
         toolsUsed: [],
         reply: "好的。",
         outbound: [{ toName: "阿川", text: "已经跟他说了。" }],
@@ -2126,129 +2135,121 @@ async function main() {
       );
     }
 
-    // 第 4 轮：自由文本深夜洗衣（不是窄命令形态）→ 确定性本地指引，零第三方出站。
+    // 第 4 轮：深夜洗衣的合规自然请求（不是窄命令形态）→ **直接**走夜间洗衣的
+    // 受约束执行器，恰好一条固定出站 + 真话收据，不需要二次确认。
     const t4 = scenario.turns[3];
     assert.equal(
       looksLikeNightLaundryReminder(t4.text),
       false,
-      "自由文本不是窄命令形态，不走合规出站路径"
+      "第 4 轮不是窄命令形态，走的是合规自然请求入口"
     );
     assert.equal(
       recognizeNightLaundryReminder(t4.text),
       null,
-      "第 4 轮原句必须认不出固定发送（只走近似指引，不产生第三方出站）"
+      "第 4 轮原句不是窄命令，必须由合规自然请求判定收口"
     );
     assert.equal(looksLikePersonalItemReminder(t4.text), false);
     assert(
       hasNightLaundryAskSignal(t4.text),
-      "corpus-034 原句必须被夜间洗衣近似请求信号命中"
+      "corpus-034 原句必须被夜间洗衣合规自然请求信号命中"
     );
     assert(
       looksLikeApproximateNightLaundryAsk(t4.text, ["阿川"]),
-      "corpus-034 原句必须收口到夜间洗衣本地指引"
+      "corpus-034 原句必须收口到夜间洗衣的受约束执行器"
     );
     // 对完整名册（含说话人小禾）判定也必须为真，结论不因名册范围而变。
     assert(
       looksLikeApproximateNightLaundryAsk(t4.text, ["小禾", "阿川"]),
       "对完整名册判定必须同样收口"
     );
-    assert.deepEqual(t4.expect?.mustNotContactNames, ["阿川", "小禾"]);
-    assert(
-      (t4.expect?.mustUseTools ?? []).includes("nightLaundryReminderPreview"),
-      "第 4 轮必须报**预览**工具名，而不是真正的发送工具"
-    );
-    assert(
-      (t4.expect?.mustNotUseTools ?? []).includes("nightLaundryReminder") &&
-        (t4.expect?.mustNotUseTools ?? []).includes("personalItemReminder") &&
-        (t4.expect?.mustNotUseTools ?? []).includes("contactPerson"),
-      "自由文本轮不得调用任何第三方出站工具（整条链路不调模型、无工具）"
-    );
-    // 第 4 轮的回复是**可执行预览**：说真话（还没发）、点名收件人、把将要
-    // 发出的固定正文原样摆出来、并给出「确认 / 取消」。零第三方出站。
-    const nightPreview = nightLaundryProposalPreview("阿川");
-    assert(
-      nightPreview.includes("还没发") &&
-        nightPreview.includes(NIGHT_LAUNDRY_REMINDER_TEXT) &&
-        nightPreview.includes("阿川") &&
-        nightPreview.includes("确认") &&
-        nightPreview.includes("取消"),
-      `夜间洗衣预览必须含“还没发”＋固定正文＋收件人＋确认/取消：${nightPreview}`
-    );
+    assert.deepEqual(t4.expect?.mustUseTools, ["nightLaundryReminder"]);
+    assert.deepEqual(t4.expect?.mustContactNames, ["阿川"]);
+    assert.deepEqual(t4.expect?.mustNotContactNames, ["小禾"]);
+    for (const pattern of t4.expect?.outboundMustMatch ?? []) {
+      assert(
+        new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
+        `第 4 轮正向哨兵「${pattern}」必须命中固定正文：${NIGHT_LAUNDRY_REMINDER_TEXT}`
+      );
+    }
+    // 第 4 轮的回复是**真话收据**：点名收件人、复述固定功能；不再有「确认 /
+    // 取消」这类需要住户再答一轮的预览。
+    const nightReceipt = nightLaundryReminderReceipt("阿川");
     for (const pattern of t4.expect?.replyMustMatch ?? []) {
       assert(
-        new RegExp(pattern).test(nightPreview),
-        `第 4 轮预览必须命中「${pattern}」：${nightPreview}`
+        new RegExp(pattern).test(nightReceipt),
+        `第 4 轮收据必须命中「${pattern}」：${nightReceipt}`
       );
     }
     for (const pattern of t4.expect?.replyMustNotMatch ?? []) {
       assert(
-        !new RegExp(pattern).test(nightPreview),
-        `第 4 轮预览不得命中反向哨兵「${pattern}」`
+        !new RegExp(pattern).test(nightReceipt),
+        `第 4 轮收据不得命中反向哨兵「${pattern}」`
       );
     }
-    // 判法自检：以预览为回复、报预览工具名、零第三方出站时必须判过；一旦出现
-    // 第三方出站（或误报成真正的发送工具）必须判失败。这里只验结构事实，不
-    // 宣称预览文字的自然度。
+    // 判法自检：恰好一条发给阿川的固定出站 + 真话收据时判过；零出站或出站被
+    // 夹带必须判失败。这里只验结构事实，不宣称收据文字的自然度。
     assert.deepEqual(
       evaluateTurnExpectation(t4.expect, {
-        toolsUsed: ["nightLaundryReminderPreview"],
-        reply: nightPreview,
-        outbound: [],
+        toolsUsed: ["nightLaundryReminder"],
+        reply: nightReceipt,
+        outbound: [{ toName: "阿川", text: NIGHT_LAUNDRY_REMINDER_TEXT }],
       }),
       [],
-      "确定性预览 + 零第三方出站不该被判失败"
-    );
-    assert(
-      evaluateTurnExpectation(t4.expect, {
-        toolsUsed: ["nightLaundryReminderPreview"],
-        reply: nightPreview,
-        outbound: [{ toName: "阿川", text: "好。" }],
-      }).length > 0,
-      "第 4 轮若产生任何第三方出站必须判失败"
+      "合规自然请求恰好一条固定出站不该被判失败"
     );
     assert(
       evaluateTurnExpectation(t4.expect, {
         toolsUsed: ["nightLaundryReminder"],
-        reply: nightPreview,
+        reply: nightReceipt,
         outbound: [],
       }).length > 0,
-      "第 4 轮若误报成真正的发送工具必须判失败（预览≠已发送）"
+      "第 4 轮若没有产生发给阿川的固定出站必须判失败"
+    );
+    assert(
+      evaluateTurnExpectation(t4.expect, {
+        toolsUsed: ["nightLaundryReminder"],
+        reply: nightReceipt,
+        outbound: [
+          { toName: "阿川", text: `${NIGHT_LAUNDRY_REMINDER_TEXT}顺便把头发清了` },
+        ],
+      }).length > 0,
+      "第 4 轮出站被夹带、不再逐字等于常量必须判失败"
     );
   });
 
   /**
-   * ── 两项受约束提醒的「近似请求」预览入口（2026-09-12 老板驳回模板指引后）──
+   * ── 两项受约束提醒的**合规自然请求**直接执行（2026-09-13 老板明确白名单口径）──
    *
-   * 老板口径：明确想让 AI 对指定室友执行该动作、但没按固定命令写的近似请求，
-   * 在确定性入口收口——落一条**发给发起人本人**的待确认预览（零第三方出站、
-   * 不过模型），预览里把将要发出的固定正文原样摆出来并给出「确认 / 取消」。
-   * 纯抱怨 / 评理 / 讨论 / 未点名对象 / 一般噪音 / 卫生头发 / 费用 / 规则 /
-   * 混合议题一律不吞，仍走普通对话。这里只做免费字符串判定。
+   * 老板口径：**白名单是功能/动作边界，不是每一次命中都要二次确认。** 自然请求
+   * 只有在「唯一名册收件人 + 功能唯一主题 + 明确要求 AI 执行 + 非讨论/否定/混合」
+   * 同时成立时，才直接走该功能**既有的**受约束执行器（固定正文 + 现有名册校验 +
+   * 短回执）。其余一律不部分执行、不恢复自由文本，落普通对话或既有真话说明。
+   * 这里只做免费字符串判定与源码接线检查。
    */
-  check("两项受约束提醒：近似请求只落本地预览，不吞普通谈话", () => {
+  check("两项受约束提醒：合规近似自然请求直接执行，其余不吞普通谈话", () => {
     const others = ["阿川"];
-    // 命中：corpus-034 原句（夜间洗衣近似请求）。
+    // 命中：corpus-034 原句（夜间洗衣合规自然请求）。
     const nightOriginal =
       "阿川昨天凌晨四点开洗衣机和烘干机，机器就挨着我房间那面墙，我被吵醒了。你能不能私下跟他讲一下，这一次先别在深夜洗和烘干。";
     assert(
       looksLikeApproximateNightLaundryAsk(nightOriginal, others),
-      "corpus-034 原句必须收口到夜间洗衣预览"
+      "corpus-034 原句必须收口到夜间洗衣的受约束执行器"
     );
     // 命中：个人物品的明确自然语言请求（点名阿川、明确交办提醒）。
     const personalAsk =
       "阿川又直接拿我的毛巾了，麻烦你提醒阿川用我的个人物品前先问我。";
     assert(
       hasPersonalItemAskSignal(personalAsk),
-      "个人物品近似请求必须通过不查名册的预筛"
+      "个人物品合规自然请求必须通过不查名册的预筛"
     );
     assert(
       looksLikeApproximatePersonalItemAsk(personalAsk, others),
-      "个人物品的明确自然语言请求必须收口到本地预览"
+      "个人物品的明确自然语言请求必须收口到受约束执行器"
     );
     assert.equal(
       recognizePersonalItemReminder(personalAsk),
       null,
-      "个人物品近似请求不是窄命令形态，固定发送识别必须为 null"
+      "个人物品合规自然请求不是窄命令形态，固定发送识别必须为 null"
     );
     // 命中：个人物品的另一种自然说法（用我的东西、先问我）。
     assert(
@@ -2256,19 +2257,7 @@ async function main() {
         "阿川老是直接拿我的东西不打招呼，你能不能跟他说一声，用之前先问我。",
         others
       ),
-      "个人物品的明确自然语言请求必须收口到本地预览"
-    );
-    // 预览：说真话（还没发）＋ 把将要发出的固定正文原样摆出 ＋ 点名收件人 ＋
-    // 确认/取消，且**不含**旧占位模板。
-    const personalPreview = personalItemProposalPreview("阿川");
-    assert(
-      personalPreview.includes("还没发") &&
-        personalPreview.includes(PERSONAL_ITEM_REMINDER_TEXT) &&
-        personalPreview.includes("阿川") &&
-        personalPreview.includes("确认") &&
-        personalPreview.includes("取消") &&
-        !personalPreview.includes(PERSONAL_ITEM_REMINDER_FORM),
-      `个人物品预览必须含“还没发”＋固定正文＋收件人＋确认/取消、且不含占位模板：${personalPreview}`
+      "个人物品的明确自然语言请求必须收口到受约束执行器"
     );
 
     // 反例：必须落回普通对话（两个功能都不命中）。
@@ -2284,6 +2273,8 @@ async function main() {
       ["费用议题", "阿川半夜用洗衣机，水费也分摊一下，你跟他说一下。"],
       ["规则议题", "阿川半夜用洗衣机，你跟他说一下，立个全屋规矩。"],
       ["混合议题", "跟阿川说用我东西前先问我，另外别半夜用洗衣机。"],
+      ["混合卫生", "帮我提醒阿川用我的个人物品前先问我，顺便把地漏的头发清理了。"],
+      ["否定式交办", "别提醒阿川用我的个人物品前先问我。"],
       ["自己去联系", "阿川半夜用洗衣机，我自己跟他说就行，不用你。"],
       [
         "对方已提醒我",
@@ -2303,22 +2294,8 @@ async function main() {
       );
     }
 
-    // 预览是**写死的模板 + 收件人姓名**：可以含固定正文与收件人（这是
-    // 「如实摆出要发什么」的要求），但**不得**夹带住户说的附带诉求。
-    for (const [preview, label] of [
-      [nightLaundryProposalPreview("阿川"), "夜间洗衣"],
-      [personalItemProposalPreview("阿川"), "个人物品"],
-    ] as const) {
-      for (const attached of ["头发", "水费", "全屋", "规矩", "分摊"]) {
-        assert(
-          !preview.includes(attached),
-          `${label}预览不得含附带诉求「${attached}」：${preview}`
-        );
-      }
-    }
-
     // 接线位置：近似判定在各自模块内、由主生成前的 deliver* 调用；命中即
-    // 零模型调用。两个模块都不得 import AI SDK。
+    // 直接走同一个受约束执行器（不落回模型、不落任何二次确认状态）。
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     const nightSrc = readFileSync(
       "lib/chat/coliving/night-laundry-reminder.ts",
@@ -2339,10 +2316,10 @@ async function main() {
       "个人物品模块必须调用近似判定（不调模型）并传入名册姓名"
     );
     // 判定顺序（Codex 2026-09-12 实测暴露过回归）：**先窄命令识别**，失败后
-    // 才试近似预览，最后才是「像这一族但受理不了」的真话说明。近似分支不得
+    // 才试合规自然请求，最后才是「像这一族但受理不了」的真话说明。近似分支不得
     // 抢在合规命令识别之前，也不得回落到模型生成。断言按**函数体切片**做，
-    // 不按整文件 indexOf——近似判定现在在独立的 try*Proposal 里，整文件顺序
-    // 反映不了运行顺序。
+    // 不按整文件 indexOf——近似判定现在在独立的 try*ApproxRequest 里，整文件
+    // 顺序反映不了运行顺序。
     for (const [
       src,
       deliverSig,
@@ -2352,28 +2329,31 @@ async function main() {
       signalCall,
       approxCall,
       looksLikeCall,
+      executeCall,
       label,
     ] of [
       [
         personalSrc,
         "export async function deliverPersonalItemReminder(",
-        "await tryPersonalItemProposal(args, deps)",
-        "async function tryPersonalItemProposal(",
+        "await tryPersonalItemApproxRequest(args, deps)",
+        "async function tryPersonalItemApproxRequest(",
         "recognizePersonalItemReminder(args.text)",
         "hasPersonalItemAskSignal(",
         "looksLikeApproximatePersonalItemAsk(",
         "looksLikePersonalItemReminder(args.text)",
+        "await executePersonalItemReminder(deps, args, target)",
         "个人物品",
       ],
       [
         nightSrc,
         "export async function deliverNightLaundryReminder(",
-        "await tryNightLaundryProposal(args, deps)",
-        "async function tryNightLaundryProposal(",
+        "await tryNightLaundryApproxRequest(args, deps)",
+        "async function tryNightLaundryApproxRequest(",
         "recognizeNightLaundryReminder(args.text)",
         "hasNightLaundryAskSignal(",
         "looksLikeApproximateNightLaundryAsk(",
         "looksLikeNightLaundryReminder(args.text)",
+        "await executeNightLaundryReminder(deps, args, target)",
         "夜间洗衣",
       ],
     ] as const) {
@@ -2382,46 +2362,57 @@ async function main() {
       const deliverBody = src.slice(deliverIdx);
       const exactIdx = deliverBody.indexOf(exactCall);
       assert(exactIdx >= 0, `${label}必须先做窄命令识别`);
-      const proposalIdx = deliverBody.indexOf(deliverCall, exactIdx);
-      assert(proposalIdx > exactIdx, `${label}近似预览必须排在窄命令识别之后`);
-      // 不可能受理时（夹带 / 没点名 / 被否定）才回真话说明，且必须在近似
-      // 分支**之后**——这样「点了名但没按固定格式写」的请求会先被收口成预览，
-      // 而不是被一句「你说清楚要提醒谁」挡回去。
+      const approxIdx = deliverBody.indexOf(deliverCall, exactIdx);
+      assert(approxIdx > exactIdx, `${label}合规自然请求必须排在窄命令识别之后`);
       assert(
-        deliverBody.indexOf(looksLikeCall, proposalIdx) > proposalIdx,
-        `${label}真话说明必须排在近似预览之后`
+        deliverBody.indexOf(looksLikeCall, approxIdx) > approxIdx,
+        `${label}真话说明必须排在合规自然请求之后`
       );
 
       const helperIdx = src.indexOf(helperSig);
-      assert(helperIdx >= 0, `${label}必须有近似预览函数`);
+      assert(helperIdx >= 0, `${label}必须有合规自然请求函数`);
       const helperBody = src.slice(helperIdx, deliverIdx);
       const signalIdx = helperBody.indexOf(signalCall);
       assert(signalIdx >= 0, `${label}近似预筛必须不查名册先跑`);
-      const approxIdx = helperBody.indexOf(approxCall);
-      assert(approxIdx > signalIdx, `${label}近似判定必须在预筛之后`);
-      const createIdx = helperBody.indexOf("await createReminderProposal(deps, {");
+      const helperApproxIdx = helperBody.indexOf(approxCall);
+      assert(helperApproxIdx > signalIdx, `${label}近似判定必须在预筛之后`);
       assert(
-        createIdx > approxIdx,
-        `${label}近似分支必须落本地待确认预览，不落回普通生成`
-      );
-      assert(
-        helperBody.indexOf('kind: "proposal"') > createIdx,
-        `${label}近似分支必须返回 proposal，而不是直接发送`
+        helperBody.indexOf(executeCall) > helperApproxIdx,
+        `${label}合规自然请求必须**直接复用受约束执行器**，不落二次确认状态`
       );
     }
+    // 不得再有任何「预览 / 确认 / 取消」的运行路径或专用持久化。
+    for (const [src, label] of [
+      [personalSrc, "个人物品"],
+      [nightSrc, "夜间洗衣"],
+    ] as const) {
+      assert(
+        !/createReminderProposal|takeReminderProposal|parseReminderConfirmation|ProposalPreview|PROPOSAL_PURPOSE/.test(
+          src
+        ),
+        `${label}模块不得残留预览/确认/取消路径`
+      );
+    }
+    assert(
+      !existsSync("lib/chat/coliving/reminder-proposal.ts"),
+      "预览/确认专用模块必须删除"
+    );
+    assert(
+      existsSync("lib/chat/coliving/reminder-execution.ts"),
+      "两项功能共用的受约束执行脚手架必须存在"
+    );
     const mainGenIdx = turnSrc.indexOf('trackedGatewayCall("main"');
     assert(
       mainGenIdx > 0 &&
         turnSrc.indexOf("await deliverPersonalItemReminder(") < mainGenIdx &&
         turnSrc.indexOf("await deliverNightLaundryReminder(") < mainGenIdx,
-      "两项近似入口都必须在主生成之前，命中即零模型调用"
+      "两项入口都必须在主生成之前，命中即零模型调用"
     );
-    // 确认 / 取消收口也必须在主生成之前，且两条确认路径都带 conversationId。
     assert(
-      turnSrc.indexOf("await confirmPersonalItemReminder(") < mainGenIdx &&
-        turnSrc.indexOf("await confirmNightLaundryReminder(") < mainGenIdx &&
-        turnSrc.indexOf("await cancelPendingReminderProposals(") < mainGenIdx,
-      "确认/取消收口必须在主生成之前"
+      !/confirmPersonalItemReminder|confirmNightLaundryReminder|parseReminderConfirmation|cancelPendingReminderProposals|proposalOutcome/.test(
+        turnSrc
+      ),
+      "turn.ts 不得再有任何确认/取消/预览接线"
     );
     assert(
       !/generateText|generateObject|streamText/.test(nightSrc) &&
@@ -2435,1016 +2426,385 @@ async function main() {
    *
    * Codex 2026-09-12 复审要求：免费测试必须**真的调用公开函数、断言到底入队了
    * 几条 / 正文是什么 / 收件人是谁**，而不是拿「源码里出现过某常量」冒充行为
-   * 证据。这里用一个内存假 repo 注入 `ReminderProposalDeps`，覆盖：
-   *   · 无冒号点名请求 → 只落本地预览、零第三方出站；
-   *   · 「确认」→ 恰好一条固定正文的第三方出站；
-   *   · 没有提案 / 并发被抢走 / 预览未送达 / 最近一条是普通消息 / 正文已变 →
-   *     一律不发；
-   *   · 跨功能待确认提案不会被错认；
-   *   · 认领后写入失败 → 报发送状态无法确认、不自动重发，且认领不退回
-   *     （不能重试成重复外呼）；
+   * 证据。这里用一个内存假 repo 注入 `ReminderExecutionDeps`，覆盖：
+   *   · 合规自然请求（含无冒号点名请求）→ 恰好一条固定正文的第三方出站 + 短回执；
+   *   · 混合 / 讨论 / 否定 / 未点名 → 零第三方出站、零写入；
+   *   · 旧窄命令仍直接发送；
+   *   · 「确认」「取消」这类词不再拥有专门出站语义，落普通路径；
    *   · 歧义 / 收件人不可达 → 真话说明、零写入；
-   *   · 「取消」之后旧的「确认」不能把作废提案翻出来发。
+   *   · 落任何写入都仍过 assertCanWrite 硬闸（近似入口不是后门）。
    */
-  // 假 repo 零真实写入，但**落提案与发送都要过 assertCanWrite 硬闸**。按 guard
-  // 的正规姿势放行：显式开 `COLIVING_LOCAL_WRITE=1`，且目标就是测试屋
-  // （所有调用都传 senderIsTest:true）。**不把 NEXT_RUNTIME 设成 nodejs 冒充
-  // 生产运行时**——那是绕过硬闸，不是启用它。跑完还原。
+  // 假 repo 零真实写入，但**直接发送要过 assertCanWrite 硬闸**。按 guard 的
+  // 正规姿势放行：显式开 `COLIVING_LOCAL_WRITE=1`，且目标就是测试屋（所有调用
+  // 都传 senderIsTest:true）。**不把 NEXT_RUNTIME 设成 nodejs 冒充生产运行时**
+  // ——那是绕过硬闸，不是启用它。跑完还原。
   const savedLocalWrite = process.env.COLIVING_LOCAL_WRITE;
   process.env.COLIVING_LOCAL_WRITE = "1";
   try {
-  await checkAsync(
-    "两项受约束提醒：预览/确认/取消的入队行为（假 repo，零真实写入）",
-    async () => {
-      type ReminderMember = Awaited<
-        ReturnType<ReminderProposalDeps["getMembers"]>
-      >[number];
+    await checkAsync(
+      "两项受约束提醒：合规命中直接发送、其余零第三方的入队行为（假 repo，零真实写入）",
+      async () => {
+        type ReminderMember = Awaited<
+          ReturnType<ReminderExecutionDeps["getMembers"]>
+        >[number];
 
-      const SENDER = "11111111-0000-0000-0000-000000000001";
-      const ACHUAN = "22222222-0000-0000-0000-000000000002";
-      const XIAOHE = "33333333-0000-0000-0000-000000000003";
-      const HOUSE = "aaaaaaaa-0000-0000-0000-000000000000";
-      const CONV = `${SENDER}:sms`;
+        const SENDER = "11111111-0000-0000-0000-000000000001";
+        const ACHUAN = "22222222-0000-0000-0000-000000000002";
+        const XIAOHE = "33333333-0000-0000-0000-000000000003";
+        const HOUSE = "aaaaaaaa-0000-0000-0000-000000000000";
 
-      const member = (
-        personId: string,
-        name: string,
-        over: Partial<ReminderMember> = {}
-      ): ReminderMember => ({
-        personId,
-        name,
-        role: "tenant",
-        resides: true,
-        movedInAt: null,
-        nameConfirmed: true,
-        address: "+15550000001",
-        notes: [],
-        ...over,
-      });
+        const member = (
+          personId: string,
+          name: string,
+          over: Partial<ReminderMember> = {}
+        ): ReminderMember => ({
+          personId,
+          name,
+          role: "tenant",
+          resides: true,
+          movedInAt: null,
+          nameConfirmed: true,
+          address: "+15550000001",
+          notes: [],
+          ...over,
+        });
 
-      function makeRepo(opts: {
-        members: ReminderMember[];
-        /** 模拟并发第二个确认 / 已被抢走：claim 永远拿不到行。 */
-        claimAlwaysLoses?: boolean;
-        /** 模拟认领后写第三方失败（网络/写库不确定）。 */
-        failThirdPartyQueue?: boolean;
-        /**
-         * 模拟**第三方已成功入队之后**才失败：`queueCommunication` 照常入队，
-         * 随后的 `getOrCreateConversation` 抛错。用来验证「一条已入队 + 认领已
-         * 消耗 → 重试不会再入第二条」。
-         */
-        failAfterThirdPartyQueue?: boolean;
-        /** 会话里最近一条出站是**不属于任何提案**的普通消息。 */
-        latestIsPlainMessage?: boolean;
-        /** 预览落在 `queued`（还没送达）而不是 `sent`。 */
-        previewNotDelivered?: boolean;
-        /** 出站预览正文与当前固定文案不一致（模拟固定文案/姓名后来变了）。 */
-        corruptPreviewBody?: boolean;
-        /** 预览已过 24h TTL（模拟陈年提案不再可认领）。 */
-        expiredProposal?: boolean;
-      }) {
-        let seq = 0;
-        const queued: Array<{
-          toPersonId: string;
-          body: string;
-          purpose: string;
-          act: string;
-        }> = [];
-        const outbound: Array<{
-          conversationId: string;
-          personId: string;
-          channel: string;
-          body: string;
-          communicationId: string | null;
-        }> = [];
-        const comms = new Map<
-          string,
-          {
+        function makeRepo(opts: { members: ReminderMember[] }) {
+          let seq = 0;
+          const queued: Array<{
             toPersonId: string;
-            householdId: string;
-            channel: string;
+            body: string;
             purpose: string;
-            status: string;
             act: string;
-            decisionId: string;
-            respondedAt: Date | null;
-            sentAt: Date;
-          }
-        >();
-        const decisions: Array<{
-          id: string;
-          householdId: string;
-          kind: string;
-          intent: string;
-          targetPersonIds: string[];
-          modelId: string | null;
-        }> = [];
+          }> = [];
+          const outbound: Array<{
+            conversationId: string;
+            personId: string;
+            body: string;
+            communicationId: string | null;
+          }> = [];
+          const decisions: Array<{
+            kind: string;
+            intent: string;
+            targetPersonIds: string[];
+            modelId: string | null;
+          }> = [];
 
-        const deps: ReminderProposalDeps = {
-          getMembers: async () => opts.members,
-          recordDecision: async (args) => {
-            const id = `decision-${++seq}`;
-            decisions.push({
-              id,
-              householdId: args.householdId,
-              kind: args.kind,
-              intent: args.intent ?? "",
-              targetPersonIds: args.targetPersonIds ?? [],
-              modelId: args.modelId ?? null,
-            });
-            return id;
-          },
-          queueCommunication: async (args) => {
-            if (opts.failThirdPartyQueue && args.toPersonId !== SENDER) {
-              throw new Error("模拟：第三方写入失败");
-            }
-            const id = `comm-${++seq}`;
-            queued.push({
-              toPersonId: args.toPersonId,
-              body: args.body,
-              purpose: args.purpose ?? "",
-              act: args.act ?? "",
-            });
-            comms.set(id, {
-              toPersonId: args.toPersonId,
-              householdId: args.householdId,
-              channel: args.channel,
-              purpose: args.purpose ?? "",
-              status:
-                opts.previewNotDelivered && args.toPersonId === SENDER
-                  ? "queued"
-                  : "sent",
-              act: args.act ?? "",
-              decisionId: args.decisionId ?? "",
-              respondedAt: null,
-              sentAt:
-                opts.expiredProposal && args.toPersonId === SENDER
-                  ? new Date(
-                      Date.now() -
-                        (REMINDER_PROPOSAL_TTL_HOURS + 1) * 3600 * 1000
-                    )
-                  : new Date(),
-            });
-            return id;
-          },
-          getOrCreateConversation: async (args) => {
-            if (opts.failAfterThirdPartyQueue && args.personId !== SENDER) {
-              throw new Error("模拟：第三方入队后、写会话/消息时失败");
-            }
-            return `${args.personId}:${args.channel}`;
-          },
-          appendMessage: async (args) => {
-            if (args.direction === "outbound") {
-              outbound.push({
-                conversationId: args.conversationId,
-                personId: args.personId,
-                channel: args.channel,
-                body:
-                  opts.corruptPreviewBody && args.personId === SENDER
-                    ? `（旧固定文案）${args.body}`
-                    : args.body,
-                communicationId: args.communicationId ?? null,
+          const deps: ReminderExecutionDeps = {
+            getMembers: async () => opts.members,
+            recordDecision: async (args) => {
+              decisions.push({
+                kind: args.kind,
+                intent: args.intent ?? "",
+                targetPersonIds: args.targetPersonIds ?? [],
+                modelId: args.modelId ?? null,
               });
-            }
-            return `msg-${++seq}`;
-          },
-          linkResponse: async () => null,
-          findLatestOutboundCommunication: async (args) => {
-            if (opts.latestIsPlainMessage) {
-              return {
-                communicationId: null,
-                conversationId: `${args.personId}:${args.channel}`,
-                decisionId: null,
-                purpose: null,
-                body: "一条普通消息",
-                status: null,
-                act: null,
-                respondedAt: null,
-                sentAt: new Date(),
-                createdAt: new Date(),
-              };
-            }
-            const last = outbound
-              .filter(
-                (m) =>
-                  m.personId === args.personId && m.channel === args.channel
-              )
-              .at(-1);
-            if (!last) return null;
-            const c = last.communicationId
-              ? comms.get(last.communicationId)
-              : undefined;
-            return {
-              communicationId: last.communicationId,
-              conversationId: last.conversationId,
-              decisionId: c?.decisionId ?? null,
-              purpose: c?.purpose ?? null,
-              body: last.body,
-              status: c?.status ?? null,
-              act: c?.act ?? null,
-              respondedAt: c?.respondedAt ?? null,
-              sentAt: c?.sentAt ?? null,
-              createdAt: c?.sentAt ?? null,
-            };
-          },
-          claimReminderProposal: async (args) => {
-            if (opts.claimAlwaysLoses) return null;
-            const c = comms.get(args.communicationId);
-            if (
-              !c ||
-              c.respondedAt ||
-              c.toPersonId !== args.personId ||
-              c.householdId !== args.householdId ||
-              c.channel !== args.channel ||
-              c.status !== "sent"
-            ) {
-              return null;
-            }
-            c.respondedAt = new Date();
-            return {
-              communicationId: args.communicationId,
-              decisionId: c.decisionId,
-            };
-          },
-          consumeReminderProposalsByPrefix: async (args) => {
-            let n = 0;
-            for (const c of comms.values()) {
-              if (
-                c.respondedAt ||
-                c.toPersonId !== args.requesterPersonId ||
-                c.householdId !== args.householdId ||
-                c.channel !== args.channel ||
-                !c.purpose.startsWith(args.purposePrefix)
-              ) {
-                continue;
+              return `decision-${++seq}`;
+            },
+            queueCommunication: async (args) => {
+              const id = `comm-${++seq}`;
+              queued.push({
+                toPersonId: args.toPersonId,
+                body: args.body,
+                purpose: args.purpose ?? "",
+                act: args.act ?? "",
+              });
+              return id;
+            },
+            getOrCreateConversation: async (args) =>
+              `${args.personId}:${args.channel}`,
+            appendMessage: async (args) => {
+              if (args.direction === "outbound") {
+                outbound.push({
+                  conversationId: args.conversationId,
+                  personId: args.personId,
+                  body: args.body,
+                  communicationId: args.communicationId ?? null,
+                });
               }
-              c.respondedAt = new Date();
-              n++;
-            }
-            return n;
-          },
-          getReminderProposalDecision: async (decisionId) => {
-            const d = decisions.find((x) => x.id === decisionId);
-            return d
-              ? {
-                  householdId: d.householdId,
-                  kind: d.kind,
-                  intent: d.intent,
-                  modelId: d.modelId,
-                  targetPersonIds: d.targetPersonIds,
-                }
-              : null;
-          },
-        };
-
-        return {
-          deps,
-          queued,
-          /** 只数**发给别人的**（第三方）入队，发起人本人的预览不算。 */
-          thirdParty: () => queued.filter((q) => q.toPersonId !== SENDER),
-        };
-      }
-
-      const baseMembers = [member(SENDER, "小林"), member(ACHUAN, "阿川")];
-      const personalAsk = "帮我提醒阿川用我的个人物品前先问我";
-      const nightAsk = "帮我提醒阿川深夜别开洗衣机";
-
-      // ① 无冒号点名请求（Codex 实测的回归句）→ 落本地预览、零第三方出站。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        assert.equal(
-          out.kind,
-          "proposal",
-          "点名但没按固定格式的个人物品请求必须落预览，不能再回「说清楚要提醒谁」"
-        );
-        assert(
-          out.kind === "proposal" && out.recipientPersonId === ACHUAN,
-          "个人物品预览必须绑定点名室友的稳定 ID"
-        );
-        assert(
-          out.kind === "proposal" &&
-            out.reply === personalItemProposalPreview("阿川"),
-          "个人物品预览正文必须是固定模板"
-        );
-        assert.equal(repo.thirdParty().length, 0, "个人物品预览轮零第三方出站");
-        assert.equal(repo.queued.length, 1, "个人物品预览轮只入队一条");
-        assert.equal(repo.queued[0].toPersonId, SENDER, "预览只发给发起人本人");
-      }
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await deliverNightLaundryReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: nightAsk,
-          },
-          repo.deps
-        );
-        assert.equal(
-          out.kind,
-          "proposal",
-          "点名但没按固定格式的夜间洗衣请求必须落预览"
-        );
-        assert(
-          out.kind === "proposal" && out.recipientPersonId === ACHUAN,
-          "夜间洗衣预览必须绑定点名室友的稳定 ID"
-        );
-        assert(
-          out.kind === "proposal" &&
-            out.reply === nightLaundryProposalPreview("阿川"),
-          "夜间洗衣预览正文必须是固定模板"
-        );
-        assert.equal(repo.thirdParty().length, 0, "夜间洗衣预览轮零第三方出站");
-        assert.equal(repo.queued.length, 1, "夜间洗衣预览轮只入队一条");
-      }
-
-      // ② 「确认」→ 恰好一条固定正文的第三方出站 + 真话回执。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "sent", "有有效提案时「确认」必须真的发");
-        assert(
-          out.kind === "sent" &&
-            out.text === PERSONAL_ITEM_REMINDER_TEXT &&
-            out.recipientPersonId === ACHUAN &&
-            out.receiptText === personalItemReminderReceipt("阿川"),
-          "发送必须用固定正文 + 提案绑定的收件人 + 固定回执"
-        );
-        const tp = repo.thirdParty();
-        assert.equal(tp.length, 1, "确认后恰好一条第三方出站");
-        assert.equal(tp[0].toPersonId, ACHUAN, "第三方出站收件人是阿川");
-        assert.equal(
-          tp[0].body,
-          PERSONAL_ITEM_REMINDER_TEXT,
-          "第三方出站正文必须是固定常量"
-        );
-        assert.equal(repo.queued.length, 2, "总入队 = 预览(发起人) + 发送(阿川)");
-      }
-
-      // ③ 没有提案时回「确认」→ 不发、零写入。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "none", "没有任何提案时「确认」绝不发送");
-        assert.equal(repo.queued.length, 0, "没有任何提案时零写入");
-      }
-
-      // ④ 并发第二个确认 / 提案被抢走（claim 拿不到行）→ 不发。
-      {
-        const repo = makeRepo({ members: baseMembers, claimAlwaysLoses: true });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "none", "认领不到提案时绝不发送");
-        assert.equal(repo.thirdParty().length, 0, "认领失败时零第三方出站");
-      }
-
-      // ④b 真正的并发确认：两个「确认」用 Promise.all 同时出发，只有一条能
-      // 原子认领到提案（claim 是单条可变行）→ 只发一条第三方出站。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const [a, b] = await Promise.all([
-          confirmPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              conversationId: CONV,
-              text: "确认",
+              return `msg-${++seq}`;
             },
-            repo.deps
-          ),
-          confirmPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              conversationId: CONV,
-              text: "确认",
-            },
-            repo.deps
-          ),
-        ]);
-        const sent = [a, b].filter((o) => o.kind === "sent");
-        const none = [a, b].filter((o) => o.kind === "none");
-        assert.equal(sent.length, 1, "并发两个「确认」只能有一个真的发出去");
-        assert.equal(none.length, 1, "并发第二个「确认」必须拿不到已被认领的提案");
-        assert.equal(repo.thirdParty().length, 1, "并发确认只允许一条第三方出站");
-      }
+          };
 
-      // ④c 假发起人 / 假渠道 / 假房子 / 过期提案：认领一律拿不到行、绝不发送。
-      {
-        const OTHER_HOUSE = "bbbbbbbb-0000-0000-0000-000000000000";
-        type ConfirmArgs = Parameters<typeof confirmPersonalItemReminder>[0];
-        const cases: Array<{
-          label: string;
-          repoOpts?: Partial<Parameters<typeof makeRepo>[0]>;
-          confirmOverrides: Partial<ConfirmArgs>;
-        }> = [
-          {
-            label: "假发起人",
-            confirmOverrides: { senderPersonId: XIAOHE },
-          },
-          { label: "假渠道", confirmOverrides: { channel: "web" } },
-          { label: "假房子", confirmOverrides: { householdId: OTHER_HOUSE } },
-          {
-            label: "过期提案（超过 TTL）",
-            repoOpts: { expiredProposal: true },
-            confirmOverrides: {},
-          },
-        ];
-        for (const c of cases) {
-          const repo = makeRepo({ members: baseMembers, ...(c.repoOpts ?? {}) });
-          await deliverPersonalItemReminder(
+          return {
+            deps,
+            queued,
+            outbound,
+            decisions,
+            /** 只数**发给别人的**（第三方）入队；发起人本人没有出站。 */
+            thirdParty: () => queued.filter((q) => q.toPersonId !== SENDER),
+          };
+        }
+
+        const baseMembers = [member(SENDER, "小林"), member(ACHUAN, "阿川")];
+        const personalAsk = "帮我提醒阿川用我的个人物品前先问我";
+        const nightAsk = "帮我提醒阿川深夜别开洗衣机";
+
+        // ① 合规自然请求（含无冒号点名请求）→ 恰好一条固定第三方出站 + 短回执。
+        {
+          const repo = makeRepo({ members: baseMembers });
+          const out = await deliverPersonalItemReminder(
             {
               householdId: HOUSE,
               senderPersonId: SENDER,
               senderIsTest: true,
               channel: "sms",
-              conversationId: CONV,
               text: personalAsk,
-            },
-            repo.deps
-          );
-          const out = await confirmPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              conversationId: CONV,
-              text: "确认",
-              ...c.confirmOverrides,
             },
             repo.deps
           );
           assert.equal(
             out.kind,
-            "none",
-            `${c.label}：认领一律拿不到行、绝不发送`
+            "sent",
+            "点名但没按固定格式的个人物品请求必须直接发送，不能再回「说清楚要提醒谁」"
           );
-          assert.equal(repo.thirdParty().length, 0, `${c.label}：零第三方出站`);
+          assert(
+            out.kind === "sent" &&
+              out.recipientPersonId === ACHUAN &&
+              out.text === PERSONAL_ITEM_REMINDER_TEXT &&
+              out.receiptText === personalItemReminderReceipt("阿川"),
+            "个人物品发送必须用固定正文 + 核对过的收件人 + 固定回执"
+          );
+          assert.equal(repo.thirdParty().length, 1, "个人物品恰好一条第三方出站");
+          assert.equal(repo.thirdParty()[0].toPersonId, ACHUAN);
+          assert.equal(
+            repo.thirdParty()[0].body,
+            PERSONAL_ITEM_REMINDER_TEXT,
+            "第三方出站正文必须是固定常量"
+          );
+          assert.equal(repo.queued.length, 1, "除那一条外不得有别的入队");
+          assert.equal(repo.outbound.length, 1, "只给收件人落一条出站消息");
+          assert.equal(repo.outbound[0].personId, ACHUAN);
+        }
+        {
+          const repo = makeRepo({ members: baseMembers });
+          const out = await deliverNightLaundryReminder(
+            {
+              householdId: HOUSE,
+              senderPersonId: SENDER,
+              senderIsTest: true,
+              channel: "sms",
+              text: nightAsk,
+            },
+            repo.deps
+          );
+          assert.equal(
+            out.kind,
+            "sent",
+            "点名但没按固定格式的夜间洗衣请求必须直接发送"
+          );
+          assert(
+            out.kind === "sent" &&
+              out.recipientPersonId === ACHUAN &&
+              out.text === NIGHT_LAUNDRY_REMINDER_TEXT &&
+              out.receiptText === nightLaundryReminderReceipt("阿川"),
+            "夜间洗衣发送必须用固定正文 + 核对过的收件人 + 固定回执"
+          );
+          assert.equal(repo.thirdParty().length, 1, "夜间洗衣恰好一条第三方出站");
+          assert.equal(repo.thirdParty()[0].body, NIGHT_LAUNDRY_REMINDER_TEXT);
+        }
+
+        // ② 混合 / 讨论 / 否定 / 未点名 → 零第三方出站、零写入、绝不部分执行。
+        {
+          const cases: Array<{
+            label: string;
+            deliver: (
+              args: {
+                householdId: string;
+                senderPersonId: string;
+                senderIsTest: boolean;
+                channel: string;
+                text: string;
+              },
+              deps: ReminderExecutionDeps
+            ) => Promise<{ kind: string }>;
+            text: string;
+          }> = [
+            {
+              label: "混合卫生（个人物品）",
+              deliver: deliverPersonalItemReminder,
+              text: "帮我提醒阿川用我的个人物品前先问我，顺便把地漏的头发清理了",
+            },
+            {
+              label: "混合费用（夜间洗衣）",
+              deliver: deliverNightLaundryReminder,
+              text: "帮我提醒阿川深夜别开洗衣机，水费也分摊一下",
+            },
+            {
+              label: "讨论",
+              deliver: deliverPersonalItemReminder,
+              text: "阿川老用我的东西，你觉得我该不该跟他说？",
+            },
+            {
+              label: "否定",
+              deliver: deliverPersonalItemReminder,
+              text: "别提醒阿川用我的个人物品前先问我。",
+            },
+            {
+              label: "未点名",
+              deliver: deliverNightLaundryReminder,
+              text: "有人半夜用洗衣机，你能不能跟他说一下。",
+            },
+          ];
+          for (const c of cases) {
+            const repo = makeRepo({ members: baseMembers });
+            const out = await c.deliver(
+              {
+                householdId: HOUSE,
+                senderPersonId: SENDER,
+                senderIsTest: true,
+                channel: "sms",
+                text: c.text,
+              },
+              repo.deps
+            );
+            assert.notEqual(out.kind, "sent", `${c.label}：绝不能发送`);
+            assert.equal(repo.thirdParty().length, 0, `${c.label}：零第三方出站`);
+            assert.equal(repo.queued.length, 0, `${c.label}：零写入`);
+            assert.equal(repo.outbound.length, 0, `${c.label}：零出站消息`);
+          }
+        }
+
+        // ③ 旧窄命令兼容：固定句式仍然直接发送，行为不变。
+        {
+          const repo = makeRepo({ members: baseMembers });
+          const out = await deliverPersonalItemReminder(
+            {
+              householdId: HOUSE,
+              senderPersonId: SENDER,
+              senderIsTest: true,
+              channel: "sms",
+              text: "提醒 阿川：使用我的个人物品前先问我",
+            },
+            repo.deps
+          );
+          assert.equal(out.kind, "sent", "旧窄命令必须仍然直接发送（兼容不破坏）");
+          assert.equal(repo.thirdParty().length, 1, "旧窄命令恰好一条第三方出站");
+        }
+        {
+          const repo = makeRepo({ members: baseMembers });
+          const out = await deliverNightLaundryReminder(
+            {
+              householdId: HOUSE,
+              senderPersonId: SENDER,
+              senderIsTest: true,
+              channel: "sms",
+              text: "提醒 阿川：深夜别开洗衣机或烘干机",
+            },
+            repo.deps
+          );
+          assert.equal(out.kind, "sent", "旧窄命令必须仍然直接发送（兼容不破坏）");
+          assert.equal(repo.thirdParty().length, 1, "旧窄命令恰好一条第三方出站");
+        }
+
+        // ④ 「确认」「取消」不再拥有专门出站语义：只是普通消息，零第三方。
+        {
+          for (const text of ["确认", "取消"]) {
+            const repo = makeRepo({ members: baseMembers });
+            const personal = await deliverPersonalItemReminder(
+              {
+                householdId: HOUSE,
+                senderPersonId: SENDER,
+                senderIsTest: true,
+                channel: "sms",
+                text,
+              },
+              repo.deps
+            );
+            const night = await deliverNightLaundryReminder(
+              {
+                householdId: HOUSE,
+                senderPersonId: SENDER,
+                senderIsTest: true,
+                channel: "sms",
+                text,
+              },
+              repo.deps
+            );
+            assert.equal(personal.kind, "none", `「${text}」不是个人物品请求`);
+            assert.equal(night.kind, "none", `「${text}」不是夜间洗衣请求`);
+            assert.equal(repo.thirdParty().length, 0, `「${text}」零第三方出站`);
+            assert.equal(repo.queued.length, 0, `「${text}」零写入`);
+          }
+        }
+
+        // ⑤ 点了不止一位室友（歧义）→ 真话澄清、零写入。
+        {
+          const repo = makeRepo({
+            members: [...baseMembers, member(XIAOHE, "小禾")],
+          });
+          const out = await deliverPersonalItemReminder(
+            {
+              householdId: HOUSE,
+              senderPersonId: SENDER,
+              senderIsTest: true,
+              channel: "sms",
+              text: "帮我提醒阿川和小禾用我的个人物品前先问我",
+            },
+            repo.deps
+          );
+          assert.equal(out.kind, "guidance", "点了不止一个人名必须给真话澄清");
+          assert.equal(repo.queued.length, 0, "歧义时零写入");
+        }
+
+        // ⑥ 收件人不可达（姓名未确认）→ 真话说明、零写入。
+        {
+          const repo = makeRepo({
+            members: [
+              member(SENDER, "小林"),
+              member(ACHUAN, "阿川", { nameConfirmed: false }),
+            ],
+          });
+          const out = await deliverPersonalItemReminder(
+            {
+              householdId: HOUSE,
+              senderPersonId: SENDER,
+              senderIsTest: true,
+              channel: "sms",
+              text: personalAsk,
+            },
+            repo.deps
+          );
+          assert.equal(out.kind, "guidance", "收件人姓名未确认时只回真话说明");
+          assert.equal(repo.queued.length, 0, "收件人不可达时零写入");
+        }
+
+        // ⑦ 直接执行同样过 assertCanWrite 硬闸：不开 COLIVING_LOCAL_WRITE、也不
+        // 把进程标成服务器运行时（不冒充生产），合规自然请求必须被拦下、零写入。
+        // 这条证明「近似入口」不是绕过发送硬闸的后门。
+        {
+          const repo = makeRepo({ members: baseMembers });
+          const savedLocal = process.env.COLIVING_LOCAL_WRITE;
+          const savedRuntime = process.env.NEXT_RUNTIME;
+          delete process.env.COLIVING_LOCAL_WRITE;
+          delete process.env.NEXT_RUNTIME;
+          try {
+            await assert.rejects(
+              () =>
+                deliverPersonalItemReminder(
+                  {
+                    householdId: HOUSE,
+                    senderPersonId: SENDER,
+                    senderIsTest: true,
+                    channel: "sms",
+                    text: personalAsk,
+                  },
+                  repo.deps
+                ),
+              /本地进程不许写真实数据/,
+              "没开 COLIVING_LOCAL_WRITE 时直接发送必须被硬闸拦下"
+            );
+            assert.equal(repo.queued.length, 0, "被硬闸拦下时零写入");
+            assert.equal(repo.thirdParty().length, 0, "被硬闸拦下时零第三方出站");
+          } finally {
+            if (savedLocal === undefined) delete process.env.COLIVING_LOCAL_WRITE;
+            else process.env.COLIVING_LOCAL_WRITE = savedLocal;
+            if (savedRuntime === undefined) delete process.env.NEXT_RUNTIME;
+            else process.env.NEXT_RUNTIME = savedRuntime;
+          }
         }
       }
-
-      // ⑤ 预览还没送达（queued 不算数）→ 不发。
-      {
-        const repo = makeRepo({
-          members: baseMembers,
-          previewNotDelivered: true,
-        });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "none", "预览未送达时「确认」绝不发送");
-        assert.equal(repo.thirdParty().length, 0, "预览未送达时零第三方出站");
-      }
-
-      // ⑥ 最近一条出站是普通消息（更旧的提案不能复活）→ 不发。
-      {
-        const repo = makeRepo({
-          members: baseMembers,
-          latestIsPlainMessage: true,
-        });
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(
-          out.kind,
-          "none",
-          "最近一条出站是普通消息时，更旧的提案不得被翻出来发"
-        );
-        assert.equal(repo.queued.length, 0, "此时零写入");
-      }
-
-      // ⑦ 预览正文与当前固定文案不一致 → 当失效处理、不发。
-      {
-        const repo = makeRepo({ members: baseMembers, corruptPreviewBody: true });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert(
-          out.kind === "guidance" && out.reply === REMINDER_PROPOSAL_STALE_REPLY,
-          "正文与当前固定文案不一致时必须回失效说明"
-        );
-        assert.equal(repo.thirdParty().length, 0, "正文不符时零第三方出站");
-      }
-
-      // ⑧ 跨功能：另一项的待确认提案不能被本项「确认」发出去。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const prop = await deliverNightLaundryReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: nightAsk,
-          },
-          repo.deps
-        );
-        assert.equal(prop.kind, "proposal", "先落一条夜间洗衣待确认提案");
-        const personalOut = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(
-          personalOut.kind,
-          "none",
-          "个人物品的确认不能把夜间洗衣的提案发出去"
-        );
-        assert.equal(repo.thirdParty().length, 0, "跨功能确认零第三方出站");
-        const nightOut = await confirmNightLaundryReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(nightOut.kind, "sent", "本项提案被本项确认时才发");
-        assert(
-          nightOut.kind === "sent" &&
-            nightOut.recipientPersonId === ACHUAN &&
-            nightOut.text === NIGHT_LAUNDRY_REMINDER_TEXT,
-          "夜间洗衣发送必须用固定正文 + 提案绑定的收件人"
-        );
-        assert.equal(repo.thirdParty().length, 1, "最终恰好一条第三方出站");
-      }
-
-      // ⑨ 认领后写第三方失败（第三方还没入队）→ 零出站、报状态无法确认、
-      // 认领不退回（不能重试成重复外呼）。
-      {
-        const repo = makeRepo({ members: baseMembers, failThirdPartyQueue: true });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert(
-          out.kind === "guidance" &&
-            out.reply === REMINDER_PROPOSAL_FAILED_REPLY,
-          "认领后写第三方失败必须报发送状态无法确认，绝不谎报成功"
-        );
-        assert.equal(repo.thirdParty().length, 0, "写失败时零第三方出站");
-        const again = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(
-          again.kind,
-          "none",
-          "认领即消耗：失败后再回一次「确认」不能重发（防重复外呼）"
-        );
-        assert.equal(repo.thirdParty().length, 0, "重试仍然零第三方出站");
-      }
-
-      // ⑨b 第三方**已经成功入队之后**才失败（写会话/消息抛错）→ 那条外呼其实
-      // 已经入队、即将发出，所以回复**不能**说「没发出去」、也**不能**叫住户重说
-      // 一遍（会诱发重复）；只说发送状态无法确认、不会自动重发。认领已被消耗，
-      // 重试**不能**再入第二条。
-      {
-        const repo = makeRepo({
-          members: baseMembers,
-          failAfterThirdPartyQueue: true,
-        });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert(
-          out.kind === "guidance" &&
-            out.reply === REMINDER_PROPOSAL_FAILED_REPLY,
-          "第三方已入队但随后写失败，必须报发送状态无法确认、绝不谎报成功"
-        );
-        assert(
-          out.kind === "guidance" &&
-            !out.reply.includes("没能发") &&
-            !out.reply.includes("没发出去") &&
-            !out.reply.includes("重新说"),
-          "第三方已入队时不得断言没发出、不得叫住户重说一遍（会诱发重复）"
-        );
-        assert.equal(
-          repo.thirdParty().length,
-          1,
-          "失败发生在第三方入队之后：应恰有那一条已入队的外呼"
-        );
-        const again = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(
-          again.kind,
-          "none",
-          "入队后失败也不能重试：认领即消耗，不得再入一条"
-        );
-        assert.equal(
-          repo.thirdParty().length,
-          1,
-          "重试后仍只有那一条，不产生重复外呼"
-        );
-      }
-
-      // ⑩ 「取消」之后旧的「确认」不能把作废的提案翻出来发。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        const voided = await cancelPendingReminderProposals(repo.deps, {
-          householdId: HOUSE,
-          requesterPersonId: SENDER,
-          channel: "sms",
-        });
-        assert.equal(voided, 1, "「取消」必须作废那条待确认提案");
-        const out = await confirmPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "确认",
-          },
-          repo.deps
-        );
-        assert.equal(
-          out.kind,
-          "none",
-          "取消之后再回「确认」不能把作废提案翻出来发"
-        );
-        assert.equal(repo.thirdParty().length, 0, "取消后零第三方出站");
-      }
-
-      // ⑪ 点了不止一位室友（歧义）→ 真话澄清、零写入。
-      {
-        const repo = makeRepo({
-          members: [...baseMembers, member(XIAOHE, "小禾")],
-        });
-        const out = await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "帮我提醒阿川和小禾用我的个人物品前先问我",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "guidance", "点了不止一个人名必须给真话澄清");
-        assert.equal(repo.queued.length, 0, "歧义时零写入");
-      }
-
-      // ⑫ 收件人不可达（姓名未确认）→ 真话说明、零写入。
-      {
-        const repo = makeRepo({
-          members: [
-            member(SENDER, "小林"),
-            member(ACHUAN, "阿川", { nameConfirmed: false }),
-          ],
-        });
-        const out = await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: personalAsk,
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "guidance", "收件人姓名未确认时只回真话说明");
-        assert.equal(repo.queued.length, 0, "收件人不可达时零写入");
-      }
-
-      // ⑬ 夹带别的诉求（混合议题）→ 真话说明、零写入，且**已点名时不再问「谁」**。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await deliverNightLaundryReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "提醒 阿川：深夜别开洗衣机，水费也分摊一下",
-          },
-          repo.deps
-        );
-        assert.equal(
-          out.kind,
-          "guidance",
-          "夹带水费的混合请求必须受理不了、不做半截提案"
-        );
-        assert(
-          out.kind === "guidance" && !out.reply.includes("谁"),
-          "消息里已经点名，就不能再问「要提醒谁」"
-        );
-        assert.equal(repo.queued.length, 0, "混合请求零写入");
-        assert.equal(repo.thirdParty().length, 0, "混合请求零第三方出站");
-      }
-
-      // ⑬b 个人物品夹带混合议题 → 真话说明、零写入、不回占位模板、已点名不问「谁」。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "提醒 阿川：使用我的个人物品前先问我，顺便把地漏的头发清理了",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "guidance", "夹带头发的混合请求必须受理不了");
-        assert(
-          out.kind === "guidance" &&
-            !out.reply.includes(PERSONAL_ITEM_REMINDER_FORM) &&
-            !out.reply.includes("<室友名字>"),
-          "发给住户的说明里不能再出现占位模板"
-        );
-        assert(
-          out.kind === "guidance" && !out.reply.includes("谁"),
-          "消息里已经点名，就不能再问「要提醒谁」"
-        );
-        assert.equal(repo.queued.length, 0, "混合请求零写入");
-      }
-
-      // ⑭ 认不出 / 不是这一族的消息 → none（走普通对话），零写入。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "阿川昨天不在家，我随便问问。",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "none", "普通谈话必须落回普通对话");
-        assert.equal(repo.queued.length, 0, "普通谈话零写入");
-      }
-
-      // ⑮ 旧窄命令兼容：固定句式仍然直接发送（回执 + 固定正文），行为不变。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const out = await deliverPersonalItemReminder(
-          {
-            householdId: HOUSE,
-            senderPersonId: SENDER,
-            senderIsTest: true,
-            channel: "sms",
-            conversationId: CONV,
-            text: "提醒 阿川：使用我的个人物品前先问我",
-          },
-          repo.deps
-        );
-        assert.equal(out.kind, "sent", "旧窄命令必须仍然直接发送（兼容不破坏）");
-        assert(
-          out.kind === "sent" &&
-            out.recipientPersonId === ACHUAN &&
-            out.text === PERSONAL_ITEM_REMINDER_TEXT,
-          "旧窄命令发送仍用固定正文与核对过的收件人"
-        );
-        assert.equal(repo.thirdParty().length, 1, "旧窄命令恰好一条第三方出站");
-        assert.equal(repo.queued.length, 1, "旧窄命令不额外落预览");
-      }
-
-      // Ⓞ **落提案本身也过 assertCanWrite 硬闸**：不开 COLIVING_LOCAL_WRITE、
-      // 也不把进程标成服务器运行时（不冒充生产），近似入口必须被拦下、零写入。
-      // 这条证明「近似预览」不是绕过发送硬闸的后门。
-      {
-        const repo = makeRepo({ members: baseMembers });
-        const savedLocal = process.env.COLIVING_LOCAL_WRITE;
-        const savedRuntime = process.env.NEXT_RUNTIME;
-        delete process.env.COLIVING_LOCAL_WRITE;
-        delete process.env.NEXT_RUNTIME;
-        try {
-          await assert.rejects(
-            () =>
-              deliverPersonalItemReminder(
-                {
-                  householdId: HOUSE,
-                  senderPersonId: SENDER,
-                  senderIsTest: true,
-                  channel: "sms",
-                  conversationId: CONV,
-                  text: personalAsk,
-                },
-                repo.deps
-              ),
-            /本地进程不许写真实数据/,
-            "没开 COLIVING_LOCAL_WRITE 时落提案必须被硬闸拦下"
-          );
-          assert.equal(repo.queued.length, 0, "被硬闸拦下时零写入");
-          assert.equal(repo.thirdParty().length, 0, "被硬闸拦下时零第三方出站");
-        } finally {
-          if (savedLocal === undefined) delete process.env.COLIVING_LOCAL_WRITE;
-          else process.env.COLIVING_LOCAL_WRITE = savedLocal;
-          if (savedRuntime === undefined) delete process.env.NEXT_RUNTIME;
-          else process.env.NEXT_RUNTIME = savedRuntime;
-        }
-      }
-    }
-  );
+    );
   } finally {
     if (savedLocalWrite === undefined) delete process.env.COLIVING_LOCAL_WRITE;
     else process.env.COLIVING_LOCAL_WRITE = savedLocalWrite;

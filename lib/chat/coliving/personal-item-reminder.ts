@@ -7,17 +7,11 @@ import {
   looksLikeRelayedReminderAsk,
 } from "./reminder-ask";
 import {
-  createReminderProposal,
-  parseReminderConfirmation,
-  REMINDER_PROPOSAL_FAILED_REPLY,
-  REMINDER_PROPOSAL_PURPOSE,
-  REMINDER_PROPOSAL_RECIPIENT_GONE_REPLY,
-  REMINDER_PROPOSAL_STALE_REPLY,
-  reminderProposalDeps,
+  AMBIGUOUS_REMINDER_RECIPIENT_REPLY,
+  reminderExecutionDeps,
   reminderTargetIneligibleReply,
-  takeReminderProposal,
-  type ReminderProposalDeps,
-} from "./reminder-proposal";
+  type ReminderExecutionDeps,
+} from "./reminder-execution";
 
 /**
  * **已开放的具体功能：个人物品使用提醒（唯一允许发给别的住户的受约束出站）。**
@@ -28,15 +22,21 @@ import {
  * 的路径。通用 `contactPerson` 工具与 outreach / kickoff / cron / enroll
  * 的自由文本出站都已撤掉（见 `outreach.ts` 与 `turn.ts`）。
  *
+ * 老板 2026-09-13 再次明确：**白名单是功能/动作边界，不是每一次命中都要
+ * 二次确认。** 合规的自然请求既然已经落在白名单功能内，就直接复用本功能
+ * 既有的受约束执行器发出固定正文 + 固定回执；不设「预览 → 回复确认发送或
+ * 取消」的状态机。**不许部分执行**：收件人不唯一、混入其它议题、讨论、否定
+ * 或未点名时，一律不发送，落回普通对话或回一句既有真话说明。
+ *
  * 三条不可放宽的性质：
  *
- * 1. **确定性识别，不过模型。** 只认一条很窄的固定命令
+ * 1. **确定性识别，不过模型。** 认两种形态：①旧的窄命令
  *    （`提醒 阿川：使用我的个人物品前先问我` 的等价说法，允许标点和礼貌前缀
- *    的细微变体）。识别纯靠正则，**不接受任意自由文本**——命令体里有任何
- *    多余内容（夹带、理由、物品名、别的诉求）就一律不认，**零第三方出站**，
- *    由 `runColivingTurn` 回一句短的结构化指引。
- *    住户用自然语言表达同一件事时，**不直接发送**，只落一条发给**发起人
- *    本人**的待确认预览（`proposal`，零第三方出站），回「确认」才发。
+ *    的细微变体）；②**合规的近似自然请求**（点名了名册里唯一的室友、主题
+ *    正好是这一项、明确要 AI 去执行、不是讨论/否定/混合）。识别纯靠正则，
+ *    **不接受任意自由文本**——命令体里有任何多余内容（夹带、理由、物品名、
+ *    别的诉求）就一律不认，**零第三方出站**，由 `runColivingTurn` 回一句短的
+ *    结构化指引。
  * 2. **收件人文案是写死的常量**，不是从用户文本里抽的。里面没有来源、没有
  *    用户原话、没有物品名、没有理由、没有额外要求，避免用户借物品名或备注
  *    夹带未开放的要求（见 CONCRETE_FUNCTIONS「自由文本不能直接拼入受限消息」）。
@@ -53,32 +53,11 @@ export const PERSONAL_ITEM_REMINDER_TEXT =
 
 /**
  * 旧版固定命令句式。**只为兼容既有断言保留，不再出现在任何发给住户的
- * 消息里**（老板已驳回「只支持这一种说法」的模板指引）。
+ * 消息里**（老板已驳回「只支持这一种说法」的模板指引；合规自然请求现在
+ * 直接执行，也不回模板）。
  */
 export const PERSONAL_ITEM_REMINDER_FORM =
   "提醒 <室友名字>：使用我的个人物品前先问我";
-
-/**
- * 预览轮报告的工具名。**与真正的发送（`personalItemReminder`）区分开**，
- * 这样「这一轮只出了预览、零第三方出站」可以被行为测试直接断言，而不必把
- * 零出站断言放宽到允许真正的发送工具。
- */
-export const PERSONAL_ITEM_PREVIEW_TOOL = "personalItemReminderPreview";
-
-/** 提案在库里的 purpose 标记（也用于取消时按前缀作废）。 */
-export const PERSONAL_ITEM_PROPOSAL_PURPOSE =
-  REMINDER_PROPOSAL_PURPOSE.personalItem;
-
-/**
- * 近似请求的**可执行预览**（发给发起人本人，零第三方出站）：
- * 如实说明还没发、点名收件人、把**将要发出的那句固定正文原样摆出来**、
- * 给出「确认 / 取消」。**只摆那一句、不承诺带上住户说的原因或条件**
- * （带上就该写成另一条消息了——混合/附加诉求一律不落提案，见下）。
- * 住户回「确认」才真的发，回「取消」就不发。
- */
-export function personalItemProposalPreview(recipientName: string): string {
-  return `还没发送。给${recipientName}的短信是：「${PERSONAL_ITEM_REMINDER_TEXT}」回复「确认」发送，或「取消」。`;
-}
 
 /** 回给发起人的真话收据：只说做成了什么，不复述内部过程。 */
 export function personalItemReminderReceipt(recipientName: string): string {
@@ -226,19 +205,6 @@ export type PersonalItemReminderOutcome =
       reply: string;
     }
   | {
-      /**
-       * 近似请求：已落一条**发给发起人本人**的待确认预览，**零第三方出站**。
-       * 住户回「确认」后由 `confirmPersonalItemReminder` 才真的发。
-       */
-      kind: "proposal";
-      reply: string;
-      recipientName: string;
-      recipientPersonId: string;
-      /** 预览 communication（发给发起人，不是第三方） */
-      communicationId: string;
-      decisionId: string;
-    }
-  | {
       /** 校验全过，已写入固定第三方出站。 */
       kind: "sent";
       recipientName: string;
@@ -254,9 +220,9 @@ export type PersonalItemReminderOutcome =
       receiptText: string;
     };
 
-/** 只有 narrow 命令路径与确认路径共用的「发送给某位已核对成员」。 */
+/** 窄命令路径与合规近似请求路径共用的「发送给某位已核对成员」。 */
 async function executePersonalItemReminder(
-  deps: ReminderProposalDeps,
+  deps: ReminderExecutionDeps,
   args: { householdId: string; senderIsTest: boolean; channel: string },
   target: repo.Member
 ): Promise<Extract<PersonalItemReminderOutcome, { kind: "sent" }>> {
@@ -313,28 +279,31 @@ async function executePersonalItemReminder(
 }
 
 /**
- * 近似自然语言请求入口（不过模型、**零第三方出站**）：判定自带主题 / 请求
- * 语气 / 非讨论 / 非否定 / 非混合的闸，命中就落一条发给**发起人本人**的
- * 待确认预览。返回 `null` 表示「不是可受理的近似请求」，由调用方决定回一句
- * 真话指引还是走普通对话。
+ * 合规的近似自然语言请求入口（不过模型）：判定自带主题 / 请求语气 / 非讨论 /
+ * 非否定 / 非混合的闸，且点名了**名册里唯一**的室友——命中就复用本功能的
+ * 受约束执行器，直接发那条写死的固定正文、回一句真话收据（`sent`）。返回
+ * `null` 表示「不是可受理的近似请求」，由调用方决定回一句真话指引还是走普通
+ * 对话。
+ *
+ * **不许部分执行**：点了不止一位人名（歧义）或收件人不可达时，只回一句真话
+ * 说明、零写入；混合议题在信号层就被挡掉，绝不拆成半边发送。
  *
  * **刻意不拿「像不像这一族」当前置条件。** 出过事（2026-09-12 Codex 实测）：
  * 住户说「帮我提醒阿川用我的个人物品前先问我」——点了名、意思也对，只是没按
  * 固定格式写——旧写法先要求 `looksLikePersonalItemReminder` 再进近似分支，
  * 结果它被挡在门外，回一句「你说清楚要提醒谁」，明明已经点名了。现在只要
- * 近似判定通过就收口成预览，**不**再看窄命令的宽松线索。
+ * 近似判定通过就收口到受约束执行器，**不**再看窄命令的宽松线索。
  */
-async function tryPersonalItemProposal(
+async function tryPersonalItemApproxRequest(
   args: {
     householdId: string;
     senderPersonId: string;
-    /** 透传自 deliver 入参的**真实**测试屋标记，落提案前过 assertCanWrite。 */
+    /** 透传自 deliver 入参的**真实**测试屋标记，发送前过 assertCanWrite。 */
     senderIsTest: boolean;
     channel: string;
-    conversationId: string;
     text: string;
   },
-  deps: ReminderProposalDeps
+  deps: ReminderExecutionDeps
 ): Promise<PersonalItemReminderOutcome | null> {
   // 先做不查名册的预筛，只有疑似才读成员表，避免每条无关消息都查一次。
   if (!hasPersonalItemAskSignal(args.text)) {
@@ -352,15 +321,12 @@ async function tryPersonalItemProposal(
     return null;
   }
   // 收件人必须由**稳定 ID 唯一确定**：消息里点了不止一个人名就是歧义，
-  // 给真话澄清、不落任何待确认状态（否则会变成对某个人的误发）。
+  // 给真话澄清、不发送（否则会变成对某个人的误发）。
   const matched = others.filter(
     (m) => m.name.trim().length >= 2 && args.text.includes(m.name)
   );
   if (matched.length > 1) {
-    return {
-      kind: "guidance",
-      reply: "这条消息里提到了不止一位室友，请写清楚要提醒谁。",
-    };
+    return { kind: "guidance", reply: AMBIGUOUS_REMINDER_RECIPIENT_REPLY };
   }
   const target = matched[0];
   if (!target) {
@@ -370,27 +336,7 @@ async function tryPersonalItemProposal(
   if (ineligible) {
     return { kind: "guidance", reply: ineligible };
   }
-  const preview = personalItemProposalPreview(target.name);
-  const proposal = await createReminderProposal(deps, {
-    householdId: args.householdId,
-    senderIsTest: args.senderIsTest,
-    requesterPersonId: args.senderPersonId,
-    conversationId: args.conversationId,
-    channel: args.channel,
-    recipientPersonId: target.personId,
-    purpose: PERSONAL_ITEM_PROPOSAL_PURPOSE,
-    label: "个人物品使用提醒",
-    previewText: preview,
-    inboundText: args.text,
-  });
-  return {
-    kind: "proposal",
-    reply: preview,
-    recipientName: target.name,
-    recipientPersonId: target.personId,
-    communicationId: proposal.communicationId,
-    decisionId: proposal.decisionId,
-  };
+  return await executePersonalItemReminder(deps, args, target);
 }
 
 /**
@@ -399,9 +345,9 @@ async function tryPersonalItemProposal(
  * **不调用任何模型**，也不接受自由正文。判定顺序：
  *   ① 先试**原有窄命令**（`recognizePersonalItemReminder`）：命中就走老路径
  *      （名册校验 → 固定正文发送），行为与开放时一致；
- *   ② 不是窄命令，再试**近似自然语言请求**：只落一条发给发起人本人的待确认
- *      预览（`proposal`，零第三方出站），等住户回「确认」才由
- *      `confirmPersonalItemReminder` 发；
+ *   ② 不是窄命令，再试**合规的近似自然语言请求**：点名声册里唯一的室友、主题
+ *      正好是这一项、明确要 AI 去执行时，**直接复用同一个受约束执行器**发送
+ *      （固定正文 + 真话收据），不需要二次确认；
  *   ③ 仍像这一族但没法安全受理（夹带 / 没点名 / 被否定）：回一句真话短说明，
  *      零第三方出站；不像就走普通对话。
  */
@@ -411,11 +357,9 @@ export async function deliverPersonalItemReminder(
     senderPersonId: string;
     senderIsTest: boolean;
     channel: string;
-    /** 发起人自己的会话线，用于落「住户请求 → AI 预览」两条消息。 */
-    conversationId: string;
     text: string;
   },
-  deps: ReminderProposalDeps = reminderProposalDeps
+  deps: ReminderExecutionDeps = reminderExecutionDeps
 ): Promise<PersonalItemReminderOutcome> {
   // ① 原有窄命令：命中即走老路径。
   const command = recognizePersonalItemReminder(args.text);
@@ -445,10 +389,10 @@ export async function deliverPersonalItemReminder(
     return await executePersonalItemReminder(deps, args, target);
   }
 
-  // ② 近似自然语言请求：只落本地待确认预览，不直接发送。
-  const proposal = await tryPersonalItemProposal(args, deps);
-  if (proposal) {
-    return proposal;
+  // ② 合规的近似自然请求：直接走同一个受约束执行器，不需要二次确认。
+  const approx = await tryPersonalItemApproxRequest(args, deps);
+  if (approx) {
+    return approx;
   }
 
   // ③ 像这一族但受理不了：真话说明，零第三方出站。
@@ -456,64 +400,4 @@ export async function deliverPersonalItemReminder(
     return { kind: "guidance", reply: unsupportedFormReply() };
   }
   return { kind: "none" };
-}
-
-/**
- * 住户回「确认」后，认领上一轮的待确认提案并**只发那条固定正文**。
- *
- * 拿不到提案（没有 / 过期 / 已取消 / 属另一项功能 / 已被别的确认抢走）就返回
- * `none`，**绝不发送**——「确认」两个字本身不是发送授权，持久化的提案才是。
- * 收件人按提案里绑定的**稳定 ID** 回到**当前**同屋名册里重新核对，正文也必须
- * 与当前固定文案逐字一致；任一不符就不发（提案作废）。
- */
-export async function confirmPersonalItemReminder(
-  args: {
-    householdId: string;
-    senderPersonId: string;
-    senderIsTest: boolean;
-    channel: string;
-    /** 发起人当前会话线；候选提案必须绑定在它上面。 */
-    conversationId: string;
-    text: string;
-  },
-  deps: ReminderProposalDeps = reminderProposalDeps
-): Promise<Exclude<PersonalItemReminderOutcome, { kind: "proposal" }>> {
-  if (parseReminderConfirmation(args.text) !== "confirm") {
-    return { kind: "none" };
-  }
-  const taken = await takeReminderProposal(deps, {
-    householdId: args.householdId,
-    requesterPersonId: args.senderPersonId,
-    channel: args.channel,
-    conversationId: args.conversationId,
-    purpose: PERSONAL_ITEM_PROPOSAL_PURPOSE,
-  });
-  if (taken.kind === "none") {
-    return { kind: "none" };
-  }
-
-  // 收件人必须重新回到**当前**同屋名册里核对（不新建会话、不发送）。
-  const members = await deps.getMembers(args.householdId, args.channel);
-  const target = members.find((m) => m.personId === taken.recipientPersonId);
-  if (!target || target.personId === args.senderPersonId) {
-    return { kind: "guidance", reply: REMINDER_PROPOSAL_RECIPIENT_GONE_REPLY };
-  }
-  const ineligible = reminderTargetIneligibleReply(target);
-  if (ineligible) {
-    return { kind: "guidance", reply: ineligible };
-  }
-  // 预览正文必须与**当前**固定文案逐字一致（防代码/姓名变动后照旧文案发）。
-  if (taken.body !== personalItemProposalPreview(target.name)) {
-    return { kind: "guidance", reply: REMINDER_PROPOSAL_STALE_REPLY };
-  }
-
-  try {
-    return await executePersonalItemReminder(deps, args, target);
-  } catch {
-    // 认领后写入失败：**不退回认领**（退回会造成重复入队/重复外呼）。失败可能
-    // 落在 `queueCommunication` **之后**（写会话/消息那一步抛错）——那时外呼其实
-    // 已经入队、即将发出，所以不能断言「没发出去」，只报发送状态无法确认、且不会
-    // 自动重发，避免住户重说一遍造成重复。
-    return { kind: "guidance", reply: REMINDER_PROPOSAL_FAILED_REPLY };
-  }
 }
