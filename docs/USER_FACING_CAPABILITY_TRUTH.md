@@ -145,6 +145,35 @@
   零写入。
 - **发送硬闸**：任何落库写入都要过 `assertCanWrite`——本地进程写真实数据一律被拦。
 
+## 旧 doctrine / 主生成大脑今天只兜住剩下的路径
+
+功能前门把「替住户对别人做事」这条线整体从旧主生成里切了出来。**受控路径根本不读旧
+doctrine，也不进主生成的工具循环**：
+
+- **命中已批准功能**：路由命中后由**被选中那一个功能**抽取本功能获准字段、写正文，
+  再由纯代码投递——这一轮 `toolsUsed` 为空、`promptComposition` 为 `null`，**旧
+  doctrine（`lib/ai/brains/coliving/doctrine/*.md`）与主生成大脑完全没有被装配**。
+- **统一产品功能问答**（`lib/chat/coliving/feature-qa.ts` + 事实源 `feature-facts.ts`，
+  corpus-035 修法）：住户问「你有什么功能 / 能不能做 X / 为什么 X 不能做 / 刚才为什么
+  拒绝」这类**功能边界元问题**时都**不进主生成**——入口读统一功能事实源，把**与问题
+  有关**的事实（被拒事项 / 原因 / 当前开放功能名）交给模型说人话，再经**通用 grounding
+  校验**：正文必须覆盖被选中条目的名称与理由锚点，问能力清单时必须列全
+  `APPROVED_FEATURES`，漏项 / 说错 / 内部术语 / 超长一律用只含事实的兜底。
+  它同样 `toolsUsed` 为空、`promptComposition` 为 `null`、**不读旧 doctrine**；上一轮
+  同人的 `unsupported` 只用来把「刚才」关联到事实源条目，**不是**进入本路径的前提。
+- **共享 grounding 闸**（`lib/chat/coliving/feature-grounding.ts`，corpus-035 第一轮实跑
+  修法）：`unsupported` 与功能问答两条**无工具、无第三方出站**的路径共用同一条纯代码
+  判定——正文里不得**承诺 AI 自己去联系 / 协调 / 跟进**（「我这就去跟他说」），也不得
+  **把办不了的事推回住户**（「你可能得直接跟他说一下」「你自己找房东」「换个渠道」
+  「以后再说」）。命中任何一条即以**只含代码事实**的中性兜底替换，绝不把这类越界正文
+  发出去；这是**一条通用规则**，换未开放主题 / 换问法都不改。
+- **只有这两条受控路径都没接住的请求**（不在清单里的主题、没点名收件人、普通聊天等）
+  才落回**旧提示词大脑**——那时旧 doctrine 与主生成照旧装配、照旧约束这一轮。
+
+因此**现在不要删掉整套 doctrine**：它仍是回退路径与大批普通对话的唯一约束，只是**它的
+作用面随功能逐项开放而收缩**——每新增一项受约束功能，就有一类请求从「旧大脑自由发挥」
+搬进「代码硬控 + 收窄字段生成」。删除时机是受控路径覆盖到旧路径再无可兜之事，而不是现在。
+
 ## 现在明确做不到的（住户能感知）
 
 - **一般噪音 / 深夜噪音提醒（非洗衣）**：只能提醒「深夜别用洗衣机或烘干机」这一件；
@@ -212,6 +241,24 @@ doctrine（`lib/ai/brains/coliving/doctrine/domain/relay.md`）对照 + 真实�
   （`FEATURE_ROUTE_REPLY_ONLY` 对应的无工具、无出站小回复；只回当前说话人）、
   `lib/chat/coliving/unsupported.ts`（`FEATURE_ROUTE_UNSUPPORTED`：住户点名要 AI 找
   室友办事、但主题不在清单里；同样无工具、无出站，只回一句真话说明没发出去）
+- **统一产品功能问答（不是功能、不是工具、不出站）**：
+  `lib/chat/coliving/feature-qa.ts`（任何「你有什么功能 / 能不能做 X / 为什么 X 不能做 /
+  刚才为什么拒绝」这类功能边界元问句都进——**不要求**紧接上一轮 `unsupported`，
+  `turn.ts` 在已批准功能前门之后、主生成之前用窄问句识别接线；读统一功能事实源
+  `lib/chat/coliving/feature-facts.ts`，把与问题有关的事实交给模型说人话，再经**通用
+  grounding 校验** `findUngroundedFeatureQaFacts`：读每条事实自带的验证元数据，要求正文
+  含被选中条目的名称、并含其 `reasonAnchors` 理由锚点，问能力清单时还须列全当前
+  `APPROVED_FEATURES`；漏项 / 说错 / 内部术语 / 超长则用只含事实的代码兜底；不读旧
+  doctrine、不进主生成、零第三方出站，只回当前说话人）
+- **共享 grounding 闸（纯代码，一条规则两条路径共用）**：`lib/chat/coliving/feature-grounding.ts`
+  （`findGroundingViolations`）——`unsupported.ts` 与 `feature-qa.ts` 的模型正文都过它：
+  不得假承诺 AI 自己去联系（「我这就去跟他说」），也不得把办不了的事推回住户
+  （「你可能得直接跟他说一下」「自己找房东」「换个渠道」「以后再说」）；命中即换成只含
+  代码事实的中性兜底。换未开放主题 / 换问法都不改这条规则。
+- **功能事实源（数据，不是程序）**：`lib/chat/coliving/feature-facts.ts`——未开放条目
+  （名称 / 原因 / 关联关键词 / 验证元数据）+ 通用边界 + 通用查找。**以后新增功能只改这里
+  的数据与 `APPROVED_FEATURES` 登记，不改问答引擎**（`feature-qa.ts` 对所有条目一视同仁，
+  引擎里没有任何 `if (id === …)` 主题分支）。
 - **纯代码投递服务**：`lib/chat/coliving/sms-delivery.ts`
   （`resolveNamedRecipient` 收件人绑定、`smsRecipientIneligibleReply` 可达性真话说明、
   `AMBIGUOUS_SMS_RECIPIENT_REPLY` 歧义澄清、`deliverSms` 落库投递、`smsDeliveryDeps` 依赖注入）

@@ -724,21 +724,68 @@ export async function recordDecision(args: {
   contextChars?: number | null;
   /** 当时喂给模型的运行时上下文原文。**判断对不对取决于它当时看到了什么** */
   contextSnapshot?: string | null;
+  /**
+   * 很窄的**结构化标记**（如 `unsupported` 保留轮留下的能力条目 id）。只放代码写死的
+   * id，**不放模型自由文本**；供下一轮读取结构化事实（见 `feature-qa.ts` 的
+   * `latestDecision` 用法）。
+   */
+  payload?: Record<string, string> | null;
 }): Promise<string> {
+  /**
+   * `payload` 必须走 postgres.js 的 `json()`（显式 jsonb 参数）。
+   *
+   * **不要**写 `${JSON.stringify(...)}::jsonb`：首次执行时驱动的参数类型还是 unknown
+   * （按文本发送），但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802)
+   * 写回该参数并缓存预处理语句；**第二次及以后**驱动就按 jsonb 序列化器把已经
+   * stringify 过的参数**再序列化一次**，落库变成 JSONB 顶层字符串，
+   * `payload->>'capabilityId'` 随即读成 null（corpus-035 第二轮「刚才」断链的真实根因）。
+   * `shadow.ts` 用的是同一正确先例。
+   */
   const rows = await db()<{ id: string }[]>`
     insert into coliving.decision
       (household_id, case_id, event_id, kind, target_person_ids, intent,
        rationale, model_id, doctrine_modules, context_chars,
-       context_snapshot)
+       context_snapshot, payload)
     values (${args.householdId}, ${args.caseId ?? null}, ${args.eventId ?? null},
             ${args.kind}, ${db().array(args.targetPersonIds ?? [])}::uuid[],
             ${args.intent ?? null}, ${args.rationale ?? null},
             ${args.modelId ?? null},
             ${db().array(args.doctrineModules ?? [])}::text[],
-            ${args.contextChars ?? null}, ${args.contextSnapshot ?? null})
+            ${args.contextChars ?? null}, ${args.contextSnapshot ?? null},
+            ${db().json(args.payload ?? {})})
     returning id
   `;
   return rows[0].id;
+}
+
+/**
+ * **同一 household 最近一条 decision 的窄视图**——只取判断功能问答"刚才"需要的两件事：
+ * 上一轮被拒绝、纯代码关联到统一功能事实源（`feature-facts.ts`）的条目 id
+ * （`payload.capabilityId`）、以及那一轮是谁发起的（`payload.personId`）。不是
+ * `unsupported` 轮时两者都是 null。
+ *
+ * 用途见 `feature-qa.ts`：功能问答**不要求**紧接上一轮（通用入口），但若最新一条 decision
+ * 恰好是**本人**上一轮的 `unsupported`，就用它把「刚才」关联到事实源里的具体条目。
+ */
+export async function latestDecision(
+  householdId: string
+): Promise<{
+  kind: string;
+  capabilityId: string | null;
+  personId: string | null;
+} | null> {
+  const rows = await db()<
+    { kind: string; capabilityId: string | null; personId: string | null }[]
+  >`
+    select kind,
+           payload->>'capabilityId' as "capabilityId",
+           payload->>'personId' as "personId"
+    from coliving.decision
+    where household_id = ${householdId}
+    order by decided_at desc
+    limit 1
+  `;
+  return rows[0] ?? null;
 }
 
 /**

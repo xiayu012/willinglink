@@ -51,6 +51,12 @@ export type FeatureHandling = {
     communicationId: string;
   } | null;
   decisionId: string | null;
+  /**
+   * 仅 `unsupported` 保留轮有：**纯代码关联**到统一功能事实源（`feature-facts.ts`）
+   * 的条目 id（关联不上就是 null；`turn.ts` 据此在 decision payload 里留一个很窄的
+   * 结构化标记，供下一轮功能问答理解「刚才」）。不是自由文本，也不进正文。
+   */
+  unsupportedCapabilityId?: string | null;
 };
 
 export type FeatureContext = {

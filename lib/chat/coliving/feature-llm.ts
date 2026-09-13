@@ -117,7 +117,13 @@ export const FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS = 4096;
  */
 export const FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS = 4096;
 /**
- * 任何短调用的输出上限下限（防回归到会在推理中途截断的值）。4096 是当前三档统一
+ * 统一功能问答（不是功能、无工具、无出站）的输出上限。住户问「你有什么功能 / 为什么
+ * X 不能做 / 刚才为什么拒绝」这类产品功能边界时，回一两句自然中文；输出同样极短，
+ * 与其它短调用同一档，给足推理空间。
+ */
+export const FEATURE_QA_MAX_OUTPUT_TOKENS = 4096;
+/**
+ * 任何短调用的输出上限下限（防回归到会在推理中途截断的值）。4096 是当前各档统一
  * 采用值；离线检查据此断言实际调用不会低于它。
  */
 export const FEATURE_MIN_OUTPUT_TOKENS = 4096;

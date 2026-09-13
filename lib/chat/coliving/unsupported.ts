@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { matchUnavailableCapabilityId } from "./feature-facts";
+import { findGroundingViolations } from "./feature-grounding";
 import {
   FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
   FeatureCallError,
@@ -56,6 +58,7 @@ function unsupportedSystem(): string {
     "- 如实说明这件事你**没法替他发给对方**、现在没有发出去；不要含糊其辞让他以为已经办了。",
     "- 绝不声称已经替他说了 / 已经联系了谁 / 已经把话转达了 / 对方已经知道。",
     "- 不给假希望：不说「我待会儿就去说」「我帮你去跟他讲」这类你没有做的事。",
+    "- **不要把这件事推回给住户**：不要说「你自己去跟他说」「你可以找房东」「换个方式」或「以后再说」——你办不了就如实说办不了，不要替他想一个你并不掌握的出路。",
     "- **不要主动罗列你能做或不能做哪些事**，不讲内部规则、流程，也不提「白名单 / 能力 / 功能 / 未开放」这类词。",
     "- 只有当他**明确在追问为什么办不了 / 为什么不能发**时，才用一句话简单说明这类事情目前处理不了；否则不要主动解释原因。",
     "- 不替他记录立场、不替他下结论、不承诺以后会自动去办。",
@@ -74,7 +77,16 @@ function unsupportedSystem(): string {
 export async function generateUnsupportedReply(
   text: string,
   llm: FeatureLlm
-): Promise<{ reply: string; usage: FeatureUsage; error?: unknown }> {
+): Promise<{
+  reply: string;
+  /**
+   * **纯代码关联**到统一功能事实源（`feature-facts.ts`）的条目 id（关联不上就是 null）；
+   * 供下一轮功能问答理解「刚才」当结构化事实用。**不是模型选的**——模型没有机会决定。
+   */
+  capabilityId: string | null;
+  usage: FeatureUsage;
+  error?: unknown;
+}> {
   try {
     const { value, usage } = await structuredCall(llm, {
       stage: UNSUPPORTED_STAGE,
@@ -85,7 +97,8 @@ export async function generateUnsupportedReply(
       user: text,
       maxOutputTokens: FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
     });
-    const reply = ((value as z.infer<typeof unsupportedSchema>).reply ?? "").trim();
+    const fields = value as z.infer<typeof unsupportedSchema>;
+    const reply = (fields.reply ?? "").trim();
     if (!reply) {
       throw new FeatureCallError(
         UNSUPPORTED_STAGE,
@@ -94,10 +107,25 @@ export async function generateUnsupportedReply(
         "模型没有输出可用的 unsupported 回应"
       );
     }
-    return { reply, usage };
+    // **确定性 grounding 闸**（corpus-035 round 1 实跑暴露）：模型偶尔会补一句「你可能得
+    // 直接跟他说一下」——这条路径没有出站、也没安排后续，任何把事推回住户 / 换渠道 /
+    // 等以后 / 假承诺都判失败，换成只含代码事实的中性兜底。
+    const violations = findGroundingViolations(reply);
+    if (violations.length) {
+      throw new FeatureCallError(
+        UNSUPPORTED_STAGE,
+        new Error("unsupported reply rejected by grounding"),
+        usage,
+        `unsupported 回应越界（${violations.join("；")}）`
+      );
+    }
+    return { reply, capabilityId: matchUnavailableCapabilityId(text), usage };
   } catch (error) {
     return {
       reply: UNSUPPORTED_FALLBACK,
+      // 关联**由代码从原话推导**（纯数据查找），与模型输出 / 是否失败无关：就算这次模型
+      // 没写好、换了兜底，住户这一轮讲的仍是同一条未开放事项，下一轮「刚才」照样关联得上。
+      capabilityId: matchUnavailableCapabilityId(text),
       usage: usageOfFeatureError(error),
       error,
     };

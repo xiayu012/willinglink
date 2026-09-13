@@ -1,0 +1,61 @@
+{
+  "id": "corpus-035-unsupported-feature-followup-2026-09-12",
+  "source": "老板 2026-09-12 指定的两轮连续测试：先要求 AI 执行尚未开放的地漏头发卫生整改；收到回复后，在同一会话中追问为什么没有这个简单功能，以及当前有哪些功能。此场景用于人工观察白名单拒绝与用户追问后的能力说明，不把回答质量预先写进机器断言。",
+  "household": {
+    "label": "评测-035 未开放功能与后续追问"
+  },
+  "people": [
+    {
+      "phone": "+15550350001",
+      "name": "小禾",
+      "role": "tenant"
+    },
+    {
+      "phone": "+15550350002",
+      "name": "阿川",
+      "role": "tenant"
+    }
+  ],
+  "setup": {
+    "confirmedNames": [
+      "小禾",
+      "阿川"
+    ],
+    "priorMessages": [
+      {
+        "person": "小禾",
+        "direction": "outbound",
+        "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。"
+      },
+      {
+        "person": "阿川",
+        "direction": "outbound",
+        "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550350001",
+      "text": "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
+      "expect": {
+        "minAcceptedOutbound": 0,
+        "mustNotContactNames": [
+          "阿川",
+          "小禾"
+        ]
+      }
+    },
+    {
+      "from": "+15550350001",
+      "text": "请问为什么连这么简单的功能都没有?那你有什么功能？",
+      "expect": {
+        "minAcceptedOutbound": 0,
+        "mustNotContactNames": [
+          "阿川",
+          "小禾"
+        ]
+      }
+    }
+  ]
+}

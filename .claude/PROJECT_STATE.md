@@ -29,7 +29,14 @@ WillingLink 是合租/多人 AI 协调系统：LLM 理解查询，合租「大�
 - 真实发送功能轮复用 `deliverSms` 已建立的 `contact_one` decision；回执不再重复建立 `reply_only` decision。路由、抽取、生成和保留回复的真实 usage 全部并入本轮账本。
 - 白名单外仍不做：卫生/头发、费用、规则、一般噪音、电视音量、通用代转达等不能借相近入口混入。用户明确追问边界时按 `docs/USER_FACING_CAPABILITY_TRUTH.md` 如实解释；普通回复不主动背能力清单。
 - Codex 独立模型验收：corpus-034 结构通过且逐轮人工通过，混合请求只发送洗衣提醒，否定/条件轮零工具零出站，费用 `$0.022918`，报告 `tests/coliving-eval/reports/2026-09-13T04-30-01-980Z.html`；corpus-029 结构通过且人工通过，电视音量请求走 `unsupported`、零出站，费用 `$0.000599`，报告 `tests/coliving-eval/reports/2026-09-13T04-45-22-954Z.html`。两次均用 `--judge-off`，自动语义 judge 未运行，不得把“未验收”状态误读成结构失败。
-- 免费闸最终为 155 项通过；tsc 仍只有既有 `speech-input.tsx` 两处 TS2717；未向真人发送短信。
+- corpus-035 两轮实测已通过 Codex 人工验收：卫生整改交办只如实说明未发送，不替用户编其它处理方案；紧接追问时会说明「看不到现场程度、不能可靠判断是否达到要求别人整改的地步」，并完整列出两项开放功能。最终一次费用 `$0.001245`，报告 `tests/coliving-eval/reports/corpus-035-generic-feature-qa-final-2026-09-13.html`；`promptComposition=null`、零工具、零第三方出站。
+- 本轮还修复了一个真实数据库根因：`decision.payload` 曾用 `JSON.stringify(... )::jsonb`，在 postgres.js 缓存预处理语句后会发生二次 JSON 编码，导致下一轮 `payload->>` 读不到结构化事项。现在统一用 postgres.js `json()` 写入真正 JSONB 对象，并有免费回归哨兵。
+- 免费闸最终为 166 项通过；tsc 仍只有既有 `speech-input.tsx` 两处 TS2717；未向真人发送短信。
+- **旧 doctrine 作用面随功能逐项开放而收缩（策略摘要）**。功能前门已把「替住户对别人做事」这条线整体从旧主生成切出，受控路径根本不读旧 doctrine：
+  - **命中已批准功能**：路由命中后由**被选中那一个功能**抽取本功能获准字段、写正文，再由纯代码投递——该轮 `toolsUsed` 为空、`promptComposition` 为 `null`，**旧 doctrine（`lib/ai/brains/coliving/doctrine/*.md`）与主生成大脑完全没有被装配**。
+  - **统一产品功能问答**（`lib/chat/coliving/feature-qa.ts` + `feature-facts.ts`）：用户询问「为什么办不了 / 能不能做某事 / 你有什么功能」时，不要求必须紧接上一轮 `unsupported`；代码只选出相关的未开放事项事实与当前开放功能名，模型只负责自然表达，并由确定性 grounding 检查不得漏掉、歪曲或自行补充处理方案。该路径同样 `toolsUsed` 为空、`promptComposition` 为 `null`、**不读旧 doctrine**。以后开放新功能会从 `APPROVED_FEATURES` 自动进入回答，不为每个功能另写一套能力说明程序。
+  - **只有这两条受控路径都没接住的请求**（不在清单里的主题、没点名收件人、普通聊天等）才落回**旧提示词大脑**——那时旧 doctrine 与主生成照旧装配、照旧约束这一轮。
+- 因此**现在不要删掉整套 doctrine**：它仍是回退路径与大批普通对话的唯一约束，删除时机是受控路径覆盖到旧路径再无可兜之事，而不是现在。
 
 ### 历史（已废弃）：近似请求只回命令模板（2026-09-12，`ca43989`）
 

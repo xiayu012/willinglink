@@ -255,6 +255,9 @@ export async function runApprovedFeature(
         reply: reply.reply,
         sms: null,
         decisionId: null,
+        // 纯代码关联到统一功能事实源的条目 id：`turn.ts` 收尾时把它（连同发起人）存进
+        // decision payload，让下一轮功能问答能读到**结构化事实**，而不是靠模型自由文本。
+        unsupportedCapabilityId: reply.capabilityId,
       },
       featureId: null,
       usage,

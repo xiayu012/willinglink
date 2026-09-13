@@ -17,7 +17,8 @@ import {
 import { assertCanWrite } from "./guard";
 import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
-import { runApprovedFeature } from "./features";
+import { APPROVED_FEATURES, runApprovedFeature } from "./features";
+import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
 import { addFeatureUsage, productionFeatureLlm } from "./feature-llm";
 import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
@@ -1246,6 +1247,11 @@ export async function finalizeFeatureTurn(
     conversationId: string;
     modelId: string;
     turnStartedAt: Date;
+    /**
+     * 很窄的**结构化决策标记**（如 `unsupported` 保留轮的 `{ unsupportedTopic, personId }`）。
+     * 只放代码枚举值 / id，供下一轮读取结构化事实；普通功能轮不传（默认 `{}`）。
+     */
+    decisionPayload?: Record<string, string>;
   },
   deps: FeatureFinalizeDeps = featureFinalizeDeps
 ): Promise<TurnOutcome> {
@@ -1287,6 +1293,7 @@ export async function finalizeFeatureTurn(
       intent: args.decisionIntent,
       modelId: args.modelId,
       doctrineModules: [],
+      payload: args.decisionPayload ?? {},
     }));
 
   let replyCommunicationId: string | null = null;
@@ -1669,6 +1676,65 @@ export async function runColivingTurn(args: {
               ? "保留对话轮（unsupported）：明确要求联系点名室友办事但主题不在已批准功能清单，本轮零出站，只回当前住户一句真话"
               : `已批准功能（${featureRun.featureId}）命中：功能入口直接办完并落库，回执由功能生成`,
         handling,
+        usage: frontDoorUsage,
+        sender,
+        conversationId,
+        modelId,
+        turnStartedAt,
+        decisionPayload:
+          featureRun.mode === "unsupported" && featureRun.handling.unsupportedCapabilityId
+            ? {
+                capabilityId: featureRun.handling.unsupportedCapabilityId,
+                personId: sender.personId,
+              }
+            : undefined,
+      });
+    }
+  }
+
+  /**
+   * **统一的产品功能问答入口**（2026-09-13 纠正：能力说明不是逐功能编程）。
+   *
+   * 住户问「你有什么功能 / 能不能做 X / 为什么 X 不能做 / 刚才为什么拒绝」这类**产品功能
+   * 边界**时进这里。它**必须在已批准功能前门之后**：凡命中已批准功能、或走前门保留轮的
+   * 请求，前面已经早返回，**已批准功能的执行行为一字不变**；这里只接前门不接的普通问句
+   * （它们通常不需要点名收件人，所以根本进不了前门）。
+   *
+   * 它**不装载旧 doctrine、不进主生成、零工具、零第三方出站**（`finalizeFeatureTurn` 早
+   * 返回）。生成器只看到：住户问题 + `feature-facts.ts` 那份统一功能事实源里**与问题
+   * 有关**的事实 + 当前开放功能清单；模型只负责说人话，写不出 / 越界就用**同样只含事实
+   * 源事实**的兜底。上一轮的 `unsupported` 结构化状态只用来把「刚才」关联到事实源里的
+   * 具体条目（且只认同一发起人），**不是**进入本路径的前提——通用入口不把"紧接上一轮"
+   * 当唯一入口。
+   */
+  if (isFeatureQaQuestion(args.text)) {
+    const latest = await repo.latestDecision(sender.householdId);
+    const qa = await runFeatureQa({
+      text: args.text,
+      senderPersonId: sender.personId,
+      latestDecision: {
+        rejectedCapabilityId: latest?.capabilityId ?? null,
+        personId: latest?.personId ?? null,
+      },
+      openFeatures: APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label })),
+      llm: productionFeatureLlm(modelId),
+    });
+    if (qa) {
+      frontDoorUsage = addFeatureUsage(frontDoorUsage, qa.usage);
+      if (qa.error) {
+        console.log(
+          "[feature] 功能问答失败（用只含事实源事实的兜底）：",
+          qa.error instanceof Error ? qa.error.message : String(qa.error)
+        );
+      }
+      // 兜底同一条真话闸：模型万一仍写「已经跟他说了」，换成只含事实源事实的代码兜底。
+      const reply = claimsUnsentThirdPartyContact(qa.reply) ? qa.fallback : qa.reply;
+      return finalizeFeatureTurn({
+        text: args.text,
+        channel,
+        decisionIntent:
+          "保留对话轮（功能问答）：产品功能边界问答，零第三方出站，只用统一功能事实源说明",
+        handling: { status: "handled", reply, sms: null, decisionId: null },
         usage: frontDoorUsage,
         sender,
         conversationId,

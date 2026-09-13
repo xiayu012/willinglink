@@ -72,6 +72,7 @@ import {
   featureErrorDiagnostics,
   FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS,
   FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
+  FEATURE_QA_MAX_OUTPUT_TOKENS,
   FEATURE_ROUTE_MAX_OUTPUT_TOKENS,
   structuredCall,
   usageOfFeatureError,
@@ -88,7 +89,31 @@ import {
   UNSUPPORTED_FALLBACK,
   UNSUPPORTED_NAME,
   UNSUPPORTED_STAGE,
+  generateUnsupportedReply,
 } from "../lib/chat/coliving/unsupported";
+// 受约束回复的**共享确定性 grounding 闸**（假承诺 / 把球踢回住户 / 换渠道 / 等以后）：
+// `unsupported` 与功能问答两条无工具、无出站路径用的是同一条规则。
+import { findGroundingViolations } from "../lib/chat/coliving/feature-grounding";
+// 统一的产品功能问答入口（**不是功能、不是工具、不出站**）：通用边界问句识别 + 只把
+// `feature-facts.ts` 事实源里有关的事实交给模型说人话，越界回落只含事实源事实的兜底。
+import {
+  FEATURE_QA_MAX_CHARS,
+  FEATURE_QA_NAME,
+  FEATURE_QA_STAGE,
+  asksWhatIsAvailable,
+  featureQaFallback,
+  findUngroundedFeatureQaFacts,
+  generateFeatureQaReply,
+  isFeatureQaQuestion,
+  runFeatureQa,
+} from "../lib/chat/coliving/feature-qa";
+// 用户可见功能事实源（运行时读取的单点数据文件）：未开放条目 + 通用边界 + 通用查找。
+import {
+  GENERIC_UNAVAILABLE,
+  UNAVAILABLE_CAPABILITIES,
+  matchUnavailableCapabilityId,
+  selectUnavailableCapabilities,
+} from "../lib/chat/coliving/feature-facts";
 import type {
   FeatureContext,
   FeatureDeps,
@@ -2239,6 +2264,516 @@ async function main() {
       !/approvedReminder|actionCard|functionId/.test(strip(routeSrc)),
       "大脑路由代码不得残留动作卡命名"
     );
+  });
+
+  /**
+   * ── 统一功能问答（`feature-qa.ts` + `feature-facts.ts`）的**免费离线**验证 ──
+   *
+   * 这条路径**不出站、不写库、不装旧 doctrine**：只把事实源里与问题有关的事实交给模型
+   * 说人话，遗漏 / 说错事实就换成只含事实源事实的兜底。这里用 mock `FeatureLlm` 真的调用
+   * `runFeatureQa` / `generateFeatureQaReply`，断言触发范围、grounding 校验、兜底与
+   * 「通用边界不靠编」——不是拿源码里出现过常量冒充行为。
+   */
+  const OPEN_FEATURES = APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label }));
+  const openLabels = OPEN_FEATURES.map((f) => f.label);
+  const HYGIENE = UNAVAILABLE_CAPABILITIES.find((c) => c.id === "hygiene")!;
+  const listOpen = `目前我能替你发给别人的只有：${openLabels.join("、")}。`;
+  const combinedQuestion = "请问为什么连这么简单的功能都没有?那你有什么功能？";
+
+  check("统一功能事实源：数据驱动选择（问句命中 / 同人上一轮被拒 / 都空 → 通用边界）", () => {
+    // 每条条目的理由锚点必须真的取自 reason（数据质量不变量，不是主题分支）。
+    for (const c of UNAVAILABLE_CAPABILITIES) {
+      assert(c.validation.reasonAnchors.length > 0, `${c.id} 必须有理由锚点`);
+      for (const a of c.validation.reasonAnchors) {
+        assert(c.reason.includes(a), `${c.id} 的锚点「${a}」必须取自它自己的 reason`);
+      }
+    }
+    assert.equal(matchUnavailableCapabilityId("浴室地漏的头发没人清"), "hygiene");
+    assert.equal(matchUnavailableCapabilityId("今天天气不错"), null);
+    assert.deepEqual(
+      selectUnavailableCapabilities("为什么不行", "hygiene").map((c) => c.id),
+      ["hygiene"],
+      "问句没命中、但上一轮同人拒绝的那条要选中"
+    );
+    assert.deepEqual(
+      selectUnavailableCapabilities("今天天气不错", null),
+      [],
+      "问句没命中、上一轮也没有 → 空，调用方用通用边界"
+    );
+    assert(GENERIC_UNAVAILABLE.reason.length > 0, "通用边界必须是事实源里的数据");
+  });
+
+  check("功能问答触发范围：直接问能力也进（不要求上一轮 unsupported），普通交办 / 闲聊不进", () => {
+    assert.equal(isFeatureQaQuestion(combinedQuestion), true);
+    assert.equal(isFeatureQaQuestion("那你有什么功能？"), true);
+    assert.equal(isFeatureQaQuestion("这件事刚才为什么办不了"), true);
+    assert.equal(asksWhatIsAvailable(combinedQuestion), true, "合并追问要识别为在问能力清单");
+    assert.equal(asksWhatIsAvailable("这件事刚才为什么办不了"), false);
+    assert.equal(
+      isFeatureQaQuestion("阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。"),
+      false,
+      "普通交办不是功能边界元问题"
+    );
+    assert.equal(isFeatureQaQuestion("今天晚饭吃什么"), false, "闲聊不进");
+  });
+
+  await checkAsync("功能问答：直接问能力（无上一轮 unsupported）也进；无关消息一次模型都不调", async () => {
+    const grounded = `${HYGIENE.label}我现在办不了：${HYGIENE.reason}。${listOpen}`;
+    const { llm } = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
+    const qa = await runFeatureQa({
+      text: "那你有什么功能？",
+      senderPersonId: "p1",
+      latestDecision: null,
+      openFeatures: OPEN_FEATURES,
+      llm,
+    });
+    assert(qa, "直接问能力必须进功能问答（通用入口，不要求紧接上一轮）");
+    assert.equal(qa!.reply, grounded, "覆盖全部事实的正文原样接受");
+    assert(!("error" in qa!));
+
+    const { llm: unusedLlm, calls } = mockLlm({});
+    const none = await runFeatureQa({
+      text: "今天晚饭吃什么",
+      senderPersonId: "p1",
+      latestDecision: null,
+      openFeatures: OPEN_FEATURES,
+      llm: unusedLlm,
+    });
+    assert.equal(none, null, "无关消息不触发功能问答");
+    assert.equal(calls.length, 0, "无关消息一个模型调用都不花");
+  });
+
+  await checkAsync("功能问答 grounding：同人「刚才」只接同一条；漏提 / 说错 / 假方案一律回落兜底", async () => {
+    const question = "这件事刚才为什么办不了";
+    const fb = featureQaFallback({
+      question,
+      openFeatures: OPEN_FEATURES,
+      lastRejectedCapabilityId: HYGIENE.id,
+    });
+    const grounded = `${HYGIENE.label}我现在办不了：我看不到现场的程度，没法可靠判断要不要让人整改。`;
+    const omitted = "这件事我现在办不了：我看不到现场的程度。"; // 缺事项名
+    const distorted = `${HYGIENE.label}我现在办不了：我没法到现场了解情况。`; // 缺「看不到」锚点
+    const inventedPlan = `${grounded}我这就去跟阿川说。`;
+
+    // 同一个人上一轮被拒 → 选中该条目，正文必须保留名称与理由。
+    const same = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: omitted }) });
+    const sameQa = await runFeatureQa({
+      text: question,
+      senderPersonId: "p1",
+      latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
+      openFeatures: OPEN_FEATURES,
+      llm: same.llm,
+    });
+    assert.equal(sameQa!.reply, fb, "同一人的「刚才」要关联事实源条目，漏提事项名必须回落兜底");
+
+    // 换一个人 → 不认「刚才」，同一条回应不再被强制覆盖该条目。
+    const other = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: omitted }) });
+    const otherQa = await runFeatureQa({
+      text: question,
+      senderPersonId: "p2",
+      latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
+      openFeatures: OPEN_FEATURES,
+      llm: other.llm,
+    });
+    assert.equal(otherQa!.reply, omitted, "不是同一个发起人时不得借用上一轮条目");
+
+    // grounding：漏提 / 说错理由 / 自创处置方案都回落。
+    const cases: Array<[string, string]> = [
+      ["漏提事项名", omitted],
+      ["说错理由", distorted],
+      ["自创处置方案", inventedPlan],
+    ];
+    for (const [label, reply] of cases) {
+      const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
+      const qa = await runFeatureQa({
+        text: question,
+        senderPersonId: "p1",
+        latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
+        openFeatures: OPEN_FEATURES,
+        llm: m.llm,
+      });
+      assert.equal(qa!.reply, fb, `${label} 必须回落兜底`);
+      assert(qa!.error, `${label} 回落时要把原因带出来`);
+    }
+
+    // 覆盖齐全的自然改写照样接受（不要求逐字复述 reason）。
+    const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
+    const okQa = await runFeatureQa({
+      text: question,
+      senderPersonId: "p1",
+      latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
+      openFeatures: OPEN_FEATURES,
+      llm: ok.llm,
+    });
+    assert.equal(okQa!.reply, grounded, "保留名称与理由的自然改写要接受");
+    assert(!("error" in okQa!));
+  });
+
+  await checkAsync("功能问答：问能力清单必须列全 APPROVED_FEATURES（corpus-035 合并追问），漏项回落", async () => {
+    const last = { rejectedCapabilityId: HYGIENE.id, personId: "p1" };
+    const fb = featureQaFallback({
+      question: combinedQuestion,
+      openFeatures: OPEN_FEATURES,
+      lastRejectedCapabilityId: HYGIENE.id,
+    });
+    const grounded = `${HYGIENE.label}这件事我现在办不了：${HYGIENE.reason}。${listOpen}`;
+    const missingOne = `${HYGIENE.label}我现在办不了：${HYGIENE.reason}。目前我能替你发给别人的只有：${openLabels[0]}。`;
+
+    const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
+    const okQa = await runFeatureQa({
+      text: combinedQuestion,
+      senderPersonId: "p1",
+      latestDecision: last,
+      openFeatures: OPEN_FEATURES,
+      llm: ok.llm,
+    });
+    assert.equal(okQa!.reply, grounded, "同时说明被拒事项与全部开放功能要接受");
+
+    const partial = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: missingOne }) });
+    const partialQa = await runFeatureQa({
+      text: combinedQuestion,
+      senderPersonId: "p1",
+      latestDecision: last,
+      openFeatures: OPEN_FEATURES,
+      llm: partial.llm,
+    });
+    assert.equal(partialQa!.reply, fb, "问能力清单时漏列开放功能必须回落兜底");
+
+    // 直接检验通用校验函数本身：读事实源的验证元数据，不靠主题分支。
+    const bundle = {
+      openFeatures: OPEN_FEATURES,
+      unavailable: [HYGIENE],
+      generic: GENERIC_UNAVAILABLE,
+    };
+    assert.deepEqual(
+      findUngroundedFeatureQaFacts(grounded, bundle, { requireOpenLabels: true }),
+      []
+    );
+    assert.equal(
+      findUngroundedFeatureQaFacts(missingOne, bundle, { requireOpenLabels: true }).length,
+      1
+    );
+    assert.deepEqual(
+      findUngroundedFeatureQaFacts(grounded, bundle, { requireOpenLabels: false }),
+      []
+    );
+    // 超长正文也回落（结构校验仍在）。
+    const long = mockLlm({
+      [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded + "啊".repeat(FEATURE_QA_MAX_CHARS) }),
+    });
+    const longQa = await runFeatureQa({
+      text: combinedQuestion,
+      senderPersonId: "p1",
+      latestDecision: last,
+      openFeatures: OPEN_FEATURES,
+      llm: long.llm,
+    });
+    assert.equal(longQa!.reply, fb, "超长正文必须回落兜底");
+  });
+
+  check("corpus-035 两句原文逐字保留，且这轮功能问答无工具 / 无出站 / 不装旧 doctrine", () => {
+    const raw = readFileSync(
+      "lib/chat/coliving/evals/scenarios/corpus-035-unsupported-feature-followup-2026-09-12.json",
+      "utf8"
+    );
+    const scenario = validateScenario(JSON.parse(raw), "corpus-035.json");
+    assert.equal(scenario.turns.length, 2, "corpus-035 只应有两轮");
+    assert.equal(
+      scenario.turns[0].text,
+      "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。"
+    );
+    assert.equal(scenario.turns[1].text, "请问为什么连这么简单的功能都没有?那你有什么功能？");
+    for (const [i, turn] of scenario.turns.entries()) {
+      assert.equal(turn.expect?.minAcceptedOutbound, 0, `第${i + 1}轮零出站`);
+      assert.deepEqual(turn.expect?.mustNotContactNames, ["阿川", "小禾"]);
+    }
+    assert.equal(isFeatureQaQuestion(scenario.turns[1].text), true, "第二轮进功能问答");
+    assert.equal(
+      isFeatureQaQuestion(scenario.turns[0].text),
+      false,
+      "第一轮是普通出站交办，不进问答"
+    );
+
+    // 本闸只应看**真实代码**，不该被字符串 / 模板串 / 正则字面量里的字样误伤。本文件里
+    // feature-qa.ts 的「内部术语黑名单」正则本身就含 functionId——只看注释会把它当代码，
+    // 造成假阳性。这里做一次小扫描，把注释、'…' / "…" 字符串、`…` 模板串、/…/ 正则里的
+    // 内容换成空格（模板 ${...} 插值里的代码保留）；够了，不需要完整词法分析。
+    const stripNonCode = (src: string): string => {
+      const regexPrefix = new Set([
+        "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%",
+        "~", "^", "<", ">",
+      ]);
+      type Frame = { kind: "code" | "template"; depth: number };
+      const stack: Frame[] = [{ kind: "code", depth: 0 }];
+      let out = "";
+      let prev = "";
+      let i = 0;
+      const n = src.length;
+      while (i < n) {
+        const frame = stack[stack.length - 1];
+        const c = src[i];
+        const d = src[i + 1];
+        if (frame.kind === "template") {
+          if (c === "\\") i += 2;
+          else if (c === "`") {
+            stack.pop();
+            prev = "`";
+            i += 1;
+          } else if (c === "$" && d === "{") {
+            stack.push({ kind: "code", depth: 1 });
+            i += 2;
+          } else i += 1;
+          continue;
+        }
+        if (c === "/" && d === "/") {
+          i += 2;
+          while (i < n && src[i] !== "\n") i += 1;
+          continue;
+        }
+        if (c === "/" && d === "*") {
+          i += 2;
+          while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+          i += 2;
+          continue;
+        }
+        if (c === "`") {
+          stack.push({ kind: "template", depth: 0 });
+          i += 1;
+          continue;
+        }
+        if (c === "'" || c === '"') {
+          i += 1;
+          while (i < n) {
+            if (src[i] === "\\") i += 2;
+            else if (src[i] === c) {
+              i += 1;
+              break;
+            } else i += 1;
+          }
+          out += " ";
+          prev = c;
+          continue;
+        }
+        if (c === "/" && (prev === "" || regexPrefix.has(prev))) {
+          i += 1;
+          let inClass = false;
+          while (i < n) {
+            const ch = src[i];
+            if (ch === "\\") {
+              i += 2;
+              continue;
+            }
+            if (ch === "\n") break;
+            if (ch === "[") inClass = true;
+            else if (ch === "]") inClass = false;
+            else if (ch === "/" && !inClass) {
+              i += 1;
+              break;
+            }
+            i += 1;
+          }
+          while (i < n && /[a-z]/i.test(src[i])) i += 1;
+          out += " ";
+          prev = "/";
+          continue;
+        }
+        if (stack.length > 1 && c === "}") {
+          frame.depth -= 1;
+          if (frame.depth === 0) stack.pop();
+          else out += c;
+          prev = c;
+          i += 1;
+          continue;
+        }
+        if (stack.length > 1 && c === "{") {
+          frame.depth += 1;
+          out += c;
+          prev = c;
+          i += 1;
+          continue;
+        }
+        out += c;
+        if (!/\s/.test(c)) prev = c;
+        i += 1;
+      }
+      return out;
+    };
+
+    // 源码闸：功能问答既不是工具、也不出站、不读旧 doctrine（模型调用只经 feature-llm）。
+    const qaSrc = readFileSync("lib/chat/coliving/feature-qa.ts", "utf8");
+    assert(
+      !/\btool\(|inputSchema|functionId|actionCard|deliverSms|contactPerson/.test(
+        stripNonCode(qaSrc)
+      ) && !/generateText|generateObject|streamText|getLanguageModel/.test(qaSrc),
+      "feature-qa.ts 不得是工具 / 不得直接出站 / 不得直接调模型"
+    );
+    assert(
+      !/(?:from\s*["'][^"']*(?:sms-delivery|repo|brains)[^"']*["'])/.test(qaSrc),
+      "feature-qa.ts 不得接投递层 / repo / 旧 doctrine 大脑"
+    );
+    const turnSrcQa = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrcQa.indexOf("runApprovedFeature(") < turnSrcQa.indexOf("isFeatureQaQuestion(") &&
+        turnSrcQa.indexOf("isFeatureQaQuestion(") <
+          turnSrcQa.indexOf("assembleSystemPrompt({"),
+      "功能问答必须在已批准功能前门之后、主生成之前"
+    );
+    assert(
+      turnSrcQa.includes("runFeatureQa(") && turnSrcQa.includes("repo.latestDecision("),
+      "turn.ts 必须接线功能问答入口并读取上一轮结构化 decision"
+    );
+  });
+
+  // corpus-035 第一轮实跑正文：模型在本路径无出站的情况下，多说了「你可能得直接跟他说
+  // 一下」——把办不了的事推回住户。共享 grounding 闸必须拦住它。
+  const CORPUS_035_R1_BAD =
+    "这件事我没法替你转给阿川，现在也没发出去。你可能得直接跟他说一下，让他把地漏的头发清干净。";
+  // corpus-035 第二轮实跑正文：列了开放功能，却漏掉本次「卫生整改」的具体拒绝理由。
+  const CORPUS_035_R2_BAD =
+    "这件事目前不在我能替你转达给别人的范围里；我现在能替你发给别人的只有夜间洗衣提醒和个人物品使用提醒。";
+
+  check("受约束回复 grounding 闸：把球踢回住户 / 换渠道 / 等以后必须被拦，中性真话不受影响", () => {
+    // corpus-035 第一轮原句：把事推回住户 → 必须被拦。
+    assert(
+      findGroundingViolations(CORPUS_035_R1_BAD).length > 0,
+      "「你可能得直接跟他说一下」是把事推回住户，必须被拦"
+    );
+    for (const bad of [
+      "你可以直接跟阿川说一声。",
+      "你可以自己找房东协调一下。",
+      "你们自己沟通就行了。",
+      "建议找物业反映。",
+      "这件事以后再说吧。",
+      "你可以换个方式试试。",
+      "我这就去跟阿川说。",
+    ]) {
+      assert(findGroundingViolations(bad).length > 0, `越界正文必须被拦：${bad}`);
+    }
+
+    // 只讲事实的中性真话（含本路径自己的兜底）不得被误伤——否则会一直回落、把好回复也换掉。
+    for (const ok of [
+      UNSUPPORTED_FALLBACK,
+      "这件事我现在没法替你转给阿川，现在还没跟他说。",
+      "这件事不是我能替你转达给别人的。",
+      openLabels.join("、"),
+    ]) {
+      assert.deepEqual(
+        findGroundingViolations(ok),
+        [],
+        `只讲事实的正文不得被误判：${ok}`
+      );
+    }
+  });
+
+  await checkAsync("unsupported 路径：corpus-035 round 1 越界正文回落中性兜底，结构化条目 id 仍关联", async () => {
+    const { llm } = mockLlm({
+      [UNSUPPORTED_NAME]: JSON.stringify({ reply: CORPUS_035_R1_BAD }),
+    });
+    const r = await generateUnsupportedReply(
+      "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
+      llm
+    );
+    assert.equal(r.reply, UNSUPPORTED_FALLBACK, "越界正文必须换成中性兜底");
+    assert(r.error, "回落时要把越界原因带出来（可诊断）");
+    assert.equal(
+      r.capabilityId,
+      HYGIENE.id,
+      "条目 id 由代码从原话推导，不因模型写坏而丢——下一轮「刚才」才关联得上"
+    );
+
+    // 正常的中性真话照样原样放行（不因加了闸就一律回落）。
+    const good = "这件事我现在没法替你发给阿川，还没有跟他说。";
+    const okMock = mockLlm({ [UNSUPPORTED_NAME]: JSON.stringify({ reply: good }) });
+    const ok = await generateUnsupportedReply(
+      "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
+      okMock.llm
+    );
+    assert.equal(ok.reply, good, "中性真话必须原样接受");
+    assert(!ok.error);
+  });
+
+  await checkAsync("功能问答：corpus-035 round 2 漏掉卫生整改拒绝理由的正文回落兜底", async () => {
+    const last = { rejectedCapabilityId: HYGIENE.id, personId: "p1" };
+    const fb = featureQaFallback({
+      question: combinedQuestion,
+      openFeatures: OPEN_FEATURES,
+      lastRejectedCapabilityId: HYGIENE.id,
+    });
+    const { llm } = mockLlm({
+      [FEATURE_QA_NAME]: JSON.stringify({ reply: CORPUS_035_R2_BAD }),
+    });
+    const qa = await runFeatureQa({
+      text: combinedQuestion,
+      senderPersonId: "p1",
+      latestDecision: last,
+      openFeatures: OPEN_FEATURES,
+      llm,
+    });
+    assert.equal(
+      qa!.reply,
+      fb,
+      "列出开放功能却漏掉被拒事项名称与理由，必须回落只含事实的兜底"
+    );
+    assert(qa!.error);
+  });
+
+  // ── decision.payload 的 JSONB 编码根因回归（不连库、不调模型） ──
+  //
+  // 真实事故：corpus-035 第二轮读不到第一轮 `unsupported` 的结构化条目，断在
+  // 「紧接上一轮」关联上。Codex 只读 DB 诊断为：第一轮 decision 的 payload 落库成了
+  // JSONB 顶层字符串，`payload->>'capabilityId'` 读成 null。根因是
+  // `${JSON.stringify(obj)}::jsonb`：首次执行参数类型还是 unknown（按文本发），
+  // 但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802) 写回该参数并缓存
+  // 预处理语句，**第二次及以后**驱动就按 jsonb 序列化器把已 stringify 的参数再
+  // stringify 一次。修法：用 postgres.js 的 `json()`（同 `shadow.ts` 先例）。
+  // 边界：只守 `recordDecision`；`finishOutreachRun` 的 `skipped_reason` 是同一驱动根因，
+  // 但属另一条路径、且没有既有行为测试，按任务边界不顺手改。
+  check("decision payload 用 postgres.js json() 写对象，不再 JSON.stringify(...)::jsonb", () => {
+    const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
+    const sliceFn = (sig: string) => {
+      const i = repo.indexOf(sig);
+      assert(i >= 0, `找不到 ${sig}`);
+      const j = repo.indexOf("\nexport ", i + sig.length);
+      return repo.slice(i, j > 0 ? j : undefined);
+    };
+    const recordBody = sliceFn("export async function recordDecision(");
+    const latestBody = sliceFn("export async function latestDecision(");
+    assert(
+      /\.json\(\s*args\.payload\b/.test(recordBody),
+      "recordDecision 的 payload 必须走 postgres.js 的 json()（显式 jsonb 参数）"
+    );
+    // 去掉块注释再查旧写法，避免把注释里解释根因的示例当成真代码。
+    const codeOnly = recordBody.replace(/\/\*[\s\S]*?\*\//g, "");
+    assert(
+      !/JSON\.stringify\([^)]*\)\s*::jsonb/.test(codeOnly),
+      "recordDecision 不得再用 JSON.stringify(...)::jsonb——缓存预处理语句上会被驱动双重编码"
+    );
+    assert(
+      latestBody.includes("payload->>'capabilityId'") &&
+        latestBody.includes("payload->>'personId'"),
+      "latestDecision 继续用通用 payload->> 读结构化事实"
+    );
+  });
+
+  check("decision payload 双重编码会读回 null（纯函数复现根因，不连库）", () => {
+    const payload = { capabilityId: "hygiene", personId: "p1" };
+    // postgres.js 对 jsonb(3802) 参数的序列化：把绑定值 JSON.stringify。
+    const boundToStoredText = (bound: unknown) => JSON.stringify(bound);
+    // 读取端 `payload->>'capabilityId'` 的等价语义：先解析顶层，再取字段。
+    const capabilityIdOf = (stored: string): string | null => {
+      const top = JSON.parse(stored) as unknown;
+      return top !== null && typeof top === "object"
+        ? ((top as Record<string, unknown>).capabilityId as string | undefined) ?? null
+        : null;
+    };
+    // 旧写法：先把对象 stringify 再绑定，驱动第二次起会再 stringify 一次 → 顶层是 JSON 字符串。
+    assert.equal(
+      capabilityIdOf(boundToStoredText(JSON.stringify(payload))),
+      null,
+      "预字符串化再绑定会被驱动双重编码，payload->> 读回 null"
+    );
+    // 新写法：对象直接交给 json() → 顶层是对象 → 读回 id。
+    assert.equal(capabilityIdOf(boundToStoredText(payload)), "hygiene");
   });
 
   check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {
@@ -6416,6 +6951,7 @@ async function main() {
       "旧架构的共享短信工具 roommate-message.ts 必须删除"
     );
   });
+
 
 
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);
