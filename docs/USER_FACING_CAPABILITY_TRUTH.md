@@ -6,7 +6,7 @@
 > 同目录相关：`.claude/CONCRETE_FUNCTIONS.md`（具体功能总册）、`.claude/PROJECT_STATE.md`。
 
 > **2026-09-13 定稿（本文件的当前口径）**：老板把三个层次分清楚了——
-> **任务能力**是一批**功能**的集合；**功能**是老板批准的**最小产品单位**（目前只有
+> **功能**是唯一正式的**最小批准单位、产品实现单位与白名单执行单位**（目前只有
 > 「个人物品使用提醒」「夜间洗衣提醒」两件），像传统软件一样**各写各的朴素代码**，
 > 允许重复、不强行抽象；**工具只是底层机械动作**——**功能不是工具**。主生成的工具表里
 > **既没有短信工具、也没有功能工具**：住户自然说话时，`turn.ts` 在 `buildContext` 之后、
@@ -23,6 +23,13 @@
 > 工具选择仪式、也不写死正文常量。
 > 下面是这一版的口径；2026-09-12 的「纯正则 + 写死常量」、其后的「动作卡 / proposition」、
 > 以及中间那版「唯一共享工具 `sendRoommateMessage`」都是**已被驳回的历史**，不再描述当前行为。
+
+> **历史术语归属（2026-09-13）**：`.claude/INTENT_CAPABILITY_ARCHITECTURE_V0.md`、
+> `.claude/ONE_TO_ONE_RELAY_CAPABILITY.md`、`.claude/DOCTRINE_DEVELOPMENT_MAP.md`、
+> `.claude/BRAIN_IMPROVEMENT_ROADMAP.md`、`.claude/AI_COST_ENGINEERING_REVIEW.md`，以及
+> `.claude/AGENT_LOG.md` 与 `.claude/PROJECT_STATE.md` 里的历史条目中出现的旧集合层用语，
+> 均为**历史用语，已由「功能」取代**，只作证据保留，**不得当作现行架构 / 批准 / 路线口径**，
+> 也不得照此恢复已收回的通用第三方出站。
 
 ## 通信渠道：外部实时消息只有短信
 

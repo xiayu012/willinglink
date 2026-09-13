@@ -1691,8 +1691,8 @@ async function main() {
   /**
    * ── 已批准的两项受约束第三方出站：个人物品使用提醒 / 夜间洗衣提醒 ──────────
    *
-   * 老板 2026-09-13 定稿：任务能力是**一批功能的集合**，功能是老板批准的**最小产品
-   * 单位**，各功能各写各的朴素代码、允许重复、不强行抽象。**功能不是工具**：
+   * 老板 2026-09-13 定稿：**功能**是唯一正式的最小批准单位，各功能各写各的朴素
+   * 代码、允许重复、不强行抽象。**功能不是工具**：
    *   · 主生成的工具表里没有短信工具、也没有功能工具（`turn.ts` 里没有
    *     `sendRoommateMessage`，`TOOL_DECL_NAMES` 里也没有）；
    *   · 功能识别是 `features.ts` 里**一次内部白名单路由调用**：路由器只能在代码清单
@@ -2621,6 +2621,34 @@ async function main() {
     assert(
       turnSrcQa.includes("runFeatureQa(") && turnSrcQa.includes("repo.latestDecision("),
       "turn.ts 必须接线功能问答入口并读取上一轮结构化 decision"
+    );
+  });
+
+  check("术语哨兵：旧集合层「任务能力」不再作为现行正式层，当前入口/运行时/场景不再出现", () => {
+    // 老板 2026-09-13 决定：取消「任务能力」集合层，正式的最小批准单位、产品实现单位
+    // 与白名单执行单位改为「功能」。这条哨兵刻意**只扫当前口径的文件**（当前入口文档、
+    // 活跃运行时注释、当前场景 source）；历史资产（AGENT_LOG / INTENT_* / ROADMAP 等）
+    // 保留该词作为证据，因此**不做全仓零出现断言**，避免误伤历史记录。
+    const currentTermFree = [
+      "CLAUDE.md",
+      "docs/USER_FACING_CAPABILITY_TRUTH.md",
+      "lib/chat/coliving/features.ts",
+      "lib/chat/coliving/sms-delivery.ts",
+      "lib/chat/coliving/evals/scenarios/personal-item-reminder-2026-09-12.json",
+      "lib/chat/coliving/evals/scenarios/corpus-033-personal-item-reminder-2026-09-12.json",
+      "lib/chat/coliving/evals/scenarios/corpus-034-night-laundry-reminder-2026-09-12.json",
+      "lib/chat/coliving/evals/scenarios/corpus-032-reddit-narrow-reminders-2026-09-12.json",
+    ];
+    for (const file of currentTermFree) {
+      assert(
+        !readFileSync(file, "utf8").includes("任务能力"),
+        `${file} 当前口径不得再用旧集合层用语定义正式层`
+      );
+    }
+    // 取代关系必须写进当前入口：正式单位是「功能」。
+    assert(
+      readFileSync("CLAUDE.md", "utf8").includes("唯一正式"),
+      "CLAUDE.md 必须写明「功能」是唯一正式的最小批准单位"
     );
   });
 

@@ -385,3 +385,28 @@ Codex 已在当前实现上用 DeepSeek V4.1 Flash 实跑 corpus-035。结构闸
 - 新增离线源码/纯函数回归，确保 decision payload 不再用 `JSON.stringify(... )::jsonb` 写入，并沿用 postgres.js 正确 JSON API；不要连接真实数据库、不要跑付费模型。
 - 不要顺手改变无关的 `skipped_reason` 老代码，除非你能证明它属于本次同一根因且有既有行为测试。
 - 运行 `pnpm.cmd coliving:quality`、`pnpm.cmd exec tsc --noEmit`、`git diff --check`。不要提交、不要推送、不要碰 `public/sw.js`。
+# 当前任务（2026-09-13）：取消“任务能力”作为正式架构层
+
+## 老板最新决定
+
+老板同意删除“任务能力”这个集合层。当前判断是：没有用户、老板审批或运行时代码需要理解它；它还容易造成“批准一个集合就连带批准集合内其它事情”的误解。以后：
+
+- **功能**是唯一正式的最小批准单位、产品实现单位和白名单执行单位。
+- `intent` 只表示用户当前这轮想达到什么目的/阶段，供理解和路由使用，不是审批单位。
+- `tool` / 短信投递 / 数据库只是底层机械设施，不是功能，也不决定权限。
+- 工程 `capability` 若将来确实从多个功能里自然沉淀，可作为内部复用实现描述；当前不建立 registry，也不参与老板批准或运行时放行。
+- “功能分组”可以作为纯导航标签存在，但不得获得权限语义、运行时语义或批准语义；当前不需要专门建立。
+
+## 实现边界
+
+这是术语和长期架构收口，不改现有生产行为，不重构白名单前门，不新增模型调用、工具、schema 或数据库结构。
+
+请完成：
+
+1. 更新当前有效的长期文档与项目入口（至少 `.claude/PROJECT_STATE.md`、`CLAUDE.md`、`docs/USER_FACING_CAPABILITY_TRUTH.md`、`.claude/INTENT_CAPABILITY_ARCHITECTURE_V0.md`、`.claude/BRAIN_IMPROVEMENT_ROADMAP.md`），把“任务能力”从当前架构/批准/路线口径中撤下，明确由“功能”取代。旧实验和旧决策作为历史可以保留，但必须清楚标注已被 2026-09-13 决定取代，不能让新会话误当现行制度。
+2. 更新活跃源码注释、质量检查说明和当前场景 `source` 元数据中仍把“任务能力”说成现行正式层的文字；不得改变场景 `turns`、`expect`、运行逻辑或断言语义。
+3. `.claude/AGENT_LOG.md` 只追加一条新决策记录，不篡改既有历史。像 `.claude/ONE_TO_ONE_RELAY_CAPABILITY.md`、`DOCTRINE_DEVELOPMENT_MAP.md` 这种历史资产可保留原名和过去事实，但在文件顶部/相关标题附近加醒目的“历史术语，现已由功能单位取代”说明，避免误用；不要为了清词而删除有价值的验收历史。
+4. 增加或调整免费文档/源码哨兵：当前入口和活跃运行时注释不得再定义“任务能力”为正式层；允许历史段落出现该词。不要写脆弱的全仓零出现断言。
+5. 全仓复查“任务能力”命中，按“当前口径必须改 / 历史记录可留”分类，报告余下命中的理由。
+
+验收：`pnpm.cmd coliving:quality`、`pnpm.cmd exec tsc --noEmit`、`git diff --check`。不跑付费模型，不写真实数据库，不发短信，不碰 `public/sw.js`，不要 commit/push。
