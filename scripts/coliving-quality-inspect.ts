@@ -28,6 +28,7 @@ import {
   claimsContactCompletion,
   claimsUnsentThirdPartyContact,
   checkProcessNarration,
+  checkSourcePrivacy,
   extractExplicitFixedStart,
   extractPreferredStart,
   extractSlotFromInquiry,
@@ -60,7 +61,6 @@ import {
   FEATURE_ROUTE_NAME,
   FEATURE_ROUTE_NONE,
   FEATURE_ROUTE_REPLY_ONLY,
-  FEATURE_ROUTE_UNSUPPORTED,
   FEATURE_ROUTE_STAGE,
   routeApprovedFeature,
   runApprovedFeature,
@@ -71,7 +71,6 @@ import {
   FEATURE_MIN_OUTPUT_TOKENS,
   featureErrorDiagnostics,
   FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS,
-  FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
   FEATURE_QA_MAX_OUTPUT_TOKENS,
   FEATURE_ROUTE_MAX_OUTPUT_TOKENS,
   structuredCall,
@@ -85,14 +84,8 @@ import {
   REPLY_ONLY_NAME,
   REPLY_ONLY_STAGE,
 } from "../lib/chat/coliving/reply-only";
-import {
-  UNSUPPORTED_FALLBACK,
-  UNSUPPORTED_NAME,
-  UNSUPPORTED_STAGE,
-  generateUnsupportedReply,
-} from "../lib/chat/coliving/unsupported";
 // 受约束回复的**共享确定性 grounding 闸**（假承诺 / 把球踢回住户 / 换渠道 / 等以后）：
-// `unsupported` 与功能问答两条无工具、无出站路径用的是同一条规则。
+// 功能问答这条无工具、无出站路径用的是这条规则。
 import { findGroundingViolations } from "../lib/chat/coliving/feature-grounding";
 // 统一的产品功能问答入口（**不是功能、不是工具、不出站**）：通用边界问句识别 + 只把
 // `feature-facts.ts` 事实源里有关的事实交给模型说人话，越界回落只含事实源事实的兜底。
@@ -107,13 +100,19 @@ import {
   isFeatureQaQuestion,
   runFeatureQa,
 } from "../lib/chat/coliving/feature-qa";
-// 用户可见功能事实源（运行时读取的单点数据文件）：未开放条目 + 通用边界 + 通用查找。
+// 用户可见功能事实源（运行时读取的单点数据文件）：专门优化的开放功能 + 与问题有关的黑名单条目。
 import {
-  GENERIC_UNAVAILABLE,
-  UNAVAILABLE_CAPABILITIES,
-  matchUnavailableCapabilityId,
-  selectUnavailableCapabilities,
+  FULL_FLOW_NOTE,
+  buildFeatureQaFacts,
+  selectBlacklistedCapabilities,
 } from "../lib/chat/coliving/feature-facts";
+// 显式黑名单事实源（当前为空）：复用那一次功能路由的 `blocked:<id>` token，
+// 不按关键词阻断；纯代码解析，是「这件事办不了」的唯一起源。
+import {
+  BLACKLISTED_CAPABILITIES,
+  blacklistedCapabilityByRouteToken,
+  blacklistedCapabilityById,
+} from "../lib/chat/coliving/blacklist";
 import type {
   FeatureContext,
   FeatureDeps,
@@ -868,6 +867,93 @@ async function main() {
       "将来时（回头跟他说）不是假完成，不得误伤"
     );
   });
+  // 029 模型验收抓到的真实隐私缺陷：电视音量那轮真实出站写成了
+  // 「阿杰，小婷在房间补觉……她想请你现在把音量调小一点。」——来源姓名、来源人私人状况、
+  // 归因句三样都泄露。generation-only 下没有 critic，靠 contactPerson 里这条纯代码闸拦。
+  check("source privacy gate blocks leaking who raised the request", () => {
+    const leak =
+      "阿杰，小婷在房间补觉，客厅电视声她那边听得很清楚，睡不着。她想请你现在把音量调小一点。";
+    assert(checkSourcePrivacy(leak, { senderName: "小婷" }), "出现发信人姓名必须拦");
+    assert(
+      checkSourcePrivacy("她想请你把音量调小一点。", { senderName: "小婷" }),
+      "代词归因句（她想请你…）必须拦"
+    );
+    assert(
+      checkSourcePrivacy("他说让你把音量调小。", { senderName: "小婷" }),
+      "代词归因句（他说让你…）必须拦"
+    );
+    assert(
+      checkSourcePrivacy("有人反映客厅电视太吵。", { senderName: "小婷" }),
+      "不定代词归因句（有人反映…）必须拦"
+    );
+    // 029 二次模型验收：姓名与归因句都清掉后，真实出站仍转述来源人私人处境（补觉 / 睡不着）。
+    assert(
+      checkSourcePrivacy(
+        "阿杰，客厅电视声这会儿有点大，房间里有人补觉、睡不着。麻烦先把音量调小一点，行吗？",
+        { senderName: "小婷" }
+      ),
+      "转述来源人私人处境（补觉 / 睡不着）必须拦"
+    );
+    // 私人睡眠状态逐个高精度命中。
+    for (const privateState of [
+      "我这两天一直失眠，客厅电视太吵。",
+      "我昨晚一宿没合眼。",
+      "我没睡好，电视声太大了。",
+      "他那边没睡着，麻烦小声点。",
+      "有人补觉，客厅电视声太大。",
+      "吵得睡不着，麻烦调小。",
+    ]) {
+      assert(
+        checkSourcePrivacy(privateState, { senderName: "小婷" }),
+        `来源人私人睡眠状态必须拦：${privateState}`
+      );
+    }
+    // 中立的事项 + 请求动作必须放行（不能因为"提到了来源"以外的正常写法被误杀）。
+    assert.equal(
+      checkSourcePrivacy("客厅电视的声音有点大，麻烦你现在把音量调小一点，谢谢。", {
+        senderName: "小婷",
+      }),
+      null,
+      "中立的事项 + 请求必须放行"
+    );
+    assert.equal(
+      checkSourcePrivacy("客厅电视声有点大，麻烦调小，避免影响别人休息。", {
+        senderName: "小婷",
+      }),
+      null,
+      "「影响别人休息」是共享可观察的必要理由，必须放行"
+    );
+    assert.equal(
+      checkSourcePrivacy("阿杰，夜里电视声大容易影响别人休息，麻烦调小一点。", {
+        senderName: "小婷",
+      }),
+      null,
+      "「夜里容易影响休息」不得误伤"
+    );
+    assert.equal(
+      checkSourcePrivacy("客厅电视的声音有点大，想请你现在把音量调小一点。", {
+        senderName: "小婷",
+      }),
+      null,
+      "无来源主语的「想请你」是协调员口吻，不得误伤"
+    );
+    // 目标收件人本人的姓名允许出现（短信本来就要称呼他）。
+    assert.equal(
+      checkSourcePrivacy("阿杰，晚上麻烦把音量调小一点，谢谢。", {
+        senderName: "小婷",
+      }),
+      null,
+      "目标收件人姓名开头不得误伤"
+    );
+    // 「其他」里的「他」不是来源主语。
+    assert.equal(
+      checkSourcePrivacy("阿杰，其他事没有，麻烦把音量调小一点。", {
+        senderName: "小婷",
+      }),
+      null,
+      "「其他」不得被当成来源代词误伤"
+    );
+  });
   check("explicit fixed-start wording is recovered from recorded facts", () => {
     assert.equal(extractExplicitFixedStart("我18点到家，只能18点开始做饭，要做两小时"), 1080);
     assert.equal(extractExplicitFixedStart("我必须在 18:30 开始"), 1110);
@@ -1258,40 +1344,44 @@ async function main() {
    */
   check("generation-only contract: turn.ts 无 critic/redo/finalFix 路径，保护与离线 judge 各就各位", () => {
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    // 「无 critic 路径」这类否定扫描必须只看**可执行代码**：注释里解释历史事故
+    // （例如「generation-only 下已无 critic」）是应当保留的说明，不是调用路径。
+    // 与本文件黑名单断言同一套剥离方式（去块注释 / 行注释），不靠删注释骗绿。
+    const turnCode = turnSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
     // ① 生产 turn 不 import/不调用任何 LLM 批判器、重写或最终聚焦修正生成。
-    assert(!turnSrc.includes("critic"), "turn.ts 不得再出现任何 critic 引用（import/调用）");
-    assert(!turnSrc.includes("critiqueBatch"), "turn.ts 不得调用 critiqueBatch");
-    assert(!turnSrc.includes("await critique("), "turn.ts 不得调用 critique");
+    assert(!turnCode.includes("critic"), "turn.ts 不得再出现任何 critic 引用（import/调用）");
+    assert(!turnCode.includes("critiqueBatch"), "turn.ts 不得调用 critiqueBatch");
+    assert(!turnCode.includes("await critique("), "turn.ts 不得调用 critique");
     assert(
-      !turnSrc.includes('stage: "finalFix"') && !turnSrc.includes('stage: "redo"'),
+      !turnCode.includes('stage: "finalFix"') && !turnCode.includes('stage: "redo"'),
       "turn.ts 不得再有 redo/finalFix 生成阶段选型"
     );
     assert(
-      !turnSrc.includes('trackedGatewayCall("finalFix"') &&
-        !turnSrc.includes('trackedGatewayCall("redo"'),
+      !turnCode.includes('trackedGatewayCall("finalFix"') &&
+        !turnCode.includes('trackedGatewayCall("redo"'),
       "turn.ts 不得再有任何打回/最终修正的计费调用"
     );
     // 生产只剩两处模型调用，且都用同一个默认生成模型：主生成 + 一处确定性兜底
     // （模型没按工具约定走时强制 sendReply）。第三方强制联系（forced-contact）
     // 已随严格口径撤掉，不再有第二处兜底。
     assert.equal(
-      turnSrc.split("generateText(").length - 1,
+      turnCode.split("generateText(").length - 1,
       2,
       "生产只应有主生成与一处强制兜底共两处模型调用"
     );
     assert.equal(
-      turnSrc.split("trackedGatewayCall(").length - 1,
+      turnCode.split("trackedGatewayCall(").length - 1,
       2,
       "两处模型调用都必须过计费台账"
     );
     assert.equal(
-      turnSrc.split("getLanguageModel(modelId)").length - 1,
+      turnCode.split("getLanguageModel(modelId)").length - 1,
       2,
       "两处调用都必须用同一个默认生成模型"
     );
     assert(
-      turnSrc.includes("const modelId = args.modelId ?? colivingModelId();"),
+      turnCode.includes("const modelId = args.modelId ?? colivingModelId();"),
       "生产模型一律默认 colivingModelId()，没有 critic/finalFix 专用选型"
     );
 
@@ -1309,9 +1399,9 @@ async function main() {
     assert(turnSrc.includes("function checkFactFidelity("), "代码可证的事实核对必须保留");
     assert(turnSrc.includes("uncoveredBlockedPersonIds(outbound)"), "被拦出站结构事实必须保留");
     assert(turnSrc.includes("claimsContactCompletion(text)"), "确定性假完成判定必须保留");
-    // 严格口径（老板 2026-09-12）之后，普通对话不再有任何第三方出站能力：
-    // 旧 contactPerson 工具的发送前竞态门禁随工具一起撤掉，取而代之的是
-    // 「没真的发出去就不许说已经联系」的真相保护，以及唯一受约束的个人物品提醒。
+    // 默认宽容（老板 2026-09-13）之后，普通对话恢复了通用短信联系（`contactPerson`）：
+    // 住户当前明确交办时可以把话发给某位同屋人，因此「没真的发出去就不许说已经联系」
+    // 的真相保护（零合格出站才替换）必须保留；已批准的两条功能仍走前门快路径。
     assert(
       turnSrc.includes("claimsUnsentThirdPartyContact(reply)"),
       "普通回复的假完成真相保护必须保留"
@@ -1322,10 +1412,10 @@ async function main() {
       turnSrc.includes("return claimsContactCompletion(clause)"),
       "无主语完成式必须复用 claimsContactCompletion（不另造一套大正则）"
     );
-    // unsupported 保留轮的正文也必须过同一道真相闸再收尾（模型万一仍写「已经跟他说了」）。
+    // 恢复的通用联系工具仍必须带发送前竞态门禁（目标人本轮开始后有新入站则跳过）。
     assert(
-      turnSrc.includes("claimsUnsentThirdPartyContact(featureRun.handling.reply)"),
-      "unsupported 保留轮必须复用同一条假完成真相闸"
+      turnSrc.includes("hasNewInboundSince("),
+      "contactPerson 恢复后必须保留发送前竞态门禁"
     );
     // 替换必须先于 checkFactFidelity 复核：换掉的那句真话要重新核对，而不是只标红。
     assert(
@@ -1343,8 +1433,12 @@ async function main() {
       `未发送说明必须只说没发出去、不列能力边界：${TRUTHFUL_UNSENT_REPLY}`
     );
     assert(
-      !/contactPerson:\s*tool\(/.test(turnSrc),
-      "生产不得再定义泛用 contactPerson 工具"
+      /contactPerson:\s*tool\(/.test(turnSrc),
+      "默认宽容下生产必须恢复泛用 contactPerson 工具"
+    );
+    assert(
+      turnSrc.includes("contactPerson: tools.contactPerson"),
+      "contactPerson 必须在主生成常驻工具表里（住户当前明确交办时可用）"
     );
     assert(
       !turnSrc.includes("enqueueScheduleContact("),
@@ -1445,12 +1539,11 @@ async function main() {
     assert(src.includes('position.kind !== "commitment"'));
     assert(src.includes("ctx.openCases.some(isOpenConflictCase)"));
     assert(!src.includes("!topicHitsConflict ||\n      !toolsUsed.includes(\"recordPosition\")"));
-    // 严格口径（老板 2026-09-12）后，排班的「选定后必联系参与者」自动收口、
-    // 以及旧 contactPerson 路径的「谁已经被联系过」记账集合一并撤掉——
-    // 普通对话没有任何第三方出站，留一个永远为空的 `contacted` 集合，
-    // 读者会误以为代码还具备联系能力。这里反向断言它不再存在。
-    assert(!src.includes("const contacted = new Set"), "旧联系记账集合必须删除");
-    assert(!src.includes("contacted.has("), "不得残留 contacted 集合的读引用");
+    // 默认宽容（老板 2026-09-13）恢复了通用短信联系：排班的「选定后必联系参与者」
+    // 自动收口仍不恢复（那属于自由第三方出站的机械化外发），但 contactPerson 的
+    // 「本轮已给谁发过」记账集合必须回来，用于同轮去重与判断升级。
+    assert(src.includes("const contacted = new Set"), "contactPerson 的同轮去重集合必须存在");
+    assert(src.includes("contacted.has("), "contactPerson 必须按 contacted 去重");
     assert(!src.includes("contacted.delete("), "不得残留 contacted 集合的写引用");
     assert(
       !src.includes("isGeneratedResidentName"),
@@ -1614,13 +1707,12 @@ async function main() {
     for (const t of ["noteObservation", "recall", "lookupHistory", "findSimilarCases", "checkEnvironment"]) {
       assert(!init.includes(`tools.${t}`), `${t} 不得无条件进入 activeTools 初始集`);
     }
-    for (const t of ["decide", "sendReply", "logEvent", "remember", "addResident"]) {
+    for (const t of ["decide", "sendReply", "logEvent", "remember", "addResident", "contactPerson"]) {
       assert(init.includes(`tools.${t}`), `${t} 必须保留在常驻初始集`);
     }
-    // 严格口径后，泛用 contactPerson 不得再出现在 activeTools 的任何一支。
-    assert(!src.includes("activeTools.contactPerson"), "contactPerson 不得进入 activeTools 条件集");
-    assert(!init.includes("contactPerson"), "contactPerson 不得出现在 activeTools 常驻初始集");
-    assert(!/contactPerson:\s*tool\(/.test(src), "生产不得再定义泛用 contactPerson 工具");
+    // 默认宽容后，泛用 contactPerson 必须回到 activeTools 常驻初始集（住户当前明确交办时可用）。
+    assert(init.includes("contactPerson: tools.contactPerson"), "contactPerson 必须进入 activeTools 常驻初始集");
+    assert(/contactPerson:\s*tool\(/.test(src), "生产必须定义泛用 contactPerson 工具");
     // 按需暴露的信号必须真实存在并驱动 activeTools 的条件赋值
     assert(src.includes("const environmentSignal ="), "环境信号判定必须存在");
     assert(src.includes("const historySignal ="), "历史/反复信号判定必须存在");
@@ -1905,8 +1997,11 @@ async function main() {
     );
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     assert(!turnSrc.includes("sendRoommateMessage"), "turn.ts 不得再残留共享短信工具");
-    assert(!/\bcontactPerson:\s*tool\(/.test(turnSrc), "生产不得再定义泛用 contactPerson 工具");
-    assert(!turnSrc.includes("activeTools.contactPerson"), "activeTools 不得再挂 contactPerson");
+    assert(/contactPerson:\s*tool\(/.test(turnSrc), "默认宽容下生产必须定义泛用 contactPerson 工具");
+    assert(
+      turnSrc.includes("contactPerson: tools.contactPerson"),
+      "contactPerson 必须常驻主生成工具表"
+    );
     assert(
       !/approvedReminder|ApprovedReminder|actionCard|ActionCard|functionId|proposalOutcome/.test(
         turnSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
@@ -1984,7 +2079,6 @@ async function main() {
       const none = await routeApprovedFeature("随便聊聊", textOnly(FEATURE_ROUTE_NONE));
       assert.equal(none.match, null, "none 不得命中");
       assert.equal(none.replyOnly, false, "none 不是 reply_only");
-      assert.equal(none.unsupported, false, "none 不是 unsupported");
 
       // 保留结果 reply_only：**不是清单里的功能**，match 必为 null、replyOnly 为 true。
       const replyOnly = await routeApprovedFeature(
@@ -1993,7 +2087,6 @@ async function main() {
       );
       assert.equal(replyOnly.match, null, "reply_only 不得命中任何功能");
       assert.equal(replyOnly.replyOnly, true, "reply_only 是保留结果，必须被识别");
-      assert.equal(replyOnly.unsupported, false, "reply_only 不是 unsupported");
       // 带空白 / 换行仍精确识别。
       const replyOnlyPadded = await routeApprovedFeature(
         "你觉得要不要跟阿川提一下深夜洗衣服的事？",
@@ -2002,31 +2095,24 @@ async function main() {
       assert.equal(replyOnlyPadded.replyOnly, true, "trim 后精确相等必须识别 reply_only");
       assert.equal(replyOnlyPadded.match, null);
 
-      // 保留结果 unsupported：**不是清单里的功能**，match 必为 null、unsupported 为 true。
-      // 029 电视音量：点名要 AI 找室友办事，但主题不在清单里。
-      const unsupported = await routeApprovedFeature(
-        "阿杰在客厅把电视开得特别响，你赶紧帮我跟他说一声，让他把音量调小点。",
-        textOnly(FEATURE_ROUTE_UNSUPPORTED)
+      // 黑名单复用这同一次路由：条目以 `blocked:<id>` token 摆给模型，纯代码精确解析。
+      // **空表时任何 blocked: token 都解析不到条目**，也绝不因为原话里出现某主题词就拦
+      // （关键词不是执行阻断依据——讨论 / 否定 / 引用不会被误判成交办）。
+      const blockedMiss = await routeApprovedFeature(
+        "浴室地漏的头发没人清理，你怎么看？",
+        textOnly("blocked:hygiene")
       );
-      assert.equal(unsupported.match, null, "unsupported 不得命中任何功能");
-      assert.equal(unsupported.unsupported, true, "unsupported 是保留结果，必须被识别");
-      assert.equal(unsupported.replyOnly, false, "unsupported 不是 reply_only");
-      // 带空白 / 换行仍精确识别。
-      const unsupportedPadded = await routeApprovedFeature(
-        "帮我跟阿杰说一声把电视关小",
-        textOnly(`\n ${FEATURE_ROUTE_UNSUPPORTED} \t`)
-      );
-      assert.equal(unsupportedPadded.unsupported, true, "trim 后精确相等必须识别 unsupported");
-      assert.equal(unsupportedPadded.match, null);
+      assert.equal(blockedMiss.blacklisted, null, "空黑名单不得命中任何条目");
+      assert.equal(blockedMiss.match, null, "blocked: token 不是已批准功能 id");
+      assert.equal(blockedMiss.replyOnly, false, "blocked: token 不是 reply_only");
 
-      // 清单外的词：一律不命中，绝不执行清单外功能。
+      // 清单外的词（如 029 电视音量这类主题）：一律不命中 → 落回主生成，**不是拒绝**。
       const stray = await routeApprovedFeature(
-        "提醒 阿川 电视音量小一点",
+        "阿杰在客厅把电视开得特别响，你赶紧帮我跟他说一声，让他把音量调小点。",
         textOnly("tv_volume")
       );
       assert.equal(stray.match, null, "清单外字符串不可能命中任何功能");
       assert.equal(stray.replyOnly, false, "清单外字符串不得被当成 reply_only");
-      assert.equal(stray.unsupported, false, "清单外字符串不得被当成 unsupported");
 
       // 解释性 / JSON / 字段名漂移文本：一律安全当 none，不解析、不猜。
       for (const explained of [
@@ -2040,7 +2126,6 @@ async function main() {
         const r = await routeApprovedFeature("提醒 阿川 深夜别开洗衣机", textOnly(explained));
         assert.equal(r.match, null, `解释性 / JSON 文本不得命中：${explained}`);
         assert.equal(r.replyOnly, false, `解释性 / JSON 文本不得被当成 reply_only：${explained}`);
-        assert.equal(r.unsupported, false, `解释性 / JSON 文本不得被当成 unsupported：${explained}`);
       }
     }
   );
@@ -2110,13 +2195,13 @@ async function main() {
       "night-laundry-reminder.ts",
       "personal-item-reminder.ts",
       "reply-only.ts",
-      "unsupported.ts",
+      "blacklist.ts",
     ]) {
       assert(existsSync(`lib/chat/coliving/${kept}`), `新架构模块必须存在：${kept}`);
     }
     const strip = (s: string) =>
       s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-    // 功能模块 / 清单 / 投递层 / reply_only / unsupported 小回复都不直接调模型
+    // 功能模块 / 清单 / 投递层 / reply_only 小回复 / 黑名单都不直接调模型
     // （模型调用只经 feature-llm.ts 那一个管道）。
     for (const file of [
       "features.ts",
@@ -2124,7 +2209,7 @@ async function main() {
       "night-laundry-reminder.ts",
       "personal-item-reminder.ts",
       "reply-only.ts",
-      "unsupported.ts",
+      "blacklist.ts",
     ]) {
       const src = readFileSync(`lib/chat/coliving/${file}`, "utf8");
       assert(
@@ -2180,38 +2265,63 @@ async function main() {
       !/\b(from|import)\b[^\n]*\brepo\b/.test(replyOnlySrc),
       "reply_only 不得直接写库（只生成一句回给当前住户的话）"
     );
-    // unsupported 同样是**路由器的保留结果**，不是功能、不是工具、不在清单里：
-    // 由 unsupported.ts 的独立小回复承接（无工具、无出站），与 reply_only 语义不同。
+    // 默认宽容后 unsupported 保留结果被移除：清单外主题不再被自动拒绝，落回主生成。
     assert(
-      featureSrc.includes("FEATURE_ROUTE_UNSUPPORTED") &&
-        featureSrc.includes("generateUnsupportedReply"),
-      "features.ts 必须把 unsupported 作为保留结果接线到独立小回复生成"
+      !featureSrc.includes("FEATURE_ROUTE_UNSUPPORTED") &&
+        !featureSrc.includes("unsupported"),
+      "features.ts 不得再保留只服务旧 default-deny 的 unsupported 路由"
     );
     assert(
-      !/id:\s*"unsupported"/.test(featureSrc) &&
-        !/unsupported/.test(APPROVED_FEATURES.map((f) => f.id).join(",")),
-      "unsupported 不得被登记成一项已批准功能"
+      !existsSync("lib/chat/coliving/unsupported.ts"),
+      "只服务旧 default-deny 的 unsupported.ts 必须删除"
     );
-    const unsupportedSrc = readFileSync("lib/chat/coliving/unsupported.ts", "utf8");
+    // 显式黑名单是"办不了"的唯一起源：复用同一次功能路由的 `blocked:<id>` token，
+    // 纯代码解析、零模型调用、表为空时恒不命中；**不得退回按关键词在原话上直接命中**。
+    const blacklistSrc = readFileSync("lib/chat/coliving/blacklist.ts", "utf8");
     assert(
-      unsupportedSrc.includes("UNSUPPORTED_STAGE") &&
-        unsupportedSrc.includes("structuredCall") &&
-        !/\btool\(|inputSchema|functionId|actionCard|deliverSms|contactPerson/.test(
-          strip(unsupportedSrc)
-        ),
-      "unsupported 小回复必须无工具、无出站（不得出现工具 schema / 投递 / 联系）"
+      blacklistSrc.includes("BLACKLISTED_CAPABILITIES") &&
+        blacklistSrc.includes("blacklistedCapabilityByRouteToken") &&
+        blacklistSrc.includes("blacklistRouteToken") &&
+        blacklistSrc.includes("BLACKLIST_ROUTE_PREFIX"),
+      "blacklist.ts 必须提供显式黑名单数据与复用那次路由的 blocked: token 解析"
+    );
+    // 这两条否定断言只扫**剥离注释后的代码**：blacklist.ts 顶部保留了"为什么淘汰
+    // 旧的关键词命中"的历史说明，里面会提到这些被淘汰的函数名，不能在注释上误报。
+    const blacklistCode = strip(blacklistSrc);
+    assert(
+      !/\bmatchBlacklistedCapabilityId\b/.test(blacklistCode),
+      "黑名单执行阻断不得退回旧的关键词原话命中（讨论 / 否定 / 引用会被误判成交办）"
     );
     assert(
-      !/\b(from|import)\b[^\n]*\brepo\b/.test(unsupportedSrc),
-      "unsupported 不得直接写库（只生成一句回给当前住户的话）"
+      !/\bselectBlacklistedCapabilities\b/.test(blacklistCode),
+      "黑名单解析不得依赖问答侧的关键词关联函数"
     );
-    // unsupported 的正文必须「只说真话」：提示词要求如实说没发出去、绝不声称已联系、
-    // 不主动列能力清单（只在住户明确追问为什么时才简单说明）。
     assert(
-      /没(?:法|有)?[^。\n]{0,12}(?:发|联系|转)/.test(unsupportedSrc) &&
-        /绝不声称/.test(unsupportedSrc) &&
-        /追问/.test(unsupportedSrc),
-      "unsupported 提示词必须要求如实说明没发出去、绝不声称已联系、仅追问时才解释"
+      /const BLACKLISTED_CAPABILITIES[^=]*=\s*\[\s*\]/.test(blacklistSrc),
+      "当前黑名单必须为空（空表 = 不产生任何拒绝）"
+    );
+    assert(
+      !/generateText|generateObject|structuredCall|getLanguageModel/.test(blacklistSrc),
+      "黑名单匹配必须是纯代码，不得加任何 LLM 调用"
+    );
+    // 黑名单**复用同一次功能路由**：条目作为 blocked:<id> 选项进 routeSystem，
+    // 解析走 blacklistedCapabilityByRouteToken，命中后走 mode "blacklisted"——
+    // 不新增第二次 LLM 调用，也不在 turn.ts 里按关键词前置拦截。
+    assert(
+      featureSrc.includes("blacklistRouteToken") &&
+        featureSrc.includes("blacklistedCapabilityByRouteToken") &&
+        featureSrc.includes("BLACKLISTED_CAPABILITIES"),
+      "features.ts 必须把黑名单复用进那一次路由（blocked: token），不另开调用"
+    );
+    assert(
+      /mode:\s*"blacklisted"/.test(featureSrc) && /"blacklisted"/.test(featureSrc),
+      "features.ts 必须提供 blacklisted 结果模式（纯代码真话回复、零出站）"
+    );
+    assert(
+      !/\bmatchBlacklistedCapabilityId\b/.test(
+        strip(readFileSync("lib/chat/coliving/turn.ts", "utf8"))
+      ),
+      "turn.ts 不得再按关键词前置拦截黑名单（执行阻断只认那一次路由）"
     );
     // 每个功能各写各的 extract / execute，不再各自回答 match。
     for (const file of [
@@ -2276,34 +2386,59 @@ async function main() {
    */
   const OPEN_FEATURES = APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label }));
   const openLabels = OPEN_FEATURES.map((f) => f.label);
-  const HYGIENE = UNAVAILABLE_CAPABILITIES.find((c) => c.id === "hygiene")!;
-  const listOpen = `目前我能替你发给别人的只有：${openLabels.join("、")}。`;
+  const listOpen = `我目前对${openLabels.join("、")}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`;
   const combinedQuestion = "请问为什么连这么简单的功能都没有?那你有什么功能？";
 
-  check("统一功能事实源：数据驱动选择（问句命中 / 同人上一轮被拒 / 都空 → 通用边界）", () => {
-    // 每条条目的理由锚点必须真的取自 reason（数据质量不变量，不是主题分支）。
-    for (const c of UNAVAILABLE_CAPABILITIES) {
+  check("统一功能事实源：黑名单为空 = 不产生任何拒绝，开放功能来自 APPROVED_FEATURES", () => {
+    // 数据质量不变量：黑名单条目（当前为空）的理由锚点必须取自它自己的 reason——
+    // grounding 校验只读这份数据，引擎里没有主题分支。
+    for (const c of BLACKLISTED_CAPABILITIES) {
       assert(c.validation.reasonAnchors.length > 0, `${c.id} 必须有理由锚点`);
       for (const a of c.validation.reasonAnchors) {
         assert(c.reason.includes(a), `${c.id} 的锚点「${a}」必须取自它自己的 reason`);
       }
     }
-    assert.equal(matchUnavailableCapabilityId("浴室地漏的头发没人清"), "hygiene");
-    assert.equal(matchUnavailableCapabilityId("今天天气不错"), null);
-    assert.deepEqual(
-      selectUnavailableCapabilities("为什么不行", "hygiene").map((c) => c.id),
-      ["hygiene"],
-      "问句没命中、但上一轮同人拒绝的那条要选中"
+    assert.equal(BLACKLISTED_CAPABILITIES.length, 0, "当前黑名单必须为空");
+    // 空黑名单：任何问题都选不出「办不了」的条目（空表 = 不产生任何拒绝）。
+    for (const q of ["浴室地漏的头发没人清", "为什么不行", "今天天气不错", combinedQuestion]) {
+      assert.deepEqual(selectBlacklistedCapabilities(q), [], "空黑名单恒返回空数组");
+      assert.equal(
+        blacklistedCapabilityByRouteToken(`blocked:${q}`),
+        null,
+        "空黑名单恒不命中"
+      );
+      assert.equal(blacklistedCapabilityByRouteToken(q), null, "裸 token（无 blocked: 前缀）不算命中");
+    }
+    assert.equal(blacklistedCapabilityById("hygiene"), null, "空黑名单按 id 也取不到条目");
+    const bundle = buildFeatureQaFacts({
+      openFeatures: OPEN_FEATURES,
+      question: combinedQuestion,
+    });
+    assert.equal(bundle.blacklisted.length, 0, "事实源里没有任何「办不了」条目");
+    assert.equal(
+      bundle.openFeatures.length,
+      APPROVED_FEATURES.length,
+      "开放功能必须来自 APPROVED_FEATURES 清单"
     );
-    assert.deepEqual(
-      selectUnavailableCapabilities("今天天气不错", null),
-      [],
-      "问句没命中、上一轮也没有 → 空，调用方用通用边界"
+    assert(
+      bundle.generic.fullFlow.length > 0 && bundle.generic.fastPath.length > 0,
+      "通用说明必须是事实源数据"
     );
-    assert(GENERIC_UNAVAILABLE.reason.length > 0, "通用边界必须是事实源里的数据");
+    assert(
+      !/办不了|没法|不能做/.test(bundle.generic.fullFlow) &&
+        bundle.generic.fullFlow.includes("不是做不到"),
+      "通用说明必须说明清单外走完整协调流程、不是做不到"
+    );
+    // 兜底同样只含事实源事实：空黑名单时绝不编造「办不了」，问能力清单时列全专门优化功能。
+    const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
+    assert(
+      !/办不了|没法|不能做/.test(fb) && fb.includes("不是做不到"),
+      "空黑名单兜底不得编造办不了，且要如实说明会走完整流程"
+    );
+    assert(openLabels.every((l) => fb.includes(l)), "问能力清单时兜底必须列全专门优化功能");
   });
 
-  check("功能问答触发范围：直接问能力也进（不要求上一轮 unsupported），普通交办 / 闲聊不进", () => {
+  check("功能问答触发范围：直接问能力也进，普通交办 / 闲聊不进", () => {
     assert.equal(isFeatureQaQuestion(combinedQuestion), true);
     assert.equal(isFeatureQaQuestion("那你有什么功能？"), true);
     assert.equal(isFeatureQaQuestion("这件事刚才为什么办不了"), true);
@@ -2317,25 +2452,21 @@ async function main() {
     assert.equal(isFeatureQaQuestion("今天晚饭吃什么"), false, "闲聊不进");
   });
 
-  await checkAsync("功能问答：直接问能力（无上一轮 unsupported）也进；无关消息一次模型都不调", async () => {
-    const grounded = `${HYGIENE.label}我现在办不了：${HYGIENE.reason}。${listOpen}`;
+  await checkAsync("功能问答：直接问能力也进；无关消息一次模型都不调", async () => {
+    const grounded = listOpen;
     const { llm } = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
     const qa = await runFeatureQa({
       text: "那你有什么功能？",
-      senderPersonId: "p1",
-      latestDecision: null,
       openFeatures: OPEN_FEATURES,
       llm,
     });
-    assert(qa, "直接问能力必须进功能问答（通用入口，不要求紧接上一轮）");
-    assert.equal(qa!.reply, grounded, "覆盖全部事实的正文原样接受");
+    assert(qa, "直接问能力必须进功能问答（通用入口）");
+    assert.equal(qa!.reply, grounded, "列全专门优化功能并说明完整流程的正文原样接受");
     assert(!("error" in qa!));
 
     const { llm: unusedLlm, calls } = mockLlm({});
     const none = await runFeatureQa({
       text: "今天晚饭吃什么",
-      senderPersonId: "p1",
-      latestDecision: null,
       openFeatures: OPEN_FEATURES,
       llm: unusedLlm,
     });
@@ -2343,108 +2474,17 @@ async function main() {
     assert.equal(calls.length, 0, "无关消息一个模型调用都不花");
   });
 
-  await checkAsync("功能问答 grounding：同人「刚才」只接同一条；漏提 / 说错 / 假方案一律回落兜底", async () => {
-    const question = "这件事刚才为什么办不了";
-    const fb = featureQaFallback({
-      question,
-      openFeatures: OPEN_FEATURES,
-      lastRejectedCapabilityId: HYGIENE.id,
-    });
-    const grounded = `${HYGIENE.label}我现在办不了：我看不到现场的程度，没法可靠判断要不要让人整改。`;
-    const omitted = "这件事我现在办不了：我看不到现场的程度。"; // 缺事项名
-    const distorted = `${HYGIENE.label}我现在办不了：我没法到现场了解情况。`; // 缺「看不到」锚点
+  await checkAsync("功能问答 grounding：漏列专门优化功能 / 自创处置方案 / 超长一律回落兜底", async () => {
+    const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
+    const grounded = listOpen;
+    const missingOne = `我目前对${openLabels[0]}有专门优化，处理起来更快、更省。`;
     const inventedPlan = `${grounded}我这就去跟阿川说。`;
-
-    // 同一个人上一轮被拒 → 选中该条目，正文必须保留名称与理由。
-    const same = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: omitted }) });
-    const sameQa = await runFeatureQa({
-      text: question,
-      senderPersonId: "p1",
-      latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
+    const bundle = buildFeatureQaFacts({
       openFeatures: OPEN_FEATURES,
-      llm: same.llm,
-    });
-    assert.equal(sameQa!.reply, fb, "同一人的「刚才」要关联事实源条目，漏提事项名必须回落兜底");
-
-    // 换一个人 → 不认「刚才」，同一条回应不再被强制覆盖该条目。
-    const other = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: omitted }) });
-    const otherQa = await runFeatureQa({
-      text: question,
-      senderPersonId: "p2",
-      latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
-      openFeatures: OPEN_FEATURES,
-      llm: other.llm,
-    });
-    assert.equal(otherQa!.reply, omitted, "不是同一个发起人时不得借用上一轮条目");
-
-    // grounding：漏提 / 说错理由 / 自创处置方案都回落。
-    const cases: Array<[string, string]> = [
-      ["漏提事项名", omitted],
-      ["说错理由", distorted],
-      ["自创处置方案", inventedPlan],
-    ];
-    for (const [label, reply] of cases) {
-      const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
-      const qa = await runFeatureQa({
-        text: question,
-        senderPersonId: "p1",
-        latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
-        openFeatures: OPEN_FEATURES,
-        llm: m.llm,
-      });
-      assert.equal(qa!.reply, fb, `${label} 必须回落兜底`);
-      assert(qa!.error, `${label} 回落时要把原因带出来`);
-    }
-
-    // 覆盖齐全的自然改写照样接受（不要求逐字复述 reason）。
-    const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
-    const okQa = await runFeatureQa({
-      text: question,
-      senderPersonId: "p1",
-      latestDecision: { rejectedCapabilityId: HYGIENE.id, personId: "p1" },
-      openFeatures: OPEN_FEATURES,
-      llm: ok.llm,
-    });
-    assert.equal(okQa!.reply, grounded, "保留名称与理由的自然改写要接受");
-    assert(!("error" in okQa!));
-  });
-
-  await checkAsync("功能问答：问能力清单必须列全 APPROVED_FEATURES（corpus-035 合并追问），漏项回落", async () => {
-    const last = { rejectedCapabilityId: HYGIENE.id, personId: "p1" };
-    const fb = featureQaFallback({
       question: combinedQuestion,
-      openFeatures: OPEN_FEATURES,
-      lastRejectedCapabilityId: HYGIENE.id,
     });
-    const grounded = `${HYGIENE.label}这件事我现在办不了：${HYGIENE.reason}。${listOpen}`;
-    const missingOne = `${HYGIENE.label}我现在办不了：${HYGIENE.reason}。目前我能替你发给别人的只有：${openLabels[0]}。`;
 
-    const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
-    const okQa = await runFeatureQa({
-      text: combinedQuestion,
-      senderPersonId: "p1",
-      latestDecision: last,
-      openFeatures: OPEN_FEATURES,
-      llm: ok.llm,
-    });
-    assert.equal(okQa!.reply, grounded, "同时说明被拒事项与全部开放功能要接受");
-
-    const partial = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: missingOne }) });
-    const partialQa = await runFeatureQa({
-      text: combinedQuestion,
-      senderPersonId: "p1",
-      latestDecision: last,
-      openFeatures: OPEN_FEATURES,
-      llm: partial.llm,
-    });
-    assert.equal(partialQa!.reply, fb, "问能力清单时漏列开放功能必须回落兜底");
-
-    // 直接检验通用校验函数本身：读事实源的验证元数据，不靠主题分支。
-    const bundle = {
-      openFeatures: OPEN_FEATURES,
-      unavailable: [HYGIENE],
-      generic: GENERIC_UNAVAILABLE,
-    };
+    // 直接检验通用校验函数本身：问能力清单时漏列开放功能必须报缺。
     assert.deepEqual(
       findUngroundedFeatureQaFacts(grounded, bundle, { requireOpenLabels: true }),
       []
@@ -2457,14 +2497,38 @@ async function main() {
       findUngroundedFeatureQaFacts(grounded, bundle, { requireOpenLabels: false }),
       []
     );
+
+    // grounding：漏列 / 自创处置方案都回落，并把原因带出来。
+    for (const [label, reply] of [
+      ["漏列专门优化功能", missingOne],
+      ["自创处置方案", inventedPlan],
+    ] as Array<[string, string]>) {
+      const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
+      const qa = await runFeatureQa({
+        text: combinedQuestion,
+        openFeatures: OPEN_FEATURES,
+        llm: m.llm,
+      });
+      assert.equal(qa!.reply, fb, `${label} 必须回落兜底`);
+      assert(qa!.error, `${label} 回落时要把原因带出来`);
+    }
+
+    // 覆盖齐全的自然改写照样接受。
+    const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
+    const okQa = await runFeatureQa({
+      text: combinedQuestion,
+      openFeatures: OPEN_FEATURES,
+      llm: ok.llm,
+    });
+    assert.equal(okQa!.reply, grounded, "列全专门优化功能并说明完整流程的正文要接受");
+    assert(!("error" in okQa!));
+
     // 超长正文也回落（结构校验仍在）。
     const long = mockLlm({
       [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded + "啊".repeat(FEATURE_QA_MAX_CHARS) }),
     });
     const longQa = await runFeatureQa({
       text: combinedQuestion,
-      senderPersonId: "p1",
-      latestDecision: last,
       openFeatures: OPEN_FEATURES,
       llm: long.llm,
     });
@@ -2484,9 +2548,26 @@ async function main() {
     );
     assert.equal(scenario.turns[1].text, "请问为什么连这么简单的功能都没有?那你有什么功能？");
     for (const [i, turn] of scenario.turns.entries()) {
-      assert.equal(turn.expect?.minAcceptedOutbound, 0, `第${i + 1}轮零出站`);
-      assert.deepEqual(turn.expect?.mustNotContactNames, ["阿川", "小禾"]);
+      // `minAcceptedOutbound` 是下限：0 只是不设最低出站要求（默认宽容后第一轮可以
+      // 由主生成按 doctrine + intent 决定要不要联系），不是「禁止出站」。
+      assert.equal(turn.expect?.minAcceptedOutbound, 0, `第${i + 1}轮不设最低出站要求`);
     }
+    // 默认宽容后：第一轮是普通出站交办（主题不在专门优化清单里，但**不再因此被拒**），
+    // 机器断言只要求它不产生结构性拒绝话术、且不误发给发起人。
+    assert.deepEqual(scenario.turns[0].expect?.mustNotContactNames, ["小禾"], "第一轮不得发给发起人");
+    assert.deepEqual(
+      scenario.turns[0].expect?.replyMustNotMatch,
+      ["未开放", "办不了", "不在.{0,6}(能力|功能)清单"],
+      "第一轮不得因「不在专门优化清单」而拒绝"
+    );
+    // 第二轮是产品功能问答：无工具、无出站，且不得把上一轮旧主题当成「刚才被拒」再答。
+    assert.deepEqual(scenario.turns[1].expect?.mustNotContactNames, ["阿川", "小禾"], "第二轮不得联系任何人");
+    assert.deepEqual(scenario.turns[1].expect?.mustNotUseTools, ["contactPerson"], "第二轮无工具");
+    assert.deepEqual(
+      scenario.turns[1].expect?.replyMustNotMatch,
+      ["地漏", "头发", "卫生整改"],
+      "第二轮不得把上一轮旧主题当成「刚才被拒」再答一遍"
+    );
     assert.equal(isFeatureQaQuestion(scenario.turns[1].text), true, "第二轮进功能问答");
     assert.equal(
       isFeatureQaQuestion(scenario.turns[0].text),
@@ -2619,16 +2700,14 @@ async function main() {
       "功能问答必须在已批准功能前门之后、主生成之前"
     );
     assert(
-      turnSrcQa.includes("runFeatureQa(") &&
-        turnSrcQa.includes("repo.latestUnsupportedReference("),
-      "turn.ts 必须接线功能问答入口，并只读本人结构化 unsupported 参考"
+      turnSrcQa.includes("runFeatureQa("),
+      "turn.ts 必须接线功能问答入口"
     );
-    // 收窄必须发生在**读取时**：调用要带上本人 personId，不能再先取全屋最新一条。
+    // 默认宽容后问答不再读「上一轮被拒」的结构化引用：黑名单为空时没有任何拒绝理由可读。
     assert(
-      /repo\.latestUnsupportedReference\(\{[\s\S]*?personId:\s*sender\.personId/.test(
-        turnSrcQa
-      ),
-      "turn.ts 读取结构化引用时必须按 sender.personId 收窄（不是取完全屋再比）"
+      !turnSrcQa.includes("latestUnsupportedReference(") &&
+        !turnSrcQa.includes("latestDecision("),
+      "turn.ts 功能问答不得再读旧 default-deny 的结构化引用"
     );
   });
 
@@ -2660,16 +2739,13 @@ async function main() {
     );
   });
 
-  // corpus-035 第一轮实跑正文：模型在本路径无出站的情况下，多说了「你可能得直接跟他说
-  // 一下」——把办不了的事推回住户。共享 grounding 闸必须拦住它。
+  // 真实语料实跑正文：模型在本路径无出站的情况下，多说了「你可能得直接跟他说一下」——
+  // 把事推回住户。共享 grounding 闸必须拦住它。
   const CORPUS_035_R1_BAD =
     "这件事我没法替你转给阿川，现在也没发出去。你可能得直接跟他说一下，让他把地漏的头发清干净。";
-  // corpus-035 第二轮实跑正文：列了开放功能，却漏掉本次「卫生整改」的具体拒绝理由。
-  const CORPUS_035_R2_BAD =
-    "这件事目前不在我能替你转达给别人的范围里；我现在能替你发给别人的只有夜间洗衣提醒和个人物品使用提醒。";
 
   check("受约束回复 grounding 闸：把球踢回住户 / 换渠道 / 等以后必须被拦，中性真话不受影响", () => {
-    // corpus-035 第一轮原句：把事推回住户 → 必须被拦。
+    // 实跑原句：把事推回住户 → 必须被拦。
     assert(
       findGroundingViolations(CORPUS_035_R1_BAD).length > 0,
       "「你可能得直接跟他说一下」是把事推回住户，必须被拦"
@@ -2686,9 +2762,8 @@ async function main() {
       assert(findGroundingViolations(bad).length > 0, `越界正文必须被拦：${bad}`);
     }
 
-    // 只讲事实的中性真话（含本路径自己的兜底）不得被误伤——否则会一直回落、把好回复也换掉。
+    // 只讲事实的中性真话不得被误伤——否则会一直回落、把好回复也换掉。
     for (const ok of [
-      UNSUPPORTED_FALLBACK,
       "这件事我现在没法替你转给阿川，现在还没跟他说。",
       "这件事不是我能替你转达给别人的。",
       openLabels.join("、"),
@@ -2701,65 +2776,11 @@ async function main() {
     }
   });
 
-  await checkAsync("unsupported 路径：corpus-035 round 1 越界正文回落中性兜底，结构化条目 id 仍关联", async () => {
-    const { llm } = mockLlm({
-      [UNSUPPORTED_NAME]: JSON.stringify({ reply: CORPUS_035_R1_BAD }),
-    });
-    const r = await generateUnsupportedReply(
-      "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
-      llm
-    );
-    assert.equal(r.reply, UNSUPPORTED_FALLBACK, "越界正文必须换成中性兜底");
-    assert(r.error, "回落时要把越界原因带出来（可诊断）");
-    assert.equal(
-      r.capabilityId,
-      HYGIENE.id,
-      "条目 id 由代码从原话推导，不因模型写坏而丢——下一轮「刚才」才关联得上"
-    );
-
-    // 正常的中性真话照样原样放行（不因加了闸就一律回落）。
-    const good = "这件事我现在没法替你发给阿川，还没有跟他说。";
-    const okMock = mockLlm({ [UNSUPPORTED_NAME]: JSON.stringify({ reply: good }) });
-    const ok = await generateUnsupportedReply(
-      "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
-      okMock.llm
-    );
-    assert.equal(ok.reply, good, "中性真话必须原样接受");
-    assert(!ok.error);
-  });
-
-  await checkAsync("功能问答：corpus-035 round 2 漏掉卫生整改拒绝理由的正文回落兜底", async () => {
-    const last = { rejectedCapabilityId: HYGIENE.id, personId: "p1" };
-    const fb = featureQaFallback({
-      question: combinedQuestion,
-      openFeatures: OPEN_FEATURES,
-      lastRejectedCapabilityId: HYGIENE.id,
-    });
-    const { llm } = mockLlm({
-      [FEATURE_QA_NAME]: JSON.stringify({ reply: CORPUS_035_R2_BAD }),
-    });
-    const qa = await runFeatureQa({
-      text: combinedQuestion,
-      senderPersonId: "p1",
-      latestDecision: last,
-      openFeatures: OPEN_FEATURES,
-      llm,
-    });
-    assert.equal(
-      qa!.reply,
-      fb,
-      "列出开放功能却漏掉被拒事项名称与理由，必须回落只含事实的兜底"
-    );
-    assert(qa!.error);
-  });
-
   // ── decision.payload 的 JSONB 编码根因回归（不连库、不调模型） ──
   //
-  // 真实事故：corpus-035 第二轮读不到第一轮 `unsupported` 的结构化条目，断在
-  // 「紧接上一轮」关联上。Codex 只读 DB 诊断为：第一轮 decision 的 payload 落库成了
-  // JSONB 顶层字符串，`payload->>'capabilityId'` 读成 null。根因是
-  // `${JSON.stringify(obj)}::jsonb`：首次执行参数类型还是 unknown（按文本发），
-  // 但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802) 写回该参数并缓存
+  // 真实事故：第一轮 decision 的 payload 落库成了 JSONB 顶层字符串，读取端取字段读成
+  // null。根因是 `${JSON.stringify(obj)}::jsonb`：首次执行参数类型还是 unknown（按文本
+  // 发），但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802) 写回该参数并缓存
   // 预处理语句，**第二次及以后**驱动就按 jsonb 序列化器把已 stringify 的参数再
   // stringify 一次。修法：用 postgres.js 的 `json()`（同 `shadow.ts` 先例）。
   // 边界：只守 `recordDecision`；`finishOutreachRun` 的 `skipped_reason` 是同一驱动根因，
@@ -2773,7 +2794,6 @@ async function main() {
       return repo.slice(i, j > 0 ? j : undefined);
     };
     const recordBody = sliceFn("export async function recordDecision(");
-    const refBody = sliceFn("export async function latestUnsupportedReference(");
     assert(
       /\.json\(\s*args\.payload\b/.test(recordBody),
       "recordDecision 的 payload 必须走 postgres.js 的 json()（显式 jsonb 参数）"
@@ -2784,64 +2804,27 @@ async function main() {
       !/JSON\.stringify\([^)]*\)\s*::jsonb/.test(codeOnly),
       "recordDecision 不得再用 JSON.stringify(...)::jsonb——缓存预处理语句上会被驱动双重编码"
     );
-    assert(
-      refBody.includes("payload->>'capabilityId'") &&
-        refBody.includes("payload->>'personId'"),
-      "latestUnsupportedReference 继续用通用 payload->> 读结构化事实"
-    );
   });
 
   check("decision payload 双重编码会读回 null（纯函数复现根因，不连库）", () => {
-    const payload = { capabilityId: "hygiene", personId: "p1" };
+    const payload = { kind: "contact_one", personId: "p1" };
     // postgres.js 对 jsonb(3802) 参数的序列化：把绑定值 JSON.stringify。
     const boundToStoredText = (bound: unknown) => JSON.stringify(bound);
-    // 读取端 `payload->>'capabilityId'` 的等价语义：先解析顶层，再取字段。
-    const capabilityIdOf = (stored: string): string | null => {
+    // 读取端 `payload->>'kind'` 的等价语义：先解析顶层，再取字段。
+    const kindOf = (stored: string): string | null => {
       const top = JSON.parse(stored) as unknown;
       return top !== null && typeof top === "object"
-        ? ((top as Record<string, unknown>).capabilityId as string | undefined) ?? null
+        ? ((top as Record<string, unknown>).kind as string | undefined) ?? null
         : null;
     };
     // 旧写法：先把对象 stringify 再绑定，驱动第二次起会再 stringify 一次 → 顶层是 JSON 字符串。
     assert.equal(
-      capabilityIdOf(boundToStoredText(JSON.stringify(payload))),
+      kindOf(boundToStoredText(JSON.stringify(payload))),
       null,
       "预字符串化再绑定会被驱动双重编码，payload->> 读回 null"
     );
-    // 新写法：对象直接交给 json() → 顶层是对象 → 读回 id。
-    assert.equal(capabilityIdOf(boundToStoredText(payload)), "hygiene");
-  });
-
-  // ── 会话引用「刚才」：读取时就按发起人 + 「紧接着本人上一条入站」收窄（源码闸，不连库） ──
-  //
-  // 真实缺陷：旧 `latestDecision(householdId)` 先取**全屋**最新一条 decision 再由调用方比
-  // personId，别的住户插一条就顶掉本人「刚才」。更隐蔽的反例：本人被拒后**自己**又发了别的
-  // （已批准的事 / 普通问句），若只按 personId + 72h 取最近一条 `unsupported`，会把早已翻篇
-  // 的旧拒绝重新翻出来。修法全在 SQL 里：按 personId 收窄 + 只认结构化条目 + 72h 窗口 +
-  // 「本人同屋之后没有更新的入站消息」。此闸只查 SQL 是否具备这四件事，不重复实现选择语义。
-  check("会话引用「刚才」：按发起人收窄 + 结构化条目 + 72h + 本人之后无更新入站", () => {
-    const repoStr = readFileSync("lib/chat/coliving/repo.ts", "utf8");
-    const start = repoStr.indexOf("export async function latestUnsupportedReference(");
-    assert(start >= 0, "repo 必须有 latestUnsupportedReference");
-    const end = repoStr.indexOf("\nexport ", start + 1);
-    const body = repoStr.slice(start, end > 0 ? end : undefined);
-    assert(
-      /d\.payload->>'personId'\s*=\s*\$\{args\.personId\}/.test(body),
-      "SQL 必须按发起人收窄（不是先取全屋最新再在调用方比）"
-    );
-    assert(
-      body.includes("d.payload->>'capabilityId' is not null"),
-      "只认结构化 unsupported 条目（capabilityId 非空）"
-    );
-    assert(
-      body.includes("args.withinHours ?? 72") && body.includes("interval"),
-      "必须有与既有对话关联（linkResponse / pendingCommunication）一致的 72h 新鲜度窗口"
-    );
-    assert(
-      body.includes("c.household_id = ${args.householdId}") &&
-        /not exists[\s\S]*m\.direction = 'inbound'[\s\S]*m\.sent_at > d\.decided_at/.test(body),
-      "必须排除本人**同一栋房子**里这条 decision 之后更新的入站消息（旧拒绝翻篇后不得再当「刚才」）"
-    );
+    // 新写法：对象直接交给 json() → 顶层是对象 → 读回字段。
+    assert.equal(kindOf(boundToStoredText(payload)), "contact_one");
   });
 
   check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {
@@ -2878,30 +2861,66 @@ async function main() {
       }
       assert(sawSend, `${file} 至少要有一轮证明已批准功能能发出去`);
     }
-    // 029 电视音量：明确要求联系点名室友、但主题不在清单 → 路由 unsupported →
-    // 零出站、零主工具，回复不得声称已联系（场景明写这三条）。
+    // 029 电视音量：明确要求联系点名室友、主题不在专门优化清单 → 落回完整协调流程，
+    // 由主生成恢复的泛用联系能力真的发给阿杰（场景明写这几条）。
     const tv = loadScenario("corpus-029-tv-volume-relay-2026-09-11.json");
-    assert.equal(tv.expect?.minAcceptedOutbound, 0, "029 必须明写零出站");
-    for (const tool of ["decide", "sendReply", "logEvent", "remember", "recordPosition"]) {
-      assert(
-        (tv.expect?.mustNotUseTools ?? []).includes(tool),
-        `029 必须明写不得调用主工具 ${tool}`
-      );
-    }
+    assert.equal(tv.expect?.minAcceptedOutbound, 1, "029 必须真的发出第三方提醒");
+    assert.deepEqual(tv.expect?.mustUseTools, ["contactPerson"], "029 必须用泛用联系能力");
+    assert.deepEqual(tv.expect?.mustContactNames, ["阿杰"], "029 收件人是原话点名的阿杰");
+    assert.deepEqual(tv.expect?.mustNotContactNames, ["小婷"], "029 不得发给发起人");
     const tvReplyBans = tv.expect?.replyMustNotMatch ?? [];
     assert(
-      tvReplyBans.some((p) => new RegExp(p).test("已经跟阿杰说了")),
-      "029 回复禁词必须能抓住「已经跟阿杰说了」这类无主语假完成"
+      tvReplyBans.some((p) => new RegExp(p).test("客厅那位")),
+      "029 回复禁词必须能抓住不点名收件人的含糊指代"
+    );
+    const tvOutboundBans = tv.expect?.outboundMustNotMatch ?? [];
+    assert(
+      tvOutboundBans.some((p) => new RegExp(p).test("48 小时没合眼")),
+      "029 出站禁词必须能抓住转述发信人私人状况的写法"
+    );
+    // 模型验收抓到的真实泄露：029 出站同时含来源姓名、补觉/睡不着私人状况、归因句。
+    // 机器禁词必须能整体抓住它，防止再次假绿（通用代码闸见 checkSourcePrivacy）。
+    const tvRealLeak =
+      "阿杰，小婷在房间补觉，客厅电视声她那边听得很清楚，睡不着。她想请你现在把音量调小一点。";
+    assert(
+      tvOutboundBans.some((p) => new RegExp(p).test(tvRealLeak)),
+      "029 出站禁词必须能抓住真实泄露（来源姓名 / 补觉 / 她想请你）"
+    );
+    // 二次模型验收的真实泄露：来源姓名与归因句都清掉后，仍转述来源人私人处境（补觉 / 睡不着）。
+    const tvSecondLeak =
+      "阿杰，客厅电视声这会儿有点大，房间里有人补觉、睡不着。麻烦先把音量调小一点，行吗？";
+    assert(
+      tvOutboundBans.some((p) => new RegExp(p).test(tvSecondLeak)),
+      "029 出站禁词必须能抓住二次泄露（补觉 / 睡不着这类私人处境）"
     );
     assert(
-      !tvReplyBans.some((p) => new RegExp(p).test("这件事我现在没法替你发给他，还没有跟他说")),
-      "029 回复禁词不得误伤如实说明没发送的真话"
+      !tvOutboundBans.some((p) => new RegExp(p).test("阿杰，麻烦把客厅电视音量调小点。")),
+      "029 出站禁词不得误伤正常的中性提醒"
     );
-    // 034 混合请求那一轮仍恰好发已获准的那一件。
+    // 034 混合请求那一轮不再被快路径截取：整条落回完整主流程，由主生成用 contactPerson
+    // 真的联系阿川（场景只断言结构性事实，不断言正文只讲洗衣）。
     const mixed = loadScenario("corpus-034-night-laundry-reminder-2026-09-12.json");
     const mixedTurn = mixed.turns.find((t) => t.text.includes("顺便把地漏的头发"));
     assert(mixedTurn, "034 必须保留老板指定的混合请求那一轮");
-    assert.equal(mixedTurn.expect?.minAcceptedOutbound, 1, "034 混合轮仍恰好发一件");
+    assert.equal(
+      mixedTurn.expect?.minAcceptedOutbound,
+      1,
+      "034 混合轮仍要真的发出第三方提醒（走完整主流程）"
+    );
+    assert.deepEqual(
+      mixedTurn.expect?.mustUseTools,
+      ["contactPerson"],
+      "034 混合轮必须由主生成的泛用联系能力办，而不是快路径"
+    );
+    assert.deepEqual(
+      mixedTurn.expect?.mustContactNames,
+      ["阿川"],
+      "034 混合轮收件人是原话点名的阿川"
+    );
+    assert(
+      !(mixedTurn.expect?.mustNotUseTools ?? []).includes("contactPerson"),
+      "034 混合轮不得再禁止主生成用 contactPerson"
+    );
   });
 
   /**
@@ -2910,16 +2929,20 @@ async function main() {
    * 免费测试必须**真的调用公开函数、断言到底入队了几条 / 正文是什么 / 收件人是谁 /
    * 生成阶段看到了什么 / 花了多少**，而不是拿「源码里出现过某常量」冒充行为证据。覆盖：
    *   · **只调一次路由**（不是每个功能各判一次），未被选中的功能一次都不调；
-   *   · 功能抽取只保留获准字段：034 混合请求夹带的头发 / 水费 / 全屋规矩一个字都
-   *     进不了生成阶段的输入；
-   *   · 034 混合只发夜间洗衣这一件，正文是模型生成的那句，不是常量；
+   *   · **整条恰好一件事**才走快路径：纯夜间洗衣交办抽取只保留获准字段，生成阶段
+   *     看不到来源情境（原话 / 时间 / 空间细节 / 我房间 / 我被吵醒）；
+   *   · **混合请求（夹带别的诉求）路由 none**：前门不截取、零出站零写入，整条落回
+   *     完整主流程（不再是"只办已获准的那一件、把其余丢掉"）；
    *   · 两个功能正文都来自模型生成（mock 返回**模型原始文本**，真实 JSON 解析 +
    *     schema 校验后原样发出），收窄字段随功能不同；
-   *   · 生成阶段**看不到来源情境**（原始时间原话 / 空间细节 / 我房间 / 我被吵醒）——
-   *     否则模型可能第一人称复述，把 AI 写成受影响的住户；
-   *   · 029 这类未知主题：路由 none → 零出站、零写入、不进抽取 / 生成；
-   *   · `reply_only`（否定 / 征询 / 附条件 / 同时交办两件）：**不是功能、不是工具**，
-   *     无工具、无出站、零写入，只回当前住户一两句；失败也只回中性兜底、绝不落回主生成；
+   *   · 主题不在专门优化清单里（如 029 电视音量）：路由 none → 前门零出站、零写入、
+   *     不进抽取 / 生成，落回完整协调流程（那里由主生成按 doctrine + 本轮 intent 判断
+   *     要不要用 `contactPerson` 联系）；
+   *   · `reply_only`（否定 / 征询 / 附条件）：**不是功能、不是工具**，无工具、无出站、
+   *     零写入，只回当前住户一两句；失败也只回中性兜底、绝不落回主生成；
+   *     **"同时交办两件"不属于 reply_only**——那是 `none`、整条交给完整主流程；
+   *   · **黑名单复用同一次路由**：条目作为 `blocked:<id>` 选项摆给模型，只有模型判定
+   *     住户正在交办它时才拦，纯代码真话回复、零出站；空表恒不拦、不加第二次调用；
    *   · **用量准确累计**：route + 选中功能 extract + compose 三段全计；route none
    *     也计；失败调用已完成 step 的用量也不丢；每条短调用都有正的最大输出上限；
    *   · 收件人由代码绑定原话（模型改不了人）；不可达 → 真话说明、零写入；
@@ -2932,9 +2955,41 @@ async function main() {
   process.env.COLIVING_LOCAL_WRITE = "1";
   try {
     await checkAsync(
-      "混合请求：一次路由只办已获准的那一件，生成阶段看不到未获准诉求",
+      "混合请求（夹带别的诉求）：路由 none → 前门不截取、零出站零写入，整条落回完整主流程",
       async () => {
         const { run, handling, featureId, calls, repo } = await runFeature(MIXED_REQUEST, {
+          // 老板指定样本：整条交办里夹带了别的诉求（头发 / 水费 / 全屋规矩）。
+          // 路由必须返回 none——**不许只挑出「深夜别用洗衣机」那一段来办、把其余丢掉**。
+          feature_route: FEATURE_ROUTE_NONE,
+        });
+        assert.equal(featureId, null, "混合请求不得命中任何已批准功能");
+        assert.equal(run.mode, "none", "混合请求必须整条落回完整主流程（不是拒绝）");
+        assert.equal(handling, null, "前门不得截取其中一件来执行");
+        assert.equal(run.error, undefined, "none 是正常结果，不是失败");
+        // **只调一次路由**，不是每个功能各判一次；none 也不进任何功能的抽取 / 生成。
+        const routeCalls = calls.filter((c) => c.name === FEATURE_ROUTE_NAME);
+        assert.equal(routeCalls.length, 1, "路由只允许一次调用");
+        assert.equal(routeCalls[0].stage, FEATURE_ROUTE_STAGE);
+        assert.equal(routeCalls[0].user, MIXED_REQUEST, "路由阶段拿到住户原话");
+        assert.equal(
+          calls.filter(
+            (c) => c.name.endsWith("_extract") || c.name.endsWith("_message")
+          ).length,
+          0,
+          "none 不进任何功能的抽取 / 生成（整条交给完整主流程）"
+        );
+        assert.equal(repo.thirdParty().length, 0, "前门零第三方出站");
+        assert.equal(repo.queued.length, 0, "前门零写入（由完整主流程处理）");
+        assert.equal(repo.decisions.length, 0, "前门零决定");
+      }
+    );
+
+    await checkAsync(
+      "纯夜间洗衣交办（整条恰好一件）：快路径命中，生成阶段看不到来源情境",
+      async () => {
+        // 与上面的混合样本同一主题，但**整条恰好只有这一件事**——这才走快路径。
+        const pureRequest = "提醒 阿川，深夜别开洗衣机或烘干机，机器挨着我房间那面墙，昨天凌晨四点我被吵醒了。";
+        const { handling, featureId, calls, repo } = await runFeature(pureRequest, {
           feature_route: NIGHT_LAUNDRY_FEATURE_ID,
           // mock 返回的是**模型原始文本**，真实的 JSON 提取 + schema 校验照跑。
           // 抽取只留三个中性类别字段：设备类别 / 时段 / 是否影响休息。
@@ -2948,19 +3003,19 @@ async function main() {
             receipt: "好，已经跟阿川说了，在等他回话。",
           }),
         });
-        assert.equal(featureId, NIGHT_LAUNDRY_FEATURE_ID, "混合请求必须命中夜间洗衣这一项");
-        // **只调一次路由**，不是每个功能各判一次；且只走被选中功能的抽取。
-        const routeCalls = calls.filter((c) => c.name === FEATURE_ROUTE_NAME);
-        assert.equal(routeCalls.length, 1, "路由只允许一次调用");
-        assert.equal(routeCalls[0].stage, FEATURE_ROUTE_STAGE);
-        assert.equal(routeCalls[0].user, MIXED_REQUEST, "路由阶段拿到住户原话");
+        assert.equal(featureId, NIGHT_LAUNDRY_FEATURE_ID, "纯交办必须命中夜间洗衣这一项");
+        assert.equal(
+          calls.filter((c) => c.name === FEATURE_ROUTE_NAME).length,
+          1,
+          "路由只调一次"
+        );
         assert.equal(
           calls.filter((c) => c.name.startsWith("personal_item")).length,
           0,
           "未被选中的功能一次都不能调（不再是 N 个 judge 并行）"
         );
         assert(handling, "命中且收件人唯一时必须办完");
-        // 生成阶段：只拿三个中性类别字段，看不到原话，更看不到夹带诉求与来源情境。
+        // 生成阶段：只拿三个中性类别字段，看不到原话，更看不到来源情境。
         const compose = calls.find((c) => c.name === "night_laundry_message");
         assert(compose, "必须走到生成阶段");
         assert(compose!.user.includes("阿川"), "生成阶段可以知道收件人");
@@ -2969,16 +3024,10 @@ async function main() {
           "生成阶段拿到的是设备类别，不是原始设备描述"
         );
         assert(compose!.user.includes("凌晨"), "生成阶段拿到的是时段类别，不是原始时间原话");
-        for (const leak of ["头发", "地漏", "水费", "分摊", "全屋", "规矩", "清理"]) {
-          assert(
-            !compose!.user.includes(leak),
-            `未获准的诉求「${leak}」绝不能进入生成阶段的输入`
-          );
-        }
         // **来源情境绝不能被喂进生成阶段**（否则模型可能第一人称复述，把 AI 写成受影响
-        // 的住户）：原始时间原话、原始空间细节、原始混合请求本身，一个都不许出现。
-        assert(!compose!.user.includes(MIXED_REQUEST), "生成阶段看不到原始混合请求");
-        for (const privateDetail of ["昨天凌晨四点", "机器挨着房间那面墙", "我房间", "我被吵醒"]) {
+        // 的住户）：原始时间原话、原始空间细节、原始请求本身，一个都不许出现。
+        assert(!compose!.user.includes(pureRequest), "生成阶段看不到原始请求");
+        for (const privateDetail of ["昨天凌晨四点", "机器挨着我房间那面墙", "我房间", "我被吵醒"]) {
           assert(
             !compose!.user.includes(privateDetail),
             `来源情境「${privateDetail}」绝不能进入生成阶段的输入`
@@ -2988,7 +3037,7 @@ async function main() {
         assert.equal(repo.thirdParty().length, 1, "恰好一条第三方出站");
         assert.equal(repo.thirdParty()[0].toPersonId, GATE_ACHUAN, "收件人只能是阿川");
         assert.equal(repo.thirdParty()[0].body, NIGHT_BODY, "正文是模型生成的那句，不是常量");
-        assert.equal(repo.queued.length, 1, "夹带的诉求一律不执行");
+        assert.equal(repo.queued.length, 1, "恰好一条投递");
         assert.equal(handling!.sms?.text, NIGHT_BODY);
         assert.equal(handling!.reply, "好，已经跟阿川说了，在等他回话。", "回执用模型写的那句");
       }
@@ -3076,101 +3125,6 @@ async function main() {
         assert.equal(run.usage.steps, 1);
         assert.equal(run.usage.inputTokens, 50);
         assert.equal(run.usage.costUsd, 0.004, "route none 也要计费");
-      }
-    );
-
-    await checkAsync(
-      "unsupported（不是功能、不是工具）：029 电视音量点名要 AI 找室友，主题不在清单 → 无工具、无出站、只回一句真话",
-      async () => {
-        const tv =
-          "阿杰在客厅把电视开得特别响，我在房间补觉根本睡不着。你赶紧帮我跟他说一声，让他先把音量调小点，行吗？";
-        const truth =
-          "这件事我现在没法替你发给阿杰，还没有跟他说。";
-        const members = [gateMember(GATE_SENDER, "小禾"), gateMember(GATE_ACHUAN, "阿杰")];
-        const { run, handling, featureId, calls, repo } = await runFeature(
-          tv,
-          {
-            feature_route: FEATURE_ROUTE_UNSUPPORTED,
-            feature_unsupported: JSON.stringify({ reply: truth }),
-          },
-          {
-            members,
-            usages: {
-              feature_route: { steps: 1, inputTokens: 60, outputTokens: 1, costUsd: 0.002 },
-              feature_unsupported: { steps: 1, inputTokens: 80, outputTokens: 22, costUsd: 0.003 },
-            },
-          }
-        );
-        assert.equal(featureId, null, "unsupported 不是功能，featureId 必须为 null");
-        assert.equal(run.mode, "unsupported", "电视音量这类未开放交办必须显式标成 unsupported");
-        assert(handling, "保留对话轮也要给当前住户一句真话");
-        assert.equal(handling!.sms, null, "unsupported 绝不产生任何出站");
-        assert.equal(handling!.decisionId, null, "unsupported 不落联系决定");
-        assert.equal(handling!.reply, truth, "回给当前住户的是模型生成的那句真话");
-        // 零第三方出站、零写入、零决定：它不是功能、不是工具。
-        assert.equal(repo.queued.length, 0, "零写入");
-        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
-        assert.equal(repo.decisions.length, 0, "零决定");
-        // 两次调用：一次路由 + 一次 unsupported 小回复；绝不进任何功能的抽取 / 生成。
-        assert.equal(calls.length, 2, "恰好两次调用：路由 + unsupported");
-        assert.equal(calls[0].name, FEATURE_ROUTE_NAME);
-        assert.equal(calls[1].name, UNSUPPORTED_NAME);
-        assert.equal(calls[1].stage, UNSUPPORTED_STAGE);
-        assert.equal(
-          calls[1].maxOutputTokens,
-          FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
-          "unsupported 用独立档位常量，不写字面量"
-        );
-        assert.equal(calls[1].user === tv, true, "小回复只对当前说话人，可以看他的原话");
-        assert.equal(
-          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
-          0,
-          "unsupported 不进任何功能的抽取 / 生成"
-        );
-        // 用量照记：路由 + 小回复两段都并进本轮。
-        assert.equal(run.usage.steps, 2);
-        assert.equal(run.usage.inputTokens, 140);
-        assert.equal(run.usage.outputTokens, 23);
-        assert.equal(Math.round(run.usage.costUsd * 1000) / 1000, 0.005);
-      }
-    );
-
-    await checkAsync(
-      "unsupported 生成失败 → 中性兜底收尾，绝不落回主生成（不调 proposeRule 之类）",
-      async () => {
-        const tv = "帮我跟阿杰说一声把电视调小点。";
-        const members = [gateMember(GATE_SENDER, "小禾"), gateMember(GATE_ACHUAN, "阿杰")];
-        const boom = new FeatureCallError(
-          UNSUPPORTED_STAGE,
-          new Error("unsupported json invalid"),
-          { ...EMPTY_FEATURE_USAGE, steps: 1, inputTokens: 30, outputTokens: 5, costUsd: 0.002 }
-        );
-        const { run, handling, calls, repo } = await runFeature(
-          tv,
-          { feature_route: FEATURE_ROUTE_UNSUPPORTED, feature_unsupported: boom },
-          {
-            members,
-            usages: {
-              feature_route: { steps: 1, inputTokens: 40, outputTokens: 1, costUsd: 0.001 },
-            },
-          }
-        );
-        assert.equal(run.mode, "unsupported", "失败也必须留在 unsupported 收尾");
-        assert.equal(run.featureId, null);
-        assert(handling, "失败也要给当前住户一句中性兜底");
-        assert.equal(handling!.sms, null, "兜底也绝不出站");
-        assert.equal(handling!.reply, UNSUPPORTED_FALLBACK, "失败回落到中性兜底短句");
-        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
-        assert.equal(repo.decisions.length, 0, "零决定");
-        assert.equal(
-          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
-          0,
-          "失败不得落回任何功能的抽取 / 生成"
-        );
-        // 失败调用已发生的真实用量不得丢。
-        assert.equal(run.usage.steps, 2, "路由 + 失败的 unsupported");
-        assert.equal(run.usage.costUsd, 0.003, "路由 + 失败调用已花的钱都要照记");
-        assert.equal(run.error, boom, "失败作为 error 暴露（供日志定位，但不当成落回主生成的理由）");
       }
     );
 
@@ -3315,7 +3269,7 @@ async function main() {
       "用量准确累计：一次路由 + 选中功能抽取 + 生成三段都并进 run.usage",
       async () => {
         const { run, calls } = await runFeature(
-          MIXED_REQUEST,
+          "提醒 阿川：深夜别开洗衣机或烘干机",
           {
             feature_route: NIGHT_LAUNDRY_FEATURE_ID,
             night_laundry_extract: JSON.stringify({

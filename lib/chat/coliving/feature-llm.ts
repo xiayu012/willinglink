@@ -112,11 +112,6 @@ export const FEATURE_COMPOSE_MAX_OUTPUT_TOKENS = 4096;
  */
 export const FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS = 4096;
 /**
- * `unsupported` 小回复（不是功能、无工具、无出站）的输出上限。住户明确要求联系点名
- * 室友、但主题不在已批准功能清单里，回一句真话说明；输出同样只有一两句。
- */
-export const FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS = 4096;
-/**
  * 统一功能问答（不是功能、无工具、无出站）的输出上限。住户问「你有什么功能 / 为什么
  * X 不能做 / 刚才为什么拒绝」这类产品功能边界时，回一两句自然中文；输出同样极短，
  * 与其它短调用同一档，给足推理空间。

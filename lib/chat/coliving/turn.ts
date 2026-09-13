@@ -71,12 +71,12 @@ export function hasDeferredCoordination(text: string): boolean {
  * `还在`（"我还在问另外两位"）跟 `正在/已经` 一样，字面上是在声称一件
  * 正在发生的联系动作，容易被当成"这轮确实发出去了"——同样按"声称
  * 联系完成/进行中"处理，交给 `checkFalseContactClaim` 核对：这一轮发给
- * 对方的联系若被审稿拦下、实际没发出去，就不能用任何时态说成已联系/
+ * 对方的联系若被确定性出站闸拦下、实际没发出去，就不能用任何时态说成已联系/
  * 正在联系。跟 `会/稍后/回头` 这类真正面向未来、还没开始的措辞区分开——
  * 那些不在这个标记列表里，保留原样，不算这里要拦的"误导性在途声称"。
  *
  * 中文回信常**省掉主语**，直接写「跟小浩说了，在等他回话」——没有「我/已经」
- * 这类标记，前两支都抓不到（2026-09-11 corpus-031 第 4 轮：出站被审稿拦下、
+ * 这类标记，前两支都抓不到（2026-09-11 corpus-031 第 4 轮：出站被确定性出站闸拦下、
  * 回信仍写「跟小浩说了」，判定漏过、`replyReview` 误绿）。末支补这种无主语
  * 完成式；`(?!我|您|你)` 把「小浩跟我说了」这类**对方对我说**的相反方向排除。
  */
@@ -105,11 +105,11 @@ export function isUnsolicitedContactClaim(args: {
 /**
  * **一般回复里的「假完成」收窄判定。**
  *
- * 第三方出站仍然只有两条受约束路径（个人物品使用提醒 / 夜间洗衣提醒），
- * 但它们现在是**主生成之前就命中、直接收工的功能入口**（见 `features.ts`）：
- * 命中的那一轮由功能自己的短回执回答，根本走不到这里。所以下面这条只覆盖
- * **没有出站的普通轮**——那里模型更可能在自由文本里说「我已经提醒他了」
- * 「我跟他说了」而这一轮其实没发出去。
+ * 第三方出站现在有两个来源：两条受约束的已批准功能（个人物品使用提醒 / 夜间洗衣提醒，
+ * 它们是**主生成之前就命中、直接收工的功能入口**，见 `features.ts`，命中的那一轮由
+ * 功能自己的短回执回答，根本走不到这里），以及主生成里按住户当前明确交办调用的
+ * `contactPerson`。所以下面这条只覆盖**没有成功出站的普通轮**——那里模型更可能在自由
+ * 文本里说「我已经提醒他了」「我跟他说了」而这一轮其实没发出去。
  *
  * 逐句判断，整句里不能有第二人称或建议语气（`你/您/请/建议/记得/最好/应该/
  * 能不能/要不要`）——那些是**在跟当前说话人讨论**，不是 AI 声称自己联系过，
@@ -150,6 +150,79 @@ export function claimsUnsentThirdPartyContact(text: string): boolean {
     // 省略主语的完成式：复用 claimsContactCompletion，与 checkFalseContactClaim 同源。
     return claimsContactCompletion(clause);
   });
+}
+
+/**
+ * **第三方出站的来源隐私闸（纯代码、确定性、无模型）。**
+ *
+ * 恢复通用短信联系能力（`contactPerson`）是老板 2026-09-13 的决策；但**恢复通用联系
+ * 不等于恢复来源泄露**。默认一律匿名：发给被联系一方的短信正文里
+ *  (1) 不得出现**当前发信人的姓名**；
+ *  (2) 不得把请求**归因给来源人**（「他想请你…」「她说让你…」「有人反映…」这类明显句式）；
+ *  (3) 不得转述**来源人的私人处境**（睡眠状态等高精度枚举词，见下）。
+ * 命中就**拒绝这次 `contactPerson`**，让同一轮模型有机会改成不指明来源、只说必要事项的
+ * 中立短信——**不加第二次模型调用，不进 `contacted` / `outbound`，不落库**。
+ *
+ * 真实事故（029 模型验收）：电视音量那轮真实出站写成「阿杰，小婷在房间补觉，客厅电视声
+ * 她那边听得很清楚，睡不着。她想请你现在把音量调小一点。」——既出现来源姓名、又转述来源人
+ * 的私人状况、还把请求归因给来源人。generation-only 下已无 critic，靠这条确定性闸拦。
+ *
+ * 当前**不提供"来源人明确同意暴露"的例外**：一律匿名更安全，等真有明确同意机制再谈。
+ * 只抓三样**纯代码可判的高精度信号**：
+ *  (1) 发信人姓名；(2) 代词归因句式；(3) 来源人的**私人处境**（见下）。
+ * 模糊表述仍靠 doctrine（`relay.md` 的匿名要求）拦，宁可漏，也不误伤中立的事项 + 请求。
+ * **目标收件人本人的姓名允许出现**（短信本来就要称呼他），所以只查发信人姓名，不查收件人姓名。
+ *
+ * **私人处境为什么也要纯代码拦**（029 二次模型验收）：归因句与来源姓名都清掉之后，
+ * 真实出站仍写成「阿杰，客厅电视声这会儿有点大，房间里有人补觉、睡不着。麻烦先把音量
+ * 调小一点，行吗？」——没有点名来源，却把来源人**只有他自己知道**的睡眠状态
+ * （补觉 / 睡不着）转述给了对方，对方一读就知道是谁。这条闸只收**能高精度枚举的睡眠状态词**，
+ * 不假装覆盖所有语义隐私；`声音大 / 影响别人休息 / 夜里容易影响休息` 这类共享可观察的
+ * 必要理由必须放行。
+ */
+const SOURCE_ATTRIBUTION_PATTERN =
+  /(?<!其)(?:他|她|ta|TA|对方|人家|那边|某人|有人|某某)[^。！？!?\n]{0,8}?(?:想请|想让|让我|叫你|叫您|说让|要你|要您|请你|请您|反映|反馈|投诉|抱怨|觉得|希望|要求|告诉)/;
+
+/**
+ * **来源人私人处境的高精度枚举（睡眠状态）。** 这些词描述的是来源人**自身的身体状态**，
+ * 不是对方能自己观察到的事项；写进给对方的短信就等于把来源人的隐私转述过去。
+ *
+ * 刻意**窄**：只枚举少数高精度睡眠词，不把健康 / 财务 / 去向 / 情绪等更宽的语义面
+ * 塞进正则（那会误伤中立表达），那些仍靠 doctrine 约束。`休息` **不在**表内——「影响别人
+ * 休息」是共享可观察的必要理由，必须放行。
+ */
+const SOURCE_PRIVATE_STATE_PATTERN =
+  /(?:失眠|没合眼|没睡(?:好|着|觉)?|补觉|睡不着|睡不好|睡不踏实)/;
+
+export function checkSourcePrivacy(
+  message: string,
+  opts: { senderName: string }
+): { why: string } | null {
+  const text = (message ?? "").trim();
+  if (!text) return null;
+  const name = (opts?.senderName ?? "").trim();
+  if (name && text.includes(name)) {
+    return {
+      why: `这条要发给对方的短信里出现了发信人的名字「${name}」，等于告诉他这是谁反映的；改成不指明来源、只说必要事项的中立说法。`,
+    };
+  }
+  if (SOURCE_ATTRIBUTION_PATTERN.test(text)) {
+    return {
+      why:
+        "这条要发给对方的短信把请求归因给了来源人（例如「他想请你…」「她说让你…」" +
+        "「有人反映…」），等于告诉他这是谁反映的；改成不指明来源、只说必要事项的中立说法。",
+    };
+  }
+  if (SOURCE_PRIVATE_STATE_PATTERN.test(text)) {
+    return {
+      why:
+        "这条要发给对方的短信转述了来源人自己的私人处境（睡眠状态，例如「补觉」「睡不着」" +
+        "「失眠」），等于间接告诉对方是谁反映的；改成只说**对方能自己观察到的共享事项 + " +
+        "你要他做的动作**（例如「客厅电视声有点大，麻烦调小一点」），不要带来源人的睡眠、" +
+        "健康、去向、情绪等私人处境。",
+    };
+  }
+  return null;
 }
 
 /**
@@ -363,12 +436,9 @@ export function checkProcessNarration(
  * 而要求重发；不同 `personId` 的合格出站**不能**覆盖另一个人的被拦目标。返回
  * 去重后的 personId 列表（空集 = 没有需要重发的目标）。
  *
- * 两处共用同一份事实，避免各写一遍：
- *  - `checkFalseContactClaim`：判断回信是否在谎称"已经联系上"（本轮仍有被拦出站）；
- *  - 最终聚焦修正的有界循环：**每次迭代**按当前最终状态重算。只有这里非空才
- *  - 复现第八次实跑：`checkFalseContactClaim` 判断回信是否在谎称
- *    "已经联系上"（本轮仍有被拦出站）。严格口径后已无第三方联系工具，
- *    这条判定只对剩余出站（当前为个人物品提醒）继续生效。
+ * 主要服务于 `checkFalseContactClaim`：判断回信是否在谎称"已经联系上"
+ * （本轮仍有被拦出站）。第三方联系工具（`contactPerson`）恢复后，这条判定对
+ * 它和已批准功能的出站一并生效。
  */
 export function uncoveredBlockedPersonIds(
   outbound: ReadonlyArray<{ personId: string; blocked?: boolean }>
@@ -845,11 +915,11 @@ export type OutboundMessage = {
   personId: string;
   text: string;
   communicationId: string;
-  /** 审稿没过，调用方不要投递（已在库里标成 skipped 并写明原因） */
+  /** 确定性出站闸没过，调用方不要投递（已在库里标成 skipped 并写明原因） */
   blocked?: boolean;
   /** 被拦下的理由。给评测报告页显示用——`blocked` 只说"拦了"，这个说"为什么" */
   blockReason?: string;
-  /** 这条是对**共用者**一样的规矩，不是针对他个人的事。审稿据此判角色 */
+  /** 这条是对**共用者**一样的规矩，不是针对他个人的事。据此判角色 */
   sharedRule?: boolean;
   /**
    * 哪些人共用这件东西。**不假定是全屋**——一栋房子里可能几个人共用
@@ -858,7 +928,7 @@ export type OutboundMessage = {
   sharedWith?: string | null;
   /**
    * 收信人是这一轮才刚加进系统的，这条八成是中性的自我介绍，跟任何
-   * 纠纷无关。审稿据此不套"被说到的人"这个角色——那是给纠纷场景
+   * 纠纷无关。据此不套"被说到的人"这个角色——那是给纠纷场景
    * 准备的，套在打招呼上会把中性内容当指控来审。
    */
   isIntroduction?: boolean;
@@ -1247,11 +1317,6 @@ export async function finalizeFeatureTurn(
     conversationId: string;
     modelId: string;
     turnStartedAt: Date;
-    /**
-     * 很窄的**结构化决策标记**（如 `unsupported` 保留轮的 `{ unsupportedTopic, personId }`）。
-     * 只放代码枚举值 / id，供下一轮读取结构化事实；普通功能轮不传（默认 `{}`）。
-     */
-    decisionPayload?: Record<string, string>;
   },
   deps: FeatureFinalizeDeps = featureFinalizeDeps
 ): Promise<TurnOutcome> {
@@ -1293,7 +1358,6 @@ export async function finalizeFeatureTurn(
       intent: args.decisionIntent,
       modelId: args.modelId,
       doctrineModules: [],
-      payload: args.decisionPayload ?? {},
     }));
 
   let replyCommunicationId: string | null = null;
@@ -1607,27 +1671,34 @@ export async function runColivingTurn(args: {
   /**
    * **已批准功能的前门——传统软件功能入口，不走 function-calling。**
    *
-   * 老板 2026-09-13 定稿：主生成的工具表里**既没有短信工具、也没有功能工具**。
-   * 住户用自然语言交办时，先在这里对照**代码里写死的清单**
-   * （`APPROVED_FEATURES`，见 `features.ts`）：**一次**内部白名单路由调用回答
-   * 「是不是明确交办清单里的某一项」（不是每个功能各判一次，也不新增 tool schema）；
-   * 命中才调**被选中那一个功能自己**的抽取，只抽取**本功能获准的字段**交给模型写一句
-   * 自然正文，最后走纯代码的 `deliverSms` 落库——**生成阶段看不到原始混合请求**，
-   * 命中的这一轮到此为止，不进主生成。
+   * 老板 2026-09-13 定稿（默认宽容）：主生成的工具表里**没有功能工具**。住户用自然语言
+   * 交办时，先在这里对照**代码里写死的清单**（`APPROVED_FEATURES`，见 `features.ts`）：
+   * **一次**内部白名单路由调用回答「是不是明确交办清单里的某一项」（不是每个功能各判
+   * 一次，也不新增 tool schema）；命中才调**被选中那一个功能自己**的抽取，只抽取**本功能
+   * 获准的字段**交给模型写一句自然正文，最后走纯代码的 `deliverSms` 落库——命中的这一轮
+   * 到此为止，不进主生成。
    *
-   * 路由除了"命中某一项 / none"，还有两个保留结果（都**不是功能、不是工具**，都走
-   * **无工具、无出站**的小回复生成、都只回当前住户、都由 `finalizeFeatureTurn` 早返回）：
+   * 清单**不是权限边界**，只是一条更快更省的优化快路径：路由返回 `none`（没命中）**不是
+   * 拒绝**，这一轮落回下面的完整 doctrine + 运行时主生成——那里恢复了通用短信联系能力
+   * （`contactPerson`），由 doctrine + 本轮 intent 判断是否该替住户把话发给某位同屋人
+   * （不是新加的"住户必须明说"窄规则）。真正办不了的只有下面那次路由里的黑名单
+   * （`blacklist.ts`，目前为空）。
    *
-   * - `reply_only`：请求**明确围绕某项已批准功能**，但这一轮不能立即执行（否定 / 征询 /
-   *   附条件 / 同时交办两件）→ `reply-only.ts` 跟当前住户讨论 / 确认这一轮不动作。
-   * - `unsupported`：住户**明确要求联系被点名的室友办事，但主题不在清单里**（电视音量、
-   *   卫生、费用、规矩、去留等）→ `unsupported.ts` 用一句真话说明这件事没有发出去 /
-   *   目前没法替他发给对方。这样它不会掉进旧的冲突流程去 `proposeRule` /
-   *   `recordPosition`，更不会再由主生成编一句「已经跟他说了」。
+   * 还有一个保留结果 `reply_only`（**不是功能、不是工具**，走**无工具、无出站**的小回复
+   * 生成、只回当前住户、由 `finalizeFeatureTurn` 早返回）：请求**明确围绕某项已批准功能**
+   * 但这一轮不能立即执行（否定 / 征询 / 附条件）→ `reply-only.ts` 跟当前住户讨论 / 确认
+   * 这一轮不动作，**绝不落回主生成**（否则会重新走到 `proposeRule` / `recordPosition`）。
+   * **同一句话里同时交办两件**不属于 `reply_only`：那是要走 `none`、整条交给完整主流程，
+   * 取一件丢掉另一件是错的。
+   *
+   * **黑名单也复用这同一次路由**（`blocked:<id>` token）：模型判定住户**正在交办**一项
+   * 老板明确登记办不了的功能时返回 `mode: "blacklisted"`，纯代码真话回复、零出站。**表为
+   * 空时路由选项为空、绝不拦**；不按关键词、不加第二次模型调用。
    *
    * 唯一一条纯代码前置闸：**原话里点名了唯一一位同住人**（收件人绑定
-   * `resolveNamedRecipient`，不是主题分类）。绑不上就一个模型调用都不花，直接
-   * 落回普通对话；清单里没有的、路由 none 的，一律不执行、零出站。
+   * `resolveNamedRecipient`，不是主题分类）。绑不上就不走这条快路径、直接落回普通对话；
+   * 路由 none 的一律不执行、零出站。也正因如此，**当前黑名单只覆盖"对点名的同住人执行
+   * 某个功能"这一类**请求（和两条快路径同一类），不假装覆盖别的形态。
    */
   if (resolveNamedRecipient(args.text, ctx.members, sender.personId).ok) {
     const featureLlm = productionFeatureLlm(modelId);
@@ -1655,39 +1726,21 @@ export async function runColivingTurn(args: {
       );
     }
     if (featureRun.handling) {
-      /**
-       * **`unsupported` 保留轮的最后一道纯代码真相闸。** 它的正文由模型写，提示词已
-       * 要求如实说明没发出去；这里再复用普通轮同一条假完成判定兜一次——万一模型仍
-       * 写成「已经跟阿杰说了」，就换成那句短的、说真话的未发送说明。零出站轮绝不放
-       * 一句声称已联系的假话出去。
-       */
-      const handling =
-        featureRun.mode === "unsupported" &&
-        claimsUnsentThirdPartyContact(featureRun.handling.reply)
-          ? { ...featureRun.handling, reply: TRUTHFUL_UNSENT_REPLY }
-          : featureRun.handling;
       return finalizeFeatureTurn({
         text: args.text,
         channel,
         decisionIntent:
           featureRun.mode === "reply_only"
             ? "保留对话轮（reply_only）：请求围绕已批准功能但本轮不执行动作，只回当前住户一句讨论/确认"
-            : featureRun.mode === "unsupported"
-              ? "保留对话轮（unsupported）：明确要求联系点名室友办事但主题不在已批准功能清单，本轮零出站，只回当前住户一句真话"
+            : featureRun.mode === "blacklisted"
+              ? "黑名单命中：路由判定住户正在交办老板明确登记办不了的功能，纯代码真话回复，零出站"
               : `已批准功能（${featureRun.featureId}）命中：功能入口直接办完并落库，回执由功能生成`,
-        handling,
+        handling: featureRun.handling,
         usage: frontDoorUsage,
         sender,
         conversationId,
         modelId,
         turnStartedAt,
-        decisionPayload:
-          featureRun.mode === "unsupported" && featureRun.handling.unsupportedCapabilityId
-            ? {
-                capabilityId: featureRun.handling.unsupportedCapabilityId,
-                personId: sender.personId,
-              }
-            : undefined,
       });
     }
   }
@@ -1703,25 +1756,12 @@ export async function runColivingTurn(args: {
    * 它**不装载旧 doctrine、不进主生成、零工具、零第三方出站**（`finalizeFeatureTurn` 早
    * 返回）。生成器只看到：住户问题 + `feature-facts.ts` 那份统一功能事实源里**与问题
    * 有关**的事实 + 当前开放功能清单；模型只负责说人话，写不出 / 越界就用**同样只含事实
-   * 源事实**的兜底。上一轮的 `unsupported` 结构化状态只用来把「刚才」关联到事实源里的
-   * 具体条目（且只认同一发起人），**不是**进入本路径的前提——通用入口不把"紧接上一轮"
-   * 当唯一入口。
+   * 源事实**的兜底。**口径不再是"只两项功能"**：两项已批准功能只是专门优化的快路径，
+   * 别的协调请求走完整协调流程，不是不能做；真正办不了的只有黑名单（目前为空）。
    */
   if (isFeatureQaQuestion(args.text)) {
-    // 只读**本人**、且是本人上一条入站话题的结构化 `unsupported` 参考（按 personId 收窄 +
-    // 72h 新鲜度 + 本人之后没有更新的入站消息）。别的住户中间发了什么都不会顶掉这条引用，
-    // 也不会把别人的引用拿来给本人用；本人后来发过别的（已批准的事 / 普通问句）就不再是
-    // 「刚才」，本轮照常答功能边界问题，只是不套用那条旧拒绝。
-    const ref = await repo.latestUnsupportedReference({
-      householdId: sender.householdId,
-      personId: sender.personId,
-    });
     const qa = await runFeatureQa({
       text: args.text,
-      senderPersonId: sender.personId,
-      latestDecision: ref
-        ? { rejectedCapabilityId: ref.capabilityId, personId: sender.personId }
-        : null,
       openFeatures: APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label })),
       llm: productionFeatureLlm(modelId),
     });
@@ -1790,6 +1830,12 @@ export async function runColivingTurn(args: {
   let activeRuleId: string | null = null;
   let lastEventId: string | null = null;
   const outbound: OutboundMessage[] = [];
+  /**
+   * 本轮已经**真的发出去**给哪些 personId（`contactPerson` 每次成功落库前加进来）。
+   * 用来防止同一轮对同一个人重复发送，并让 `decide` 的联系判断升级成
+   * `contact_group`。**只记成功的**——被去重 / 竞态 / 地址缺失拦下的不算。
+   */
+  const contacted = new Set<string>();
   const toolsUsed: string[] = [];
   /**
    * 每次调用 `pickSchedule` 真正算出来的排第一候选，原样记下来。
@@ -1907,8 +1953,9 @@ export async function runColivingTurn(args: {
     decide: tool({
       description:
         "每轮必调：记下你这次的治理判断（要不要介入、找谁、想达成什么、为什么）。" +
-        "判断与说出口的话分开记录。可与 logEvent 同一轮并发调，" +
-        "同一件事的 caseId 两个工具各自填，不共享状态。",
+        "判断与说出口的话分开记录。要替住户联系某位同住人时，判断填 contact_one、" +
+        "并接着用 contactPerson 把话真正发出去；同一轮联系多人填 contact_group。" +
+        "可与 logEvent 同一轮并发调，同一件事的 caseId 两个工具各自填，不共享状态。",
       inputSchema: z.object({
         kind: z
           .enum([
@@ -1953,9 +2000,273 @@ export async function runColivingTurn(args: {
           doctrineModules: loadedModuleIds,
           contextChars: chars,
         });
-        // 严格口径下已收回自由文本的第三方出站能力：判断可以记下「要不要介入」，
-        // 但**没有任何通用联系工具可以调用**。不要在这里教模型去联系别人。
+        // 判断与行为必须对得上：这一轮要用 contactPerson 联系别人时，kind 就填
+        // contact_one / contact_group（contactPerson 成功发送后会按实际发送升级）。
         return { ok: true, decisionId };
+      },
+    }),
+
+    /**
+     * 杠杆二。以前 AI 只能对着投诉人一个人把三个人的事定了，
+     * 于是要么反复追问、要么替所有人拍板。现在它可以分别去说。
+     *
+     * **2026-09-13 默认宽容下恢复为通用短信联系能力**（发的是短信，不是企业微信；
+     * 主动 outreach / LLM 批判器不恢复）：是否该替住户去联系某人，由 doctrine 情境准则 +
+     * 本轮 intent 判断——**不是**代码按关键词、也**不是**新加一条"住户必须明说才准联系"
+     * 的窄规则（旧成熟设计里协调者本来就可以按流程判断该不该联系）。命中的两条已批准
+     * 功能不走这里——它们在主生成之前的前门直接办完（见 `features.ts`）。
+     *
+     * 保留的确定性硬闸（老板要求逐条保留）：
+     * - **来源隐私（默认匿名）**：正文不得出现**发信人姓名**、不得把请求**归因给来源人**、
+     *   也不得转述**来源人的私人处境**（睡眠状态等，`checkSourcePrivacy`，纯代码）；命中就
+     *   拒绝这次发送、让同一轮模型改成中立说法，**不进 `contacted` / `outbound`、不落库**。
+     *   目标收件人本人的姓名允许出现；`声音大 / 影响别人休息` 这类共享可观察的必要理由也放行。
+     *   当前**没有"来源人明确同意暴露"的例外**——一律匿名更安全。
+     * - 收件人必须是**本栋房子**里的现有住户（`findPersonByName` 按 householdId 收窄）；
+     * - 本人 -> 自己不发（直接回复即可）；没有登记地址则联系不上，零出站；
+     * - 同一轮对同一个人只发一次；
+     * - 近 24h 同一条未回复的内容不重复发送；
+     * - **竞态门禁**：目标人在本轮开始后有新入站，说明上下文已过期，跳过不发；
+     * - 排班消息必须带 `scheduleWindowLabel` + `scheduleSlot`，且与 `chooseSchedule`
+     *   已选方案里该人的时段**完全一致**，否则拒绝执行；
+     * - 落库：decision（升级成 contact_one / contact_group）→ communication →
+     *   对方自己的会话线 appendMessage；正文交给调用方投递，被确定性出站闸拦下时带 blocked 回执。
+     */
+    contactPerson: tool({
+      description:
+        "主动给这栋房子里的另一个人发消息（非回复当前这位）。这是你按流程做的" +
+        "判断，不是征求当前这位同意。**正文只写对方能自己观察到的共享事项 + 你要他做的" +
+        "动作**（例如客厅电视声、走廊杂物、深夜洗衣时间）；**不要提是谁反映的**：默认匿名，" +
+        "不得出现发信人的姓名，也不要用「他想请你…」「她说让你…」这类把请求归因给某人的说法。" +
+        "**不要带来源人的私人处境**——他的睡眠（补觉、睡不着、失眠）、健康、财务、去向、" +
+        "情绪、动机都不要写进这条短信；只说共享可观察的事和请求动作。" +
+        "对被投诉一方先按中立提醒说，不要上来就指控。",
+      inputSchema: z.object({
+        name: z.string().describe("要联系的人的名字，必须是房子里现有的人"),
+        purpose: z
+          .string()
+          .describe("这条消息的目的，例如：告知新的厨房时段安排"),
+        scope: z
+          .enum(["personal", "shared"])
+          .describe(
+            "personal=针对他个人的事；shared=对同样的人都一样的规矩。" +
+              "说规矩就填 shared，否则对方读成针对他一个人。"
+          ),
+        sharedWith: z
+          .string()
+          .optional()
+          .describe("填 shared 时写清这条对哪些人一样（人名）"),
+        message: z
+          .string()
+          .describe(
+            "真正要发出去的短信正文。短、具体、直接说事。不提是谁反映的。"
+          ),
+        act: z
+          .enum(["ask", "inform", "propose", "confirm", "remind", "escalate"])
+          .describe(
+            "这条在干什么（系统据此决定是否盯着他回音）：ask=问问题等他答 · " +
+              "inform=告知不用回 · propose=提方案征求意见 · " +
+              "confirm=请他确认（事关钱/时间/权利）· remind=催上次说的 · " +
+              "escalate=转房东。该等的填成 inform 会让事情无人跟进。"
+          ),
+        scheduleWindowLabel: z
+          .string()
+          .optional()
+          .describe(
+            "排班消息里填：与 `chooseSchedule` 同一个窗口名。填了就必须也填 " +
+              "`scheduleSlot`；代码核对与已选方案该人时段完全一致，不一致拒绝执行。"
+          ),
+        scheduleSlot: z
+          .object({
+            start: z
+              .string()
+              .regex(HH_MM_PATTERN)
+              .describe("这条消息里告诉他的开始时间，HH:MM"),
+            end: z
+              .string()
+              .regex(HH_MM_PATTERN)
+              .describe("这条消息里告诉他的结束时间，HH:MM"),
+          })
+          .optional()
+          .describe(
+            "跟 scheduleWindowLabel 一起填。不用在这条消息里重复解释全案，代码只核对数字对不对。"
+          ),
+      }),
+      execute: async ({
+        name,
+        purpose,
+        scope,
+        sharedWith,
+        act,
+        message: raw,
+        scheduleWindowLabel,
+        scheduleSlot,
+      }) => {
+        const message = stripMarkdown(raw);
+        const target = await repo.findPersonByName(sender.householdId, name);
+        if (!target) {
+          return { ok: false, reason: `房子里没有叫「${name}」的人` };
+        }
+        // 本轮已为这个参与者计算排班时，联系必须绑定到选定候选。不靠正文时间格式
+        // 判断（“六点半”等中文写法会绕过）；无关事项拆到下一轮处理，换取同一轮
+        // 排班绝不跨候选拼接的确定性。
+        const relevantWindows = [...scheduleCandidatesByLabel.entries()]
+          .filter(([, candidates]) =>
+            candidates.some((candidate) =>
+              candidate.assignments.some((assignment) => assignment.name === name)
+            )
+          )
+          .map(([label]) => label);
+        if (relevantWindows.length > 0 && !scheduleWindowLabel && !scheduleSlot) {
+          const selected = relevantWindows.find((label) =>
+            selectedSchedules.has(label)
+          );
+          return {
+            ok: false,
+            reason: selected
+              ? `这轮已为${name}选定「${selected}」方案；必须填写 scheduleWindowLabel 和 scheduleSlot，代码才能核对同一候选`
+              : `这轮已为${name}算过排班；先用 chooseSchedule 选定一个候选，再带 scheduleWindowLabel 和 scheduleSlot 联系`,
+          };
+        }
+        /**
+         * **结构化核对，不猜正文里的数字。** 真实事故：同一轮里给两个人分别发排班消息，
+         * 各自"心算"了一遍要用哪个候选，两条消息拼出来的时段来自不同候选，回复又用了
+         * 第三套。选定之后用这两个参数核对，对不上直接拒绝执行，不进 outbound。
+         */
+        if (scheduleWindowLabel || scheduleSlot) {
+          if (!scheduleWindowLabel || !scheduleSlot) {
+            return {
+              ok: false,
+              reason: "scheduleWindowLabel 和 scheduleSlot 必须一起填",
+            };
+          }
+          const selected = selectedSchedules.get(scheduleWindowLabel);
+          if (!selected) {
+            return {
+              ok: false,
+              reason: `「${scheduleWindowLabel}」还没有用 chooseSchedule 选定方案，先选定再联系人`,
+            };
+          }
+          const consistency = checkScheduleSlotConsistency(
+            selected,
+            name,
+            scheduleSlot
+          );
+          if (!consistency.ok) {
+            return {
+              ok: false,
+              reason: `${consistency.reason}。改成一致的时段再发，不能私自改动已选方案。`,
+            };
+          }
+        }
+        if (target.personId === sender.personId) {
+          return {
+            ok: false,
+            reason: "这是当前跟你说话的人，直接回复就行，不用另外发",
+          };
+        }
+        if (!target.address) {
+          return {
+            ok: false,
+            reason: `${target.name} 在这个渠道没有登记地址，联系不上`,
+          };
+        }
+        // **来源隐私闸（纯代码）**：默认匿名，正文不得出现发信人姓名、不得把请求归因给来源人、
+        // 也不得转述来源人的私人处境（睡眠状态等）。命中就拒绝这次发送、让同一轮模型改成中立
+        // 说法——在此之前**不产生任何副作用**（不进 `contacted` / `outbound`、不落库）。
+        // 目标收件人本人的姓名允许出现；「影响别人休息」这类共享可观察的必要理由放行。
+        const privacy = checkSourcePrivacy(message, { senderName: sender.name });
+        if (privacy) {
+          return { ok: false, reason: privacy.why };
+        }
+        if (contacted.has(target.personId)) {
+          return { ok: false, reason: `本轮已经给 ${target.name} 发过了` };
+        }
+        const duplicate = await repo.findRecentOpenCommunication({
+          toPersonId: target.personId,
+          channel,
+          body: message,
+        });
+        if (duplicate) {
+          return {
+            ok: true,
+            skipped: true,
+            reason:
+              `近24小时已经给 ${target.name} 发过同一条，且对方还没回复；` +
+              "这次不重复发送。",
+            communicationId: duplicate.id,
+            sentTo: target.name,
+          };
+        }
+        /**
+         * **竞态门禁：上下文已过期就跳过，不冒充已联系。**
+         *
+         * 真实事故（生产日志，2026-09-06）：01:51:27 发出征询，01:53:46 对方已回复
+         * "愿意"，系统随即正确落锤——但另一个较早开始的并发回合上下文在 01:53:54
+         * 才执行，01:53:59 又发出同一个"你愿意吗"。修法：工具执行时重新查目标人自
+         * turnStartedAt 之后有无新入站；有就跳过。不标 ok:false 的重试语义（不让模型
+         * 换措辞重发），也**不加进 outbound**（不能让后续检查把"已跳过"当成"已联系"）。
+         */
+        const targetHasNewInbound = await repo.hasNewInboundSince(
+          target.personId,
+          channel,
+          turnStartedAt
+        );
+        if (targetHasNewInbound) {
+          return {
+            ok: false,
+            stale: true,
+            reason:
+              `${target.name} 在本轮开始后已经发来新消息，上下文已过期；` +
+              "这条征询跳过，不会发出，也不计入已联系——下一轮拿到最新上下文再处理。",
+          };
+        }
+        contacted.add(target.personId);
+
+        const did = await ensureDecision("contact_one", purpose);
+        // 模型常先说「只回复本人」，转头又来联系别人。判断记录要跟实际行为对得上。
+        await repo.upgradeDecisionKind(
+          did,
+          contacted.size > 1 ? "contact_group" : "contact_one"
+        );
+        const communicationId = await repo.queueCommunication({
+          householdId: sender.householdId,
+          decisionId: did,
+          caseId: activeCaseId,
+          toPersonId: target.personId,
+          channel,
+          purpose,
+          body: message,
+          act,
+          // ask/propose/confirm 都是把球踢给对方、等他回；
+          // inform/remind/escalate 不占用"在等谁"这份清单
+          expectsReply: act === "ask" || act === "propose" || act === "confirm",
+        });
+        // 也要写进对方自己的会话线。否则下次他发消息过来，
+        // 我们看不到自己曾经对他说过什么——他却记得。
+        const theirConversation = await repo.getOrCreateConversation({
+          personId: target.personId,
+          householdId: sender.householdId,
+          channel,
+        });
+        await repo.appendMessage({
+          conversationId: theirConversation,
+          personId: target.personId,
+          direction: "outbound",
+          channel,
+          body: message,
+          communicationId,
+        });
+
+        outbound.push({
+          to: target.address,
+          personId: target.personId,
+          text: message,
+          communicationId,
+          sharedRule: scope === "shared",
+          sharedWith: sharedWith ?? null,
+        });
+        return { ok: true, sentTo: target.name };
       },
     }),
 
@@ -2617,7 +2928,8 @@ export async function runColivingTurn(args: {
             name: r.name,
             note: r.created
               ? `已加入，系统给他起的名字是「${r.name}」——没听到真名之前，` +
-                "消息正文不能提占位名。系统当前不能主动联系住户，无法替他打招呼。"
+                "调 contactPerson 时 name 参数就填这个（不是发给他的话里出现这个，" +
+                "消息正文不能提占位名，只是拿它当查找用的 key）。"
               : "这个号码本来就在房子里",
           };
         } catch (e) {
@@ -3084,12 +3396,13 @@ export async function runColivingTurn(args: {
    *
    * 分两组：
    *
-   *   **① 核心链路（5个，永远常驻）**：`decide` `sendReply` `logEvent`
-   *   `remember` `addResident`——几乎每一轮都会用到，缺一个就断链路。
-   *   **`contactPerson` 已从生产工具里移除**（老板 2026-09-12 严格口径：
-   *   收回自由文本的第三方出站，只保留个人物品提醒那一条受约束路径，
-   *   见 `personal-item-reminder.ts`）。`addResident` 常驻是吸取 c328ae8
-   *   的教训：房东随时可能突然报个号码，漏摆的代价远比多摆一个工具的
+   *   **① 核心链路（6个，永远常驻）**：`decide` `sendReply` `logEvent`
+   *   `remember` `addResident` `contactPerson`——几乎每一轮都会用到，缺一个就断链路。
+   *   **`contactPerson` 已恢复**（老板 2026-09-13 默认宽容：恢复成管理前的通用短信
+   *   联系能力，是否该替住户联系某人由 doctrine + 本轮 intent 判断，主生成可以真的
+   *   把话发给同屋人；已批准的两条功能仍走前面那条更快更省的快路径，不经过主生成）。
+   *   `addResident` 常驻是吸取
+   *   c328ae8 的教训：房东随时可能突然报个号码，漏摆的代价远比多摆一个工具的
    *   注意力成本高，宁可常驻也不赌路由。
    *
    *   **② 情境组（11个，按结构信号或话题信号决定要不要摆出来）**：
@@ -3126,6 +3439,7 @@ export async function runColivingTurn(args: {
     logEvent: tools.logEvent,
     remember: tools.remember,
     addResident: tools.addResident,
+    contactPerson: tools.contactPerson,
   };
   if (ctx.openCaseIds.length > 0) {
     activeTools.closeCase = tools.closeCase;
@@ -3157,10 +3471,11 @@ export async function runColivingTurn(args: {
     activeTools.lookupHistory = tools.lookupHistory;
     activeTools.findSimilarCases = tools.findSimilarCases;
   }
-  // **主生成的工具表里没有短信工具、也没有功能工具。** 替住户联系别人的两件
-  // 已批准功能在 `buildContext` 之后、主生成之前由 `features.ts` 的前门直接办完
-  // （见上面「已批准功能的前门」）；走到这里的普通轮只是普通对话，没有任何出口
-  // 能替住户发消息出去。
+  // **主生成的工具表里没有功能工具。** 替住户联系别人的两件已批准功能在
+  // `buildContext` 之后、主生成之前由 `features.ts` 的前门直接办完（见上面
+  // 「已批准功能的前门」）；走到这里的普通轮则是完整协调流程——恢复了通用短信
+  // 联系能力，主生成可以按当前 intent / 流程判断是否用常驻的 `contactPerson`
+  // 真的把话发给某位同屋人（不是靠新加的"住户必须明说"窄规则）。
 
   /**
    * 本轮**主生成**实际暴露给模型的工具名（只记名字，不记 schema 正文）。
@@ -3387,7 +3702,7 @@ export async function runColivingTurn(args: {
         broke: "0",
         why:
           "回复里像是在说这一轮已经/正在联系到某人，但这一轮发给" +
-          `（person_id: ${blockedTargets}）的消息被审稿拦下，没有发出去` +
+          `（person_id: ${blockedTargets}）的消息被确定性出站闸拦下，没有发出去` +
           "——这一轮这件事没有发生，不管用什么时态描述都不能说成已经" +
           "联系到了或者正在联系，老实说清楚这一步还没做成，或者换一种" +
           "确实做了的事来说。",
@@ -3495,13 +3810,14 @@ export async function runColivingTurn(args: {
   }
 
   /**
-   * **严格口径下的「假完成」收窄替换（普通回复）。** 现在普通对话没有任何
-   * 第三方出站能力（只有个人物品提醒、夜间洗衣提醒两条受约束路径，命中时
-   * 已经在上面提前收工）。模型若在自由文本里声称已经/正在联系别人，那件事没有发生——
-   * 只把这一句替换成短的、说真话的未发送说明，**不拦正常讨论**（判定逐句进行，
-   * 整句含第二人称/建议语气的跳过，见 `claimsUnsentThirdPartyContact`，它同时复用
-   * 了 `claimsContactCompletion` 的**省略主语完成式**能力——029 的「已经跟阿杰说了」
-   * 就是这种没有主语的说法，旧判定整条漏过、`replyReview` 标红却仍把谎话发了出去）。
+   * **「假完成」收窄替换（普通回复）。** 只有本轮**一条成功出站都没有**时才对模型
+   * 自由文本生效（两条已批准功能命中时已在上面提前收工；`contactPerson` 真发出去时
+   * 会产生合格出站，这里不动它）。模型若在自由文本里声称已经/正在联系别人，而这一轮
+   * 确实什么都没发出去，那件事没有发生——只把这一句替换成短的、说真话的未发送说明，
+   * **不拦正常讨论**（判定逐句进行，整句含第二人称/建议语气的跳过，见
+   * `claimsUnsentThirdPartyContact`，它同时复用 `claimsContactCompletion` 的
+   * **省略主语完成式**能力——029 的「已经跟阿杰说了」就是这种没有主语的说法，旧判定
+   * 整条漏过、`replyReview` 标红却仍把谎话发了出去）。
    * 本轮真的发出去过出站时不动回复。
    *
    * 注意顺序：先替换、后 `checkFactFidelity(reply)` 复核——替换后的真话说明必须

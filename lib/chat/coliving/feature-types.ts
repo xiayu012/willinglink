@@ -10,10 +10,18 @@ import type { SmsDeliveryDeps } from "./sms-delivery";
  * **写死的已批准功能清单**能统一驱动路由。**这不是通用功能框架**：识别、字段、
  * 正文、回执全在各功能模块里，公共类型不替它们做任何判断。
  *
- * 老板 2026-09-13 定稿后识别分两步：**清单内的白名单路由**只调用一次模型，回答
+ * 老板 2026-09-13 决策（默认宽容）：这份已批准清单**不是权限边界**，而是一条
+ * **低成本、稳定的优化快路径**。识别分两步：**清单内的路由**只调用一次模型，回答
  * "是不是明确交办清单里的某一项"（`features.ts` 的 `runApprovedFeature`）；命中后
  * 才调**被选中那一个功能自己**的 `extract` 抽取获准字段。因此功能模块只需要
  * `extract`（抽取本功能字段），不再各自回答 match/no-match——判断在路由那一次调用里。
+ * **没命中不等于拒绝**：路由返回 none 就落回完整 doctrine + 运行时主生成（那里有
+ * 恢复的通用短信联系能力）；真正办不了的只有老板明确登记的**黑名单**（`blacklist.ts`）。
+ *
+ * **黑名单接在同一次路由里**（`blocked:<id>` token），不按关键词、不加第二次模型调用。
+ * 它和这里的两项快路径一样，只在**原话点名了唯一一位同住人**时才会被前门看到——所以
+ * **现在的黑名单定义面同样是"对点名的同住人执行某个功能"这一类**，不要假装它已经覆盖
+ * 任意未来功能；要覆盖更多形态得先扩展前门。
  *
  * **用量必须一路带回来**：路由、抽取、生成每一步的 `usage` 都要向上传，哪怕没命中、
  * 失败或最终落回主生成，也不能丢（见 `FeatureCallError`）。
@@ -51,12 +59,6 @@ export type FeatureHandling = {
     communicationId: string;
   } | null;
   decisionId: string | null;
-  /**
-   * 仅 `unsupported` 保留轮有：**纯代码关联**到统一功能事实源（`feature-facts.ts`）
-   * 的条目 id（关联不上就是 null；`turn.ts` 据此在 decision payload 里留一个很窄的
-   * 结构化标记，供下一轮功能问答理解「刚才」）。不是自由文本，也不进正文。
-   */
-  unsupportedCapabilityId?: string | null;
 };
 
 export type FeatureContext = {

@@ -9,8 +9,9 @@ import {
 } from "./feature-llm";
 import {
   buildFeatureQaFacts,
-  GENERIC_UNAVAILABLE,
-  selectUnavailableCapabilities,
+  FULL_FLOW_NOTE,
+  OPTIMIZED_FAST_PATH_NOTE,
+  selectBlacklistedCapabilities,
   type FeatureQaFactBundle,
 } from "./feature-facts";
 import { findGroundingViolations } from "./feature-grounding";
@@ -18,33 +19,30 @@ import { findGroundingViolations } from "./feature-grounding";
 /**
  * **统一的产品功能问答入口——不是功能、不是工具、不出站。**
  *
- * 老板 2026-09-13 纠正：能力说明**不是逐功能编程**，而是一条**通用问答路径**——凡是
- * 住户问「你有什么功能 / 能不能做 X / 为什么 X 不能做 / 刚才为什么拒绝」这类**产品功能
- * 边界**问题，都进这里。它读 `feature-facts.ts` 那份**统一功能事实源**回答，所以以后
- * 新增功能**只改事实源数据 / `APPROVED_FEATURES`，不改本文件**。
+ * 老板 2026-09-13 决策（默认宽容）：住户问「你有什么功能 / 能不能做 X / 为什么 X
+ * 不能做 / 刚才为什么拒绝」这类**产品边界元问题**时进这里，读 `feature-facts.ts`
+ * 那份统一事实源回答。**口径不再是"只有两项功能"**：
  *
- * 这是对上一版 `capability-followup.ts` 的替换：上一版把「每一种未开放事项」做成代码
- * 枚举 + 各自的关键词分类器 + 各自的正文覆盖正则，且**只接紧接上一轮 `unsupported`**；
- * 那正是老板说的「过窄、逐功能编程」。本模块把主题判断交给事实源数据，把触发放宽到
- * **任何功能边界问句**，不再要求上一轮必须被拒绝。
+ * - 两项已批准功能是**专门优化的快路径**（更快、更省），不是全部能力；
+ * - 其它需要协调同住人的请求会走**完整的协调流程**处理，**不是不能做**；
+ * - 真正办不了的只有老板明确登记的**黑名单**（`blacklist.ts`，**目前为空**）。
+ *   空黑名单不得产生"办不了"的说法，也不得为它编造原因。
+ *
+ * 以后新增功能**只改事实源数据 / `APPROVED_FEATURES`，不改本文件**。
  *
  * ## 与旧主生成、工具表完全无关
  *
  * 本入口**不装载旧 doctrine、不进主生成、没有任何工具、零第三方出站**（由 `turn.ts`
- * 调 `finalizeFeatureTurn` 早返回）。生成阶段**只看到三样**：住户的问题、事实源里**与
- * 这个问题有关**的事实（`buildFeatureQaFacts`）、当前开放功能清单。模型只负责把事实
- * 说成自然、简短的中文；**不得补充处理方案、虚构能力、或承诺联系 / 协调 / 跟进**。
- * 写出内部术语 / 假承诺，或**把球踢回住户（「你自己去找他」「换个渠道」「以后再说」）**，
- * 或结构不合法时，用**同样只含事实源事实**的代码兜底（`featureQaFallback`）。共享的
- * grounding 判定见 `feature-grounding.ts`——`unsupported` 路径用的是同一条规则。
+ * 调 `finalizeFeatureTurn` 早返回）。生成阶段**只看到三样**：住户的问题、事实源里
+ * **与这个问题有关**的事实（`buildFeatureQaFacts`）、当前专门优化的功能清单。模型只
+ * 负责把事实说成自然、简短的中文；**不得补充处理方案、虚构能力、或承诺立刻去联系 /
+ * 跟进**。写出内部术语 / 假承诺，或**把球踢回住户（「你自己去找他」「换个渠道」
+ * 「以后再说」）**，或结构不合法时，用**同样只含事实源事实**的代码兜底
+ * （`featureQaFallback`）。共享的 grounding 判定见 `feature-grounding.ts`。
  *
  * 它只在 `turn.ts` **已批准功能前门之后**接线：命中已批准功能 / 保留轮的请求先由前门
  * 处理，前门不接的（普通问句不需要点名收件人）才轮到本入口——**已批准功能的执行行为
  * 一字不变**。
- *
- * 「刚才」怎么理解：调用方从**结构化的 decision payload**（不是模型自由文本）读出
- * **上一轮被拒绝的那条** `rejectedCapabilityId`，且只认**同一个发起人**；不是紧接上一轮
- * 也能进（通用入口），只是少了「刚才」这个具体条目。
  */
 
 export const FEATURE_QA_STAGE = "feature:qa";
@@ -52,17 +50,6 @@ export const FEATURE_QA_NAME = "feature_qa";
 
 /** 正文长度上限（一两句，模型偶尔啰嗦时换兜底，不截断）。 */
 export const FEATURE_QA_MAX_CHARS = 240;
-
-/**
- * 上一轮 `unsupported` 留下的**结构化状态**（来自 repo 的 decision payload，非模型文本）。
- * 只用于把「刚才」关联到事实源里的某一条；不是权限、不是事实来源。
- */
-export type FeatureQaDecisionState = {
-  /** 上一轮被拒绝、可关联到事实源条目的 id；关联不上就是 null */
-  rejectedCapabilityId: string | null;
-  /** 上一轮发起人；只有与当前说话人一致时才拿来理解「刚才」 */
-  personId: string | null;
-};
 
 /** 只接受一个字符串字段：回给当前说话人的那一两句。 */
 const featureQaSchema = z.object({
@@ -72,15 +59,14 @@ const featureQaSchema = z.object({
 /**
  * **内部工程术语黑名单**：一旦出现在正文里就判失败，换回代码兜底。这是**本路径独有的
  * 格式/用词约束**（内部术语），不是 grounding；共享的「假承诺 / 把球踢回住户 / 换渠道 /
- * 等以后」判定在 `feature-grounding.ts`（`findGroundingViolations`），两条受约束回复
- * 路径都用它。
+ * 等以后」判定在 `feature-grounding.ts`（`findGroundingViolations`）。
  */
 const INTERNAL_TERMS =
   /白名单|路由|提示词|能力清单|未开放|functionId|schema|内部规则|系统设定/i;
 
 /**
  * 住户是不是在问「你现在能做什么 / 你有哪些功能」。**只做元问题识别，不做主题分类。**
- * 抽出来单独暴露，因为 grounding 校验要据此决定**必须逐项列出全部开放功能名**
+ * 抽出来单独暴露，因为 grounding 校验要据此决定**必须逐项列出全部专门优化的功能名**
  * （住户明确问能力清单时不能漏项；只问「为什么办不了某件事」则不强制全列）。
  */
 export function asksWhatIsAvailable(text: string): boolean {
@@ -96,12 +82,13 @@ export function asksWhatIsAvailable(text: string): boolean {
 }
 
 /**
- * **窄的、通用的功能边界问句识别——保守优先。** 只认老板点名的那几类元问题：
+ * **窄的、通用的功能边界问句识别——保守优先。** 只认那几类元问题：
  * 「你有什么功能 / 能不能做 X / 为什么 X 不能做 / 刚才为什么拒绝」。普通交办、抱怨、
  * 闲聊、新的提醒请求都返回 false（仍走原来的对话路径，成功交办的已批准功能不受影响）。
  *
- * 这不是主题分类（主题由事实源数据决定），只是识别"住户在问产品功能边界"这一种**元问题**。
- * 宁可漏掉不常见的口语变体（漏了就退回普通对话，不会造成新的越界），也不把普通聊天误判进来。
+ * 这不是主题分类，只是识别"住户在问产品功能边界"这一种**元问题**。
+ * 宁可漏掉不常见的口语变体（漏了就退回普通对话，不会造成新的越界），也不把普通聊天
+ * 误判进来。
  */
 export function isFeatureQaQuestion(text: string): boolean {
   const t = (text ?? "").trim();
@@ -132,33 +119,34 @@ export function isFeatureQaQuestion(text: string): boolean {
 
 /**
  * **只含事实源事实的兜底**。模型完全写不出可用回应、或写出违规内容时用它——它同样
- * 不承诺、不虚构、不列内部术语，只把事实摆出来。没有具名条目时诚实使用通用边界。
+ * 不承诺、不虚构、不列内部术语，只把事实摆出来。**空黑名单时不说任何"办不了"**。
  */
 export function featureQaFallback(args: {
   question: string;
   openFeatures: readonly { id: string; label: string }[];
-  lastRejectedCapabilityId?: string | null;
 }): string {
-  const facts = selectUnavailableCapabilities(args.question, args.lastRejectedCapabilityId);
-  const canDo = args.openFeatures.length
-    ? `目前我能替你发给别人的只有：${args.openFeatures.map((f) => f.label).join("、")}。`
-    : "目前我还没有能替你发给别人的功能。";
-  if (facts.length) {
-    const f = facts[0];
-    return `「${f.label}」这件事我现在办不了：${f.reason}。${canDo}`;
+  const blacklisted = selectBlacklistedCapabilities(args.question);
+  const open = args.openFeatures.map((f) => f.label).join("、");
+  if (blacklisted.length) {
+    const f = blacklisted[0];
+    const fast = open ? `${OPTIMIZED_FAST_PATH_NOTE}。` : "";
+    return `「${f.label}」这件事我目前没法替你办：${f.reason}。${fast}${FULL_FLOW_NOTE}。`;
   }
-  return `${GENERIC_UNAVAILABLE.reason}。${canDo}`;
+  if (args.openFeatures.length) {
+    return `我目前对${open}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`;
+  }
+  return `${FULL_FLOW_NOTE}。`;
 }
 
 /**
  * **通用 grounding 校验——只读事实源的验证元数据，引擎里没有任何主题分支。**
  *
  * 接受的正文必须：
- * 1. 含**每一条**被选中的未开放条目的 `label`；
- * 2. 保留它的**理由**——含该条目 `validation.reasonAnchors` 里的**每一个**锚点词（允许
- *    自然改写措辞：锚点是数据里「换句话也绕不开」的核心词，不要求逐字复述整句 reason）；
- * 3. 当住户明确在问「你能做什么」（`asksWhatIsAvailable`，corpus-035 第二轮那种「有些
- *    什么功能」的合并追问也走这条）时，含**当前全部**开放功能的 `label`，一项不漏。
+ * 1. 含**每一条**被选中的黑名单条目的 `label`；
+ * 2. 保留它的**理由**——含该条目 `validation.reasonAnchors` 里的**每一个**锚点词
+ *    （允许自然改写措辞：锚点是数据里「换句话也绕不开」的核心词）；
+ * 3. 当住户明确在问「你能做什么」（`asksWhatIsAvailable`）时，含**当前全部**专门优化
+ *    功能的 `label`，一项不漏。
  *
  * 返回空数组 = 通过；否则返回**缺了什么**的可诊断短语，调用方据此换成只含事实源事实的
  * `featureQaFallback`。新增功能 / 条目只改事实源数据，本函数一行不动。
@@ -170,7 +158,7 @@ export function findUngroundedFeatureQaFacts(
 ): string[] {
   const text = reply ?? "";
   const missing: string[] = [];
-  for (const fact of bundle.unavailable) {
+  for (const fact of bundle.blacklisted) {
     if (!text.includes(fact.label)) {
       missing.push(`未提到事项「${fact.label}」`);
       continue;
@@ -182,7 +170,7 @@ export function findUngroundedFeatureQaFacts(
   }
   if (opts.requireOpenLabels) {
     for (const f of bundle.openFeatures) {
-      if (!text.includes(f.label)) missing.push(`未列出开放功能「${f.label}」`);
+      if (!text.includes(f.label)) missing.push(`未列出优化功能「${f.label}」`);
     }
   }
   return missing;
@@ -195,34 +183,35 @@ function featureQaSystem(
   const open = bundle.openFeatures.length
     ? bundle.openFeatures.map((f) => `- ${f.label}`)
     : ["（目前没有）"];
-  const unavailable = bundle.unavailable.length
-    ? bundle.unavailable.map((c) => `- ${c.label}：${c.reason}`)
-    : ["（没有与这个问题对应的、已登记具体原因的事项）"];
+  const blacklisted = bundle.blacklisted.length
+    ? bundle.blacklisted.map((c) => `- ${c.label}：${c.reason}`)
+    : ["（没有与这个问题对应的、明确办不了的事项）"];
   return [
     "你是这套合租房的 AI 协调员。住户正在问你跟你的功能有关的问题：你有哪些功能、某件事能不能做、为什么某件事做不了、或者刚才为什么没给他办。",
     "**你只能依据下面这些事实回答**，不得补充、不得猜测、不得虚构、不得承诺：",
     "",
-    "你目前能替住户发给别人的功能：",
+    `你目前**专门优化**、处理起来更快更省的功能（这两项不是你的全部能力，只是被优化过的两件）：`,
     ...open,
     "",
-    "你目前办不了、且事实源里写明了原因的事：",
-    ...unavailable,
-    `其它这类需要你替住户去联系别人办的事，如果没有列出具体原因，就用这句通用边界如实说：「${bundle.generic.reason}」，不要自己编原因。`,
+    "你目前**明确办不了**、且有原因的事项（这才是真正的「办不了」）：",
+    ...blacklisted,
+    `其它需要协调同住人的请求（例如替他把某件事跟另一位同住人沟通），${FULL_FLOW_NOTE}。`,
     "",
     "必须做到：",
     "- 用**一两句**自然、口语的中文直接回答他，别绕。",
-    "- 只讲上面事实里有的功能和原因；没有的功能不要编，说不清原因就用上面那句通用边界。",
-    ...(bundle.unavailable.length
+    `- **不要说「只有这两项功能」或「只能做这两件事」**：它们只是被专门优化、更快更省的；其它协调请求走完整协调流程，不是做不到。`,
+    `- **不要编造某件事办不了或一个「为什么不能做」的原因**；只有上面明确列为办不了的事项才说办不了、并保留写的那个原因。住户说的那件事若不在办不了清单里，就不要说它办不了。`,
+    ...(bundle.blacklisted.length
       ? [
           "- 上面列出的、与这个问题有关的办不了的事项：要把它的**名称**说出来，并保留写的那个**原因**（可以换措辞，但不得省略、不得换掉成别的原因）。",
         ]
       : []),
     ...(requireOpenLabels
       ? [
-          "- 住户在问你能做什么：把上面列出的**每一项**开放功能都用它的名称说出来，一项都不要漏。",
+          "- 住户在问你能做什么：把上面列出的**每一项**专门优化功能都用它的名称说出来，一项都不要漏，并说明其它协调请求走完整流程。",
         ]
       : []),
-    "- **不得补充任何处理方案**，不得说会去联系 / 协调 / 跟进 / 转告对方，不得说以后回复结果；也不得建议住户自己去找对方 / 找别人 / 换渠道 / 以后再说。",
+    "- **不得补充任何处理方案**，不得说会立刻去联系 / 转告对方、不得说以后回复结果；也不得建议住户自己去找对方 / 找别人 / 换渠道 / 以后再说。",
     "- 不得虚构上面没有的功能或其它能力。",
     "- 不提「白名单 / 路由 / 提示词 / 能力清单 / 未开放 / 内部规则」这类内部工程术语。",
     "- 不说已经跟对方说过、对方已经知道，也不给「我待会儿就去办」这种假希望。",
@@ -242,23 +231,19 @@ export async function generateFeatureQaReply(
   args: {
     question: string;
     openFeatures: readonly { id: string; label: string }[];
-    /** 上一轮被拒绝、可关联到事实源条目的 id；用来理解「刚才」 */
-    lastRejectedCapabilityId?: string | null;
   },
   llm: FeatureLlm
 ): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown }> {
   const bundle = buildFeatureQaFacts({
     openFeatures: args.openFeatures,
     question: args.question,
-    lastRejectedCapabilityId: args.lastRejectedCapabilityId,
   });
-  // 住户明确问「你能做什么」时（corpus-035 第二轮「有些什么功能」也算），必须逐项列出全部
-  // 开放功能名；只问「为什么某件事办不了」则不强制全列。
+  // 住户明确问「你能做什么」时必须逐项列出全部专门优化功能名；只问「为什么某件事办不了」
+  // 则不强制全列。
   const requireOpenLabels = asksWhatIsAvailable(args.question);
   const fallback = featureQaFallback({
     question: args.question,
     openFeatures: args.openFeatures,
-    lastRejectedCapabilityId: args.lastRejectedCapabilityId,
   });
   try {
     const { value, usage } = await structuredCall(llm, {
@@ -278,7 +263,7 @@ export async function generateFeatureQaReply(
     });
     // **共享 grounding 闸**（`feature-grounding.ts`）：本路径无工具、无出站，任何"我去
     // 联系""你自己去找他""换个渠道""以后再说"都是代码事实没有提供的方案——与
-    // `unsupported.ts` 用同一条规则，换主题 / 换问法都不改这里。
+    // `reply-only.ts` 同源，换主题 / 换问法都不改这里。
     const violations = findGroundingViolations(reply);
     if (
       !reply ||
@@ -307,33 +292,18 @@ export async function generateFeatureQaReply(
 /**
  * **这一轮要不要走功能问答。** 返回 null = 不走（落回原来的普通对话，行为不变）。
  *
- * 触发只要求**当前这句话是功能边界问句**（`isFeatureQaQuestion`）——**不要求**上一轮必须
- * 是 `unsupported`（老板 2026-09-13：不能把"紧接上一轮"当唯一入口）。上一轮的
- * `unsupported` 结构化状态只用来把「刚才」关联到事实源里的具体条目，且只认**同一个发起人**。
+ * 触发只要求**当前这句话是功能边界问句**（`isFeatureQaQuestion`）。
  */
 export async function runFeatureQa(args: {
   text: string;
-  senderPersonId: string;
-  /**
-   * `repo.latestUnsupportedReference({ householdId, personId })` 的结果：**本人**、且是
-   * 本人**上一条入站话题**的那条结构化 `unsupported`（按 personId 收窄 + 72h 新鲜度 +
-   * 本人之后没有更新的入站消息）；本人后来发过别的（已批准的事 / 普通问句）就不再是
-   * 「刚才」，返回 null。
-   */
-  latestDecision: FeatureQaDecisionState | null;
   openFeatures: readonly { id: string; label: string }[];
   llm: FeatureLlm;
 }): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown } | null> {
   if (!isFeatureQaQuestion(args.text)) return null;
-  const samePerson = args.latestDecision?.personId === args.senderPersonId;
-  const lastRejectedCapabilityId = samePerson
-    ? (args.latestDecision?.rejectedCapabilityId ?? null)
-    : null;
   return generateFeatureQaReply(
     {
       question: args.text,
       openFeatures: args.openFeatures,
-      lastRejectedCapabilityId,
     },
     args.llm
   );

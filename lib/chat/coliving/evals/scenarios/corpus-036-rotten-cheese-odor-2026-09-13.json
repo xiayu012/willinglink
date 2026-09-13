@@ -1,0 +1,53 @@
+{
+  "id": "corpus-036-rotten-cheese-odor-2026-09-13",
+  "source": "转化自用户提供的 Reddit 第一人称宿舍故事：开学第一天回宿舍时发现房间在不到三小时内出现像腐烂奶酪一样的强烈异味，叙述者已经受够并考虑搬走。转化时保留异味、时间强度、崩溃程度和搬走念头，但改成住户会对协调机器提出的明确动作请求；本轮只观察现有产品反应，不预设机器验收结论。",
+  "household": {
+    "label": "评测-036 宿舍异味与搬走念头"
+  },
+  "people": [
+    {
+      "phone": "+15550360001",
+      "name": "小程",
+      "role": "tenant"
+    },
+    {
+      "phone": "+15550360002",
+      "name": "阿杰",
+      "role": "tenant"
+    }
+  ],
+  "setup": {
+    "confirmedNames": [
+      "小程",
+      "阿杰"
+    ],
+    "priorMessages": [
+      {
+        "person": "小程",
+        "direction": "outbound",
+        "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。"
+      },
+      {
+        "person": "阿杰",
+        "direction": "outbound",
+        "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550360001",
+      "text": "我刚上完开学第一天的课回宿舍，本来心情还挺好，一推门屋里一股烂奶酪似的臭味。阿杰不到三个小时就能把房间弄得这么难闻，我真的受够了，都在想搬走了。你跟他说，让他把屋里的味道处理一下，别再把房间弄成这样。",
+      "expect": {
+        "minAcceptedOutbound": 1,
+        "mustUseTools": ["contactPerson"],
+        "mustContactNames": ["阿杰"],
+        "mustNotContactNames": ["小程"],
+        "outboundMustNotMatch": [
+          "搬走|搬出去|退租",
+          "[0-9]+号住客"
+        ]
+      }
+    }
+  ]
+}

@@ -725,9 +725,8 @@ export async function recordDecision(args: {
   /** 当时喂给模型的运行时上下文原文。**判断对不对取决于它当时看到了什么** */
   contextSnapshot?: string | null;
   /**
-   * 很窄的**结构化标记**（如 `unsupported` 保留轮留下的能力条目 id）。只放代码写死的
-   * id，**不放模型自由文本**；供下一轮读取结构化事实（见 `latestUnsupportedReference`
-   * 与 `feature-qa.ts` 的用法）。
+   * 很窄的**结构化标记**（如已批准功能投递时留下的功能 id / 收件人 id）。只放代码
+   * 写死的 id，**不放模型自由文本**。
    */
   payload?: Record<string, string> | null;
 }): Promise<string> {
@@ -737,9 +736,8 @@ export async function recordDecision(args: {
    * **不要**写 `${JSON.stringify(...)}::jsonb`：首次执行时驱动的参数类型还是 unknown
    * （按文本发送），但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802)
    * 写回该参数并缓存预处理语句；**第二次及以后**驱动就按 jsonb 序列化器把已经
-   * stringify 过的参数**再序列化一次**，落库变成 JSONB 顶层字符串，
-   * `payload->>'capabilityId'` 随即读成 null（corpus-035 第二轮「刚才」断链的真实根因）。
-   * `shadow.ts` 用的是同一正确先例。
+   * stringify 过的参数**再序列化一次**，落库变成 JSONB 顶层字符串，读取端
+   * `payload->>'<字段>'` 随即读成 null（真实事故的根因）。`shadow.ts` 用的是同一正确先例。
    */
   const rows = await db()<{ id: string }[]>`
     insert into coliving.decision
@@ -756,56 +754,6 @@ export async function recordDecision(args: {
     returning id
   `;
   return rows[0].id;
-}
-
-/**
- * **某位住户最近一条「结构化 unsupported 参考」的窄视图**——只回答功能问答"刚才"
- * 需要的一件事：这位住户自己最近一轮 `unsupported` 留下、由**纯代码**写进 decision
- * payload 的条目 id（`payload.capabilityId`），供 `feature-qa.ts` 关联到统一功能事实源
- * （`feature-facts.ts`）里的具体条目。
- *
- * **整个查询就按发起人收窄**（`d.payload->>'personId' = 本人`），所以别的住户中间发了什么
- * 都顶不掉本人刚发生的那条引用。旧写法先取「全屋最新一条 decision」再在调用方比
- * personId：另一个住户任何一条更新的 decision 都会让本人上一轮的 `unsupported` 读不到，
- * 「刚才」随即断链。
- *
- * **只认本人「紧接着」的那一条**：`not exists` 要求本人在**同一栋房子**里、这条 decision
- * **之后**没有更新的入站消息。当前这轮功能问答的入站消息在查询时还没落库，因此「本人没有
- * 更新的入站」正好等价于「这条 `unsupported` 是本人上一条入站话题」。反例——住户先被拒
- * 了「卫生」（`hygiene`），随后又发了另一件已批准的事或普通问句，再问「刚才为什么没办」：
- * 那个更新的入站消息会让旧引用出局，不会把早已翻篇的旧拒绝重新当成「刚才」。别的住户的
- * 消息不参与这个判定。
- *
- * 时间窗与既有对话关联一致（`linkResponse` / `pendingCommunication` 的 72h）：超过窗口就
- * 不算「刚才」，宁可不关联也不把隔了好几天的旧事当成当轮上下文。只读**代码写死的结构化
- * id**，不读任何模型自由文本；查不到返回 null。
- */
-export async function latestUnsupportedReference(args: {
-  householdId: string;
-  personId: string;
-  withinHours?: number;
-}): Promise<{ capabilityId: string } | null> {
-  const rows = await db()<{ capabilityId: string | null }[]>`
-    select d.payload->>'capabilityId' as "capabilityId"
-    from coliving.decision d
-    where d.household_id = ${args.householdId}
-      and d.payload->>'personId' = ${args.personId}
-      and d.payload->>'capabilityId' is not null
-      and d.decided_at > now() - (${args.withinHours ?? 72} || ' hours')::interval
-      and not exists (
-        select 1
-        from coliving.message m
-        join coliving.conversation c on c.id = m.conversation_id
-        where m.person_id = ${args.personId}
-          and c.household_id = ${args.householdId}
-          and m.direction = 'inbound'
-          and m.sent_at > d.decided_at
-      )
-    order by d.decided_at desc
-    limit 1
-  `;
-  const capabilityId = rows[0]?.capabilityId ?? null;
-  return capabilityId ? { capabilityId } : null;
 }
 
 /**
