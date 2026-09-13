@@ -1310,6 +1310,12 @@ export async function finalizeFeatureTurn(
     channel: string;
     /** 新建 **reply decision** 时的说明文字（命中功能 / 保留对话轮各不相同） */
     decisionIntent: string;
+    /**
+     * 新建这条 reply decision 时附带的**窄结构化标记**（只放代码写死的 id，不放自由
+     * 文本）。目前只有黑名单收口用：`{ blacklistedCapabilityId, personId }`，供住户
+     * **紧接着**追问「刚才为什么」时关联到统一事实源的同一条目。
+     */
+    decisionPayload?: Record<string, string> | null;
     handling: FeatureHandling;
     /** 路由 + 抽取 + 生成（或 reply_only 小回复）各段真实用量合计 */
     usage: TurnUsage;
@@ -1358,6 +1364,7 @@ export async function finalizeFeatureTurn(
       intent: args.decisionIntent,
       modelId: args.modelId,
       doctrineModules: [],
+      payload: args.decisionPayload ?? null,
     }));
 
   let replyCommunicationId: string | null = null;
@@ -1682,7 +1689,7 @@ export async function runColivingTurn(args: {
    * 拒绝**，这一轮落回下面的完整 doctrine + 运行时主生成——那里恢复了通用短信联系能力
    * （`contactPerson`），由 doctrine + 本轮 intent 判断是否该替住户把话发给某位同屋人
    * （不是新加的"住户必须明说"窄规则）。真正办不了的只有下面那次路由里的黑名单
-   * （`blacklist.ts`，目前为空）。
+   * （`blacklist.ts`，当前是「卫生整改要求」一项）。
    *
    * 还有一个保留结果 `reply_only`（**不是功能、不是工具**，走**无工具、无出站**的小回复
    * 生成、只回当前住户、由 `finalizeFeatureTurn` 早返回）：请求**明确围绕某项已批准功能**
@@ -1692,8 +1699,8 @@ export async function runColivingTurn(args: {
    * 取一件丢掉另一件是错的。
    *
    * **黑名单也复用这同一次路由**（`blocked:<id>` token）：模型判定住户**正在交办**一项
-   * 老板明确登记办不了的功能时返回 `mode: "blacklisted"`，纯代码真话回复、零出站。**表为
-   * 空时路由选项为空、绝不拦**；不按关键词、不加第二次模型调用。
+   * 老板明确登记办不了的功能时返回 `mode: "blacklisted"`，纯代码真话回复、零出站。**表里
+   * 没有的事项、或经讨论 / 否定 / 引用 / 提问，都不拦**；不按关键词、不加第二次模型调用。
    *
    * 唯一一条纯代码前置闸：**原话里点名了唯一一位同住人**（收件人绑定
    * `resolveNamedRecipient`，不是主题分类）。绑不上就不走这条快路径、直接落回普通对话；
@@ -1735,6 +1742,15 @@ export async function runColivingTurn(args: {
             : featureRun.mode === "blacklisted"
               ? "黑名单命中：路由判定住户正在交办老板明确登记办不了的功能，纯代码真话回复，零出站"
               : `已批准功能（${featureRun.featureId}）命中：功能入口直接办完并落库，回执由功能生成`,
+        // 黑名单收口时留一条**窄结构化引用**（代码写死的 id，不是自由文本）：住户
+        // 紧接着追问「刚才为什么」时，据它关联到统一事实源的同一条目说出名称与原因。
+        decisionPayload:
+          featureRun.mode === "blacklisted" && featureRun.blacklistedCapabilityId
+            ? {
+                blacklistedCapabilityId: featureRun.blacklistedCapabilityId,
+                personId: sender.personId,
+              }
+            : null,
         handling: featureRun.handling,
         usage: frontDoorUsage,
         sender,
@@ -1757,12 +1773,27 @@ export async function runColivingTurn(args: {
    * 返回）。生成器只看到：住户问题 + `feature-facts.ts` 那份统一功能事实源里**与问题
    * 有关**的事实 + 当前开放功能清单；模型只负责说人话，写不出 / 越界就用**同样只含事实
    * 源事实**的兜底。**口径不再是"只两项功能"**：两项已批准功能只是专门优化的快路径，
-   * 别的协调请求走完整协调流程，不是不能做；真正办不了的只有黑名单（目前为空）。
+   * 别的协调请求走完整协调流程，不是不能做；真正办不了的只有黑名单（当前是「卫生整改
+   * 要求」一项）。
+   *
+   * 「刚才为什么」用一条**窄结构化引用**：黑名单收口那一轮把 `{ blacklistedCapabilityId,
+   * personId }` 写进 decision payload；这里只按**本人 + 紧接本人上一条入站 + 72h** 读回
+   * （`repo.latestBlacklistReference`），问题本身对不上条目时才补上那一条。不读自由文本、
+   * 不按关键词猜「刚才」，别的住户 / 本人后来换的话题都不会错误继承。
    */
   if (isFeatureQaQuestion(args.text)) {
+    // 「刚才为什么」的窄引用：只读**本人**、且是本人上一条入站话题的黑名单拒绝
+    // （按 personId 收窄 + 72h 新鲜度 + 本人之后没有更新的入站消息）。别的住户发了
+    // 什么都不会顶掉、也不会拿别人的引用；本人后来发过别的就不再是「刚才」，本轮照常
+    // 答功能边界问题，只是不套用那条旧拒绝。读的是代码写死的结构化 id，不猜关键词。
+    const blacklistRef = await repo.latestBlacklistReference({
+      householdId: sender.householdId,
+      personId: sender.personId,
+    });
     const qa = await runFeatureQa({
       text: args.text,
       openFeatures: APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label })),
+      referencedBlacklistedId: blacklistRef?.capabilityId ?? null,
       llm: productionFeatureLlm(modelId),
     });
     if (qa) {

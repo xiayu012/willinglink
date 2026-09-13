@@ -757,6 +757,53 @@ export async function recordDecision(args: {
 }
 
 /**
+ * **某位住户最近一条「刚被黑名单拒绝」的结构化引用**——只回答功能问答「刚才」
+ * 需要的一件事：这位住户自己上一轮被黑名单收口时、由**纯代码**写进 decision payload
+ * 的条目 id（`payload.blacklistedCapabilityId`），供 `feature-qa.ts` 关联到统一功能
+ * 事实源（`feature-facts.ts`）里的具体条目，说出名称与登记原因。
+ *
+ * **整个查询就按发起人收窄**（`d.payload->>'personId' = 本人`），所以别的住户中间发了
+ * 什么都顶不掉、也拿不到本人刚发生的那条引用（**别的住户的状态不得混入**）。
+ *
+ * **只认本人「紧接着」的那一条**：`not exists` 要求本人在**同一栋房子**里、这条
+ * decision **之后**没有更新的入站消息。当前这轮功能问答的入站消息在查询时还没落库，
+ * 因此「本人没有更新的入站」正好等价于「这条黑名单拒绝是本人上一条入站话题」。反例——
+ * 住户先被拒了「卫生整改」，随后自己又发了别的（普通问句 / 已批准的事），再问「刚才」：
+ * 那个更新的入站消息会让旧引用出局，旧拒绝不会被翻成「刚才」。时间窗与既有对话关联
+ * （`linkResponse` / `pendingCommunication` 的 72h）一致；超过窗口就不算「刚才」。
+ *
+ * 只读**代码写死的结构化 id**（`payload.blacklistedCapabilityId`），不读任何模型自由
+ * 文本，也不按关键词猜「刚才」；查不到返回 null。
+ */
+export async function latestBlacklistReference(args: {
+  householdId: string;
+  personId: string;
+  withinHours?: number;
+}): Promise<{ capabilityId: string } | null> {
+  const rows = await db()<{ capabilityId: string | null }[]>`
+    select d.payload->>'blacklistedCapabilityId' as "capabilityId"
+    from coliving.decision d
+    where d.household_id = ${args.householdId}
+      and d.payload->>'personId' = ${args.personId}
+      and d.payload->>'blacklistedCapabilityId' is not null
+      and d.decided_at > now() - (${args.withinHours ?? 72} || ' hours')::interval
+      and not exists (
+        select 1
+        from coliving.message m
+        join coliving.conversation c on c.id = m.conversation_id
+        where m.person_id = ${args.personId}
+          and c.household_id = ${args.householdId}
+          and m.direction = 'inbound'
+          and m.sent_at > d.decided_at
+      )
+    order by d.decided_at desc
+    limit 1
+  `;
+  const capabilityId = rows[0]?.capabilityId ?? null;
+  return capabilityId ? { capabilityId } : null;
+}
+
+/**
  * 模型常常先声明「只回复本人」，转头又去联系了别人。
  * 判断记录必须和实际行为一致，否则「AI 判断得对不对」这个复盘就没法做了。
  * 只往「介入更深」的方向改，不往回改。

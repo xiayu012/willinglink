@@ -106,12 +106,14 @@ import {
   buildFeatureQaFacts,
   selectBlacklistedCapabilities,
 } from "../lib/chat/coliving/feature-facts";
-// 显式黑名单事实源（当前为空）：复用那一次功能路由的 `blocked:<id>` token，
+// 显式黑名单事实源（当前一项：卫生整改要求）：复用那一次功能路由的 `blocked:<id>` token，
 // 不按关键词阻断；纯代码解析，是「这件事办不了」的唯一起源。
 import {
   BLACKLISTED_CAPABILITIES,
+  blacklistRouteToken,
   blacklistedCapabilityByRouteToken,
   blacklistedCapabilityById,
+  blacklistedReply,
 } from "../lib/chat/coliving/blacklist";
 import type {
   FeatureContext,
@@ -1895,6 +1897,7 @@ async function main() {
       kind: string;
       intent: string;
       targetPersonIds: string[];
+      payload: Record<string, string> | null;
     }> = [];
     // 四类落库函数被 `deliverSms`（投递第三方短信）与 `finalizeFeatureTurn`（收尾回执）
     // **共用同一份状态**：于是能离线断言"整条功能轮到底记了几条 decision"——若收尾在
@@ -1907,6 +1910,7 @@ async function main() {
         kind: args.kind,
         intent: args.intent ?? "",
         targetPersonIds: args.targetPersonIds ?? [],
+        payload: args.payload ?? null,
       });
       return id;
     };
@@ -2096,15 +2100,34 @@ async function main() {
       assert.equal(replyOnlyPadded.match, null);
 
       // 黑名单复用这同一次路由：条目以 `blocked:<id>` token 摆给模型，纯代码精确解析。
-      // **空表时任何 blocked: token 都解析不到条目**，也绝不因为原话里出现某主题词就拦
+      // 解析只认**表里精确登记的 id**，也绝不因为原话里出现某主题词就拦
       // （关键词不是执行阻断依据——讨论 / 否定 / 引用不会被误判成交办）。
       const blockedMiss = await routeApprovedFeature(
         "浴室地漏的头发没人清理，你怎么看？",
-        textOnly("blocked:hygiene")
+        textOnly("blocked:no-such-capability")
       );
-      assert.equal(blockedMiss.blacklisted, null, "空黑名单不得命中任何条目");
+      assert.equal(blockedMiss.blacklisted, null, "表里没有的 blocked: id 不得命中任何条目");
       assert.equal(blockedMiss.match, null, "blocked: token 不是已批准功能 id");
       assert.equal(blockedMiss.replyOnly, false, "blocked: token 不是 reply_only");
+
+      // 表里登记的那一项：只有精确 `blocked:<id>` 才命中；裸 id / 未知 id 都不命中。
+      const blockedId = BLACKLISTED_CAPABILITIES[0].id;
+      const blockedHit = await routeApprovedFeature(
+        "请叫阿川把地漏的头发清干净。",
+        textOnly(blacklistRouteToken(blockedId))
+      );
+      assert.equal(
+        blockedHit.blacklisted?.id,
+        blockedId,
+        "登记的 blocked: token 必须精确命中那一项黑名单"
+      );
+      assert.equal(blockedHit.match, null, "黑名单条目不是已批准功能");
+      assert.equal(blockedHit.replyOnly, false, "黑名单条目不是 reply_only");
+      const bareId = await routeApprovedFeature(
+        "请叫阿川把地漏的头发清干净。",
+        textOnly(blockedId)
+      );
+      assert.equal(bareId.blacklisted, null, "裸 id（无 blocked: 前缀）不算黑名单命中");
 
       // 清单外的词（如 029 电视音量这类主题）：一律不命中 → 落回主生成，**不是拒绝**。
       const stray = await routeApprovedFeature(
@@ -2113,6 +2136,23 @@ async function main() {
       );
       assert.equal(stray.match, null, "清单外字符串不可能命中任何功能");
       assert.equal(stray.replyOnly, false, "清单外字符串不得被当成 reply_only");
+
+      // 只差一个条件的邻接反例：同样是点名一位同住人、同样是「要他处理一下」，但主题是
+      // **异味 / 空气**而不是「清走卫生残留」——路由 none 时必须零黑名单命中，落回完整
+      // 协调流程，**不得**被「卫生整改」这条黑名单按关键词误拦。
+      const odor = await routeApprovedFeature(
+        "屋里一股烂奶酪味，你跟阿杰说让他处理一下",
+        textOnly(FEATURE_ROUTE_NONE)
+      );
+      assert.equal(odor.blacklisted, null, "异味交办不是卫生整改黑名单主题，不得被拦");
+      assert.equal(odor.match, null, "异味交办不是已批准功能");
+      assert.equal(odor.replyOnly, false, "异味交办不是 reply_only");
+      // 讨论 / 征询卫生话题（不是交办）同样不得被拦。
+      const discussHygiene = await routeApprovedFeature(
+        "浴室地漏的头发没人清理，你怎么看？",
+        textOnly(FEATURE_ROUTE_NONE)
+      );
+      assert.equal(discussHygiene.blacklisted, null, "讨论 / 征询卫生话题不得被当成交办拦截");
 
       // 解释性 / JSON / 字段名漂移文本：一律安全当 none，不解析、不猜。
       for (const explained of [
@@ -2127,6 +2167,39 @@ async function main() {
         assert.equal(r.match, null, `解释性 / JSON 文本不得命中：${explained}`);
         assert.equal(r.replyOnly, false, `解释性 / JSON 文本不得被当成 reply_only：${explained}`);
       }
+    }
+  );
+
+  await checkAsync(
+    "卫生整改交办被黑名单收口：纯代码真话、零出站、不进抽取 / 生成；邻接非卫生请求不被误拦",
+    async () => {
+      const hygiene = BLACKLISTED_CAPABILITIES[0];
+      // 前门那一次路由选中 blocked:<id>：整轮在功能入口内收口，**不进完整主生成、
+      // 不调 contactPerson**——只回一句纯代码真话，零工具、零第三方出站，也不抽取 / 生成。
+      const blocked = await runFeature(
+        "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
+        { feature_route: blacklistRouteToken(hygiene.id) }
+      );
+      assert.equal(blocked.run.mode, "blacklisted", "卫生整改交办必须由黑名单收口");
+      assert.equal(blocked.handling?.status, "handled");
+      assert.equal(blocked.handling?.reply, blacklistedReply(hygiene), "回复必须是纯代码真话");
+      assert.equal(blocked.handling?.sms, null, "黑名单零第三方短信");
+      assert.equal(blocked.repo.thirdParty().length, 0, "黑名单不得给任何人出站");
+      assert.equal(blocked.repo.decisions.length, 0, "黑名单不产生联系决策（不进主生成）");
+      assert.deepEqual(
+        blocked.calls.map((c) => c.name),
+        [FEATURE_ROUTE_NAME],
+        "黑名单只花那一次路由，不抽取、不生成"
+      );
+      // 邻接反例（只差一个条件）：同样点名一位同住人、同样「让他处理一下」，但主题是
+      // **异味 / 空气**，不是「清走卫生残留」。路由 none → 落回完整协调流程（不是拒绝），
+      // 不得被「卫生整改」这条黑名单按主题词误拦。
+      const odor = await runFeature("屋里一股烂奶酪味，你跟阿杰说让他处理一下", {
+        feature_route: FEATURE_ROUTE_NONE,
+      });
+      assert.equal(odor.run.mode, "none", "异味交办不是黑名单，落回完整流程");
+      assert.equal(odor.handling, null, "落回完整流程时前门不产出 handling");
+      assert.equal(odor.repo.thirdParty().length, 0, "前门零出站（是否联系交主生成判断）");
     }
   );
 
@@ -2276,7 +2349,7 @@ async function main() {
       "只服务旧 default-deny 的 unsupported.ts 必须删除"
     );
     // 显式黑名单是"办不了"的唯一起源：复用同一次功能路由的 `blocked:<id>` token，
-    // 纯代码解析、零模型调用、表为空时恒不命中；**不得退回按关键词在原话上直接命中**。
+    // 纯代码解析、零模型调用、表里没有的 id 恒不命中；**不得退回按关键词在原话上直接命中**。
     const blacklistSrc = readFileSync("lib/chat/coliving/blacklist.ts", "utf8");
     assert(
       blacklistSrc.includes("BLACKLISTED_CAPABILITIES") &&
@@ -2296,9 +2369,18 @@ async function main() {
       !/\bselectBlacklistedCapabilities\b/.test(blacklistCode),
       "黑名单解析不得依赖问答侧的关键词关联函数"
     );
+    // 老板 2026-09-13 纠正：黑名单**不是空表**——已登记唯一一项「卫生整改要求」。
+    // 但也不得因为"不在已批准清单里"就把别的主题塞进黑名单（只有老板点名要拒绝的才加）。
     assert(
-      /const BLACKLISTED_CAPABILITIES[^=]*=\s*\[\s*\]/.test(blacklistSrc),
-      "当前黑名单必须为空（空表 = 不产生任何拒绝）"
+      BLACKLISTED_CAPABILITIES.length === 1 &&
+        BLACKLISTED_CAPABILITIES[0].id === "hygiene-rectification" &&
+        BLACKLISTED_CAPABILITIES[0].label === "卫生整改要求",
+      "当前黑名单只允许登记「卫生整改要求」一项（不是空表）"
+    );
+    assert(
+      /const BLACKLISTED_CAPABILITIES[^=]*=\s*\[/.test(blacklistSrc) &&
+        !/const BLACKLISTED_CAPABILITIES[^=]*=\s*\[\s*\]/.test(blacklistSrc),
+      "blacklist.ts 的显式清单不得再写成空表"
     );
     assert(
       !/generateText|generateObject|structuredCall|getLanguageModel/.test(blacklistSrc),
@@ -2389,54 +2471,114 @@ async function main() {
   const listOpen = `我目前对${openLabels.join("、")}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`;
   const combinedQuestion = "请问为什么连这么简单的功能都没有?那你有什么功能？";
 
-  check("统一功能事实源：黑名单为空 = 不产生任何拒绝，开放功能来自 APPROVED_FEATURES", () => {
-    // 数据质量不变量：黑名单条目（当前为空）的理由锚点必须取自它自己的 reason——
-    // grounding 校验只读这份数据，引擎里没有主题分支。
-    for (const c of BLACKLISTED_CAPABILITIES) {
-      assert(c.validation.reasonAnchors.length > 0, `${c.id} 必须有理由锚点`);
-      for (const a of c.validation.reasonAnchors) {
-        assert(c.reason.includes(a), `${c.id} 的锚点「${a}」必须取自它自己的 reason`);
+  check(
+    "统一功能事实源：卫生整改是唯一「办不了」条目，开放功能来自 APPROVED_FEATURES",
+    () => {
+      // 数据质量不变量：每条黑名单条目的理由锚点必须取自它自己的 reason——
+      // grounding 校验只读这份数据，引擎里没有主题分支。
+      for (const c of BLACKLISTED_CAPABILITIES) {
+        assert(c.validation.reasonAnchors.length > 0, `${c.id} 必须有理由锚点`);
+        for (const a of c.validation.reasonAnchors) {
+          assert(c.reason.includes(a), `${c.id} 的锚点「${a}」必须取自它自己的 reason`);
+        }
+        assert(c.routeDescription.length > 0, `${c.id} 必须有路由定义（执行阻断的唯一依据）`);
+        assert(c.keywords.length > 0, `${c.id} 必须保留关键词（只供问答关联，不做执行阻断）`);
       }
-    }
-    assert.equal(BLACKLISTED_CAPABILITIES.length, 0, "当前黑名单必须为空");
-    // 空黑名单：任何问题都选不出「办不了」的条目（空表 = 不产生任何拒绝）。
-    for (const q of ["浴室地漏的头发没人清", "为什么不行", "今天天气不错", combinedQuestion]) {
-      assert.deepEqual(selectBlacklistedCapabilities(q), [], "空黑名单恒返回空数组");
-      assert.equal(
-        blacklistedCapabilityByRouteToken(`blocked:${q}`),
-        null,
-        "空黑名单恒不命中"
+      // 老板 2026-09-13 纠正：「卫生整改要求」是已登记的显式黑名单，不是空表。
+      assert(
+        BLACKLISTED_CAPABILITIES.length === 1 &&
+          BLACKLISTED_CAPABILITIES[0].id === "hygiene-rectification" &&
+          BLACKLISTED_CAPABILITIES[0].label === "卫生整改要求",
+        "当前黑名单只登记「卫生整改要求」一项"
       );
-      assert.equal(blacklistedCapabilityByRouteToken(q), null, "裸 token（无 blocked: 前缀）不算命中");
+      const hygiene = BLACKLISTED_CAPABILITIES[0];
+      // 住户可见的内容（名称 + 理由）不得出现任何内部术语。
+      assert(
+        !/未开放|白名单|黑名单|路由|模型|提示词/.test(hygiene.label + hygiene.reason),
+        "黑名单条目对住户可见的内容不得含内部术语"
+      );
+      // 复用同一次路由：只有精确的 `blocked:<id>` 才命中；裸 id / 表外 id 都不算。
+      assert.equal(
+        blacklistedCapabilityByRouteToken(blacklistRouteToken(hygiene.id))?.id,
+        hygiene.id,
+        "blocked:<id> 必须命中对应条目"
+      );
+      assert.equal(
+        blacklistedCapabilityByRouteToken(hygiene.id),
+        null,
+        "裸 id（无 blocked: 前缀）不算命中"
+      );
+      assert.equal(
+        blacklistedCapabilityByRouteToken(blacklistRouteToken("no-such-capability")),
+        null,
+        "表里没有的 blocked: id 恒不命中"
+      );
+      assert.equal(blacklistedCapabilityById(hygiene.id)?.id, hygiene.id, "按 id 能取回条目");
+      // 问答把「问题」关联到条目：只对**在问这项功能**的问题命中；别的主题 / 闲聊一律不选
+      // （否则会把普通协调请求也误说成「办不了」）。
+      assert.equal(
+        selectBlacklistedCapabilities("为什么不能让他清理地漏的头发？")[0]?.id,
+        hygiene.id,
+        "问到卫生整改的问题要关联到该条目"
+      );
+      for (const q of [
+        "为什么不行",
+        "今天天气不错",
+        // 异味 / 空气不是「清走卫生残留」，同一个收件人也不算黑名单主题。
+        "屋里一股烂奶酪味，你跟阿杰说让他处理一下",
+        combinedQuestion,
+      ]) {
+        assert.deepEqual(selectBlacklistedCapabilities(q), [], `不该关联黑名单的问题：${q}`);
+      }
+      // 纯代码真话回复：带 label + 老板给的理由，无内部术语，过通用 grounding 闸。
+      const reply = blacklistedReply(hygiene);
+      assert(
+        reply.includes(hygiene.label) && reply.includes(hygiene.reason),
+        "黑名单回复必须含条目名称与老板给的理由"
+      );
+      assert(
+        !/未开放|白名单|黑名单|路由|提示词|不在.{0,6}(能力|功能)清单/.test(reply),
+        "黑名单回复不得含内部术语"
+      );
+      assert.deepEqual(findGroundingViolations(reply), [], "黑名单真话回复必须过 grounding 闸");
+      // 事实源：问到黑名单主题时带出该条目；问到能力清单时不带任何「办不了」条目。
+      const hygieneBundle = buildFeatureQaFacts({
+        openFeatures: OPEN_FEATURES,
+        question: "为什么不能让他清理地漏的头发？",
+      });
+      assert.equal(
+        hygieneBundle.blacklisted[0]?.id,
+        hygiene.id,
+        "问黑名单主题时事实源要带出该条目"
+      );
+      const bundle = buildFeatureQaFacts({
+        openFeatures: OPEN_FEATURES,
+        question: combinedQuestion,
+      });
+      assert.equal(bundle.blacklisted.length, 0, "问能力清单时不带任何「办不了」条目");
+      assert.equal(
+        bundle.openFeatures.length,
+        APPROVED_FEATURES.length,
+        "开放功能必须来自 APPROVED_FEATURES 清单"
+      );
+      assert(
+        bundle.generic.fullFlow.length > 0 && bundle.generic.fastPath.length > 0,
+        "通用说明必须是事实源数据"
+      );
+      assert(
+        !/办不了|没法|不能做/.test(bundle.generic.fullFlow) &&
+          bundle.generic.fullFlow.includes("不是做不到"),
+        "通用说明必须说明清单外走完整协调流程、不是做不到"
+      );
+      // 兜底同样只含事实源事实：问能力清单时绝不编造「办不了」，要列全专门优化功能。
+      const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
+      assert(
+        !/办不了|没法|不能做/.test(fb) && fb.includes("不是做不到"),
+        "问能力清单的兜底不得编造办不了，且要如实说明会走完整流程"
+      );
+      assert(openLabels.every((l) => fb.includes(l)), "问能力清单时兜底必须列全专门优化功能");
     }
-    assert.equal(blacklistedCapabilityById("hygiene"), null, "空黑名单按 id 也取不到条目");
-    const bundle = buildFeatureQaFacts({
-      openFeatures: OPEN_FEATURES,
-      question: combinedQuestion,
-    });
-    assert.equal(bundle.blacklisted.length, 0, "事实源里没有任何「办不了」条目");
-    assert.equal(
-      bundle.openFeatures.length,
-      APPROVED_FEATURES.length,
-      "开放功能必须来自 APPROVED_FEATURES 清单"
-    );
-    assert(
-      bundle.generic.fullFlow.length > 0 && bundle.generic.fastPath.length > 0,
-      "通用说明必须是事实源数据"
-    );
-    assert(
-      !/办不了|没法|不能做/.test(bundle.generic.fullFlow) &&
-        bundle.generic.fullFlow.includes("不是做不到"),
-      "通用说明必须说明清单外走完整协调流程、不是做不到"
-    );
-    // 兜底同样只含事实源事实：空黑名单时绝不编造「办不了」，问能力清单时列全专门优化功能。
-    const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
-    assert(
-      !/办不了|没法|不能做/.test(fb) && fb.includes("不是做不到"),
-      "空黑名单兜底不得编造办不了，且要如实说明会走完整流程"
-    );
-    assert(openLabels.every((l) => fb.includes(l)), "问能力清单时兜底必须列全专门优化功能");
-  });
+  );
 
   check("功能问答触发范围：直接问能力也进，普通交办 / 闲聊不进", () => {
     assert.equal(isFeatureQaQuestion(combinedQuestion), true);
@@ -2535,6 +2677,77 @@ async function main() {
     assert.equal(longQa!.reply, fb, "超长正文必须回落兜底");
   });
 
+  await checkAsync(
+    "功能问答的「刚才」窄引用：本人紧接追问补上被拒条目，没有引用时不继承",
+    async () => {
+      const hygiene = BLACKLISTED_CAPABILITIES[0];
+      const question = "请问为什么连这么简单的功能都没有?那你有什么功能？";
+
+      // 没有引用（其他住户 / 本人后来换过话题 / 隔得太久）：问题本身对不上条目 → 事实源
+      // 不带任何「办不了」，兜底也不得凭空说出「刚才被拒」的主题。
+      const noRefBundle = buildFeatureQaFacts({ openFeatures: OPEN_FEATURES, question });
+      assert.equal(noRefBundle.blacklisted.length, 0, "没有引用时问能力清单不得带出黑名单条目");
+      const noRefFb = featureQaFallback({ question, openFeatures: OPEN_FEATURES });
+      assert(
+        !noRefFb.includes(hygiene.label) && !/卫生整改|看不到|整改/.test(noRefFb),
+        "没有引用时兜底不得凭空说出「刚才被拒」的主题"
+      );
+
+      // 有引用（本人上一轮刚被拒、紧接追问）：事实源补上那一条，兜底必须说出名称 +
+      // 登记原因 + 全部专门优化功能——**不靠旧主题关键词**，靠的是结构化引用。
+      const refBundle = buildFeatureQaFacts({
+        openFeatures: OPEN_FEATURES,
+        question,
+        referencedBlacklistedId: hygiene.id,
+      });
+      assert.equal(refBundle.blacklisted[0]?.id, hygiene.id, "引用命中时事实源补上那一条目");
+      const refFb = featureQaFallback({
+        question,
+        openFeatures: OPEN_FEATURES,
+        referencedBlacklistedId: hygiene.id,
+      });
+      assert(refFb.includes(hygiene.label), "紧接追问的兜底必须说出被拒条目名称");
+      for (const a of hygiene.validation.reasonAnchors) {
+        assert(refFb.includes(a), `紧接追问的兜底必须保留登记原因锚点：${a}`);
+      }
+      assert(openLabels.every((l) => refFb.includes(l)), "紧接追问仍要列全专门优化功能");
+      assert.deepEqual(findGroundingViolations(refFb), [], "含事实的兜底必须过 grounding 闸");
+
+      // 模型正文覆盖事实才接受；漏掉被拒条目 / 原因 → 换回同样只含事实的兜底。
+      const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: refFb }) });
+      const okQa = await runFeatureQa({
+        text: question,
+        openFeatures: OPEN_FEATURES,
+        referencedBlacklistedId: hygiene.id,
+        llm: ok.llm,
+      });
+      assert.equal(okQa!.reply, refFb, "覆盖被拒条目 + 开放功能的正文要接受");
+      assert(!("error" in okQa!));
+
+      const dropped = listOpen; // 只列开放功能、漏掉「刚才被拒」的条目与原因
+      const bad = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: dropped }) });
+      const badQa = await runFeatureQa({
+        text: question,
+        openFeatures: OPEN_FEATURES,
+        referencedBlacklistedId: hygiene.id,
+        llm: bad.llm,
+      });
+      assert.equal(badQa!.reply, refFb, "漏掉被拒条目与原因的正文必须回落只含事实的兜底");
+      assert(badQa!.error, "回落时要把原因带出来");
+
+      // 无引用时同样的正文就是合规的（不该被要求补一条并不存在的「刚才」）。
+      const noRefOk = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: listOpen }) });
+      const noRefOkQa = await runFeatureQa({
+        text: question,
+        openFeatures: OPEN_FEATURES,
+        referencedBlacklistedId: null,
+        llm: noRefOk.llm,
+      });
+      assert.equal(noRefOkQa!.reply, listOpen, "没有引用时不要求补被拒条目，列全功能即可");
+    }
+  );
+
+
   check("corpus-035 两句原文逐字保留，且这轮功能问答无工具 / 无出站 / 不装旧 doctrine", () => {
     const raw = readFileSync(
       "lib/chat/coliving/evals/scenarios/corpus-035-unsupported-feature-followup-2026-09-12.json",
@@ -2548,31 +2761,54 @@ async function main() {
     );
     assert.equal(scenario.turns[1].text, "请问为什么连这么简单的功能都没有?那你有什么功能？");
     for (const [i, turn] of scenario.turns.entries()) {
-      // `minAcceptedOutbound` 是下限：0 只是不设最低出站要求（默认宽容后第一轮可以
-      // 由主生成按 doctrine + intent 决定要不要联系），不是「禁止出站」。
+      // `minAcceptedOutbound` 是下限：0 只是不设最低出站要求（这一轮不必发出第三方短信），
+      // 不是「禁止出站」。
       assert.equal(turn.expect?.minAcceptedOutbound, 0, `第${i + 1}轮不设最低出站要求`);
     }
-    // 默认宽容后：第一轮是普通出站交办（主题不在专门优化清单里，但**不再因此被拒**），
-    // 机器断言只要求它不产生结构性拒绝话术、且不误发给发起人。
-    assert.deepEqual(scenario.turns[0].expect?.mustNotContactNames, ["小禾"], "第一轮不得发给发起人");
+    // 老板 2026-09-13 纠正：第一轮「请叫阿川把地漏的头发清干净」是**已登记的显式黑名单**
+    // （卫生整改要求），由功能前门那次路由选中 `blocked:hygiene-rectification` 后**纯代码
+    // 收口**——零工具、零第三方出站、不进完整主生成。机器断言据此要求：
+    // 不得调 `contactPerson`、不得发给任何人，回复只保留老板给的理由。
+    assert.deepEqual(
+      scenario.turns[0].expect?.mustNotUseTools,
+      ["contactPerson"],
+      "第一轮不得进入主生成去调 contactPerson"
+    );
+    assert.deepEqual(
+      scenario.turns[0].expect?.mustNotContactNames,
+      ["阿川", "小禾"],
+      "第一轮黑名单收口，不得发给任何人"
+    );
+    assert.deepEqual(
+      scenario.turns[0].expect?.replyMustMatch,
+      ["卫生整改要求", "看不到", "程度", "整改"],
+      "第一轮回复必须含条目名称与老板给的理由锚点"
+    );
     assert.deepEqual(
       scenario.turns[0].expect?.replyMustNotMatch,
-      ["未开放", "办不了", "不在.{0,6}(能力|功能)清单"],
-      "第一轮不得因「不在专门优化清单」而拒绝"
+      ["未开放", "白名单", "黑名单", "路由", "提示词", "不在.{0,6}(能力|功能)清单"],
+      "第一轮回复不得含内部术语"
     );
-    // 第二轮是产品功能问答：无工具、无出站，且不得把上一轮旧主题当成「刚才被拒」再答。
+    // 第二轮是**同一住户紧接着**的功能边界追问：无工具、无出站；且必须说出刚刚被拒的
+    // 「卫生整改要求」名称与登记原因、并列出全部专门优化功能——由结构化引用 + grounding
+    // 共同保证（不是「不继承」，也不是按关键词乱猜主题）。
     assert.deepEqual(scenario.turns[1].expect?.mustNotContactNames, ["阿川", "小禾"], "第二轮不得联系任何人");
     assert.deepEqual(scenario.turns[1].expect?.mustNotUseTools, ["contactPerson"], "第二轮无工具");
     assert.deepEqual(
+      scenario.turns[1].expect?.replyMustMatch,
+      ["卫生整改要求", "看不到", "程度", "整改", "个人物品使用提醒", "夜间洗衣提醒"],
+      "第二轮紧接着追问：必须说出被拒条目名称 + 登记原因，并列全专门优化功能"
+    );
+    assert.deepEqual(
       scenario.turns[1].expect?.replyMustNotMatch,
-      ["地漏", "头发", "卫生整改"],
-      "第二轮不得把上一轮旧主题当成「刚才被拒」再答一遍"
+      ["未开放", "白名单", "黑名单", "路由", "提示词"],
+      "第二轮仍不得出现内部术语"
     );
     assert.equal(isFeatureQaQuestion(scenario.turns[1].text), true, "第二轮进功能问答");
     assert.equal(
       isFeatureQaQuestion(scenario.turns[0].text),
       false,
-      "第一轮是普通出站交办，不进问答"
+      "第一轮是黑名单交办（由功能前门收口），不进功能问答"
     );
 
     // 本闸只应看**真实代码**，不该被字符串 / 模板串 / 正则字面量里的字样误伤。本文件里
@@ -2703,11 +2939,20 @@ async function main() {
       turnSrcQa.includes("runFeatureQa("),
       "turn.ts 必须接线功能问答入口"
     );
-    // 默认宽容后问答不再读「上一轮被拒」的结构化引用：黑名单为空时没有任何拒绝理由可读。
+    // 「刚才为什么」的窄引用：问答只读**本人 + 紧接本人上一条入站 + 72h**的黑名单引用
+    // （`repo.latestBlacklistReference`），不退回旧 default-deny 的 latestDecision /
+    // latestUnsupportedReference；读取时就按 sender.personId 收窄，别的住户顶不掉。
     assert(
-      !turnSrcQa.includes("latestUnsupportedReference(") &&
+      turnSrcQa.includes("repo.latestBlacklistReference(") &&
+        !turnSrcQa.includes("latestUnsupportedReference(") &&
         !turnSrcQa.includes("latestDecision("),
-      "turn.ts 功能问答不得再读旧 default-deny 的结构化引用"
+      "turn.ts 功能问答必须读本人黑名单结构化引用，不得退回旧 default-deny 引用"
+    );
+    assert(
+      /repo\.latestBlacklistReference\(\{[\s\S]*?personId:\s*sender\.personId/.test(
+        turnSrcQa
+      ),
+      "读黑名单引用时必须按 sender.personId 收窄（不是取完全屋再比）"
     );
   });
 
@@ -2827,6 +3072,45 @@ async function main() {
     assert.equal(kindOf(boundToStoredText(payload)), "contact_one");
   });
 
+  // ── 黑名单「刚才」引用：读取时就按发起人 + 「紧接着本人上一条入站」收窄（源码闸，不连库） ──
+  //
+  // 真实缺陷：黑名单收口后同一住户紧接着追问「为什么连这么简单的功能都没有」，问题本身不含
+  // 主题词，光靠 keywords 对不上条目 → 追问会丢掉刚被拒的理由。修法用一条**窄结构化引用**：
+  // 收口那一轮由纯代码把 `{ blacklistedCapabilityId, personId }` 写进 decision payload，读取
+  // 时按 personId 收窄 + 只认结构化字段 + 72h + 「本人同屋之后没有更新的入站消息」。此闸只查
+  // SQL 是否具备这四件事，不重复实现选择语义、不连库。
+  check("黑名单「刚才」引用：按发起人收窄 + 结构化字段 + 72h + 本人之后无更新入站", () => {
+    const repoStr = readFileSync("lib/chat/coliving/repo.ts", "utf8");
+    const start = repoStr.indexOf("export async function latestBlacklistReference(");
+    assert(start >= 0, "repo 必须有 latestBlacklistReference");
+    const end = repoStr.indexOf("\nexport ", start + 1);
+    const body = repoStr.slice(start, end > 0 ? end : undefined);
+    assert(
+      /d\.payload->>'personId'\s*=\s*\$\{args\.personId\}/.test(body),
+      "SQL 必须按发起人收窄（不是先取全屋最新再在调用方比）"
+    );
+    assert(
+      body.includes("d.payload->>'blacklistedCapabilityId' is not null"),
+      "只认结构化黑名单引用（blacklistedCapabilityId 非空），不读自由文本"
+    );
+    assert(
+      body.includes("args.withinHours ?? 72") && body.includes("interval"),
+      "必须有与既有对话关联（linkResponse / pendingCommunication）一致的 72h 新鲜度窗口"
+    );
+    assert(
+      body.includes("c.household_id = ${args.householdId}") &&
+        /not exists[\s\S]*m\.direction = 'inbound'[\s\S]*m\.sent_at > d\.decided_at/.test(body),
+      "必须排除本人**同一栋房子**里这条 decision 之后更新的入站消息（换过话题后不得再当「刚才」）"
+    );
+    // 写入端：收口那一轮把结构化引用交给 recordDecision 的 payload（走 json()）。
+    const turnStr = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnStr.includes("blacklistedCapabilityId: featureRun.blacklistedCapabilityId") &&
+        turnStr.includes("personId: sender.personId"),
+      "黑名单收口必须把 { blacklistedCapabilityId, personId } 写进这一轮 decision payload"
+    );
+  });
+
   check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {
     const loadScenario = (file: string) =>
       validateScenario(
@@ -2942,7 +3226,8 @@ async function main() {
    *     零写入，只回当前住户一两句；失败也只回中性兜底、绝不落回主生成；
    *     **"同时交办两件"不属于 reply_only**——那是 `none`、整条交给完整主流程；
    *   · **黑名单复用同一次路由**：条目作为 `blocked:<id>` 选项摆给模型，只有模型判定
-   *     住户正在交办它时才拦，纯代码真话回复、零出站；空表恒不拦、不加第二次调用；
+   *     住户正在交办它时才拦（当前登记唯一一项「卫生整改要求」），纯代码真话回复、
+   *     零出站；表里没有的 id 恒不拦、不加第二次调用；
    *   · **用量准确累计**：route + 选中功能 extract + compose 三段全计；route none
    *     也计；失败调用已完成 step 的用量也不丢；每条短调用都有正的最大输出上限；
    *   · 收件人由代码绑定原话（模型改不了人）；不可达 → 真话说明、零写入；
@@ -3467,6 +3752,34 @@ async function main() {
         );
         assert.equal(unreachableOutcome.decisionId, unreachable.decisions[0].id);
         assert.equal(unreachableOutcome.outbound.length, 0, "不可达零出站");
+
+        // —— 4. 黑名单收口：收尾把**窄结构化引用**写进 decision payload（供紧接着追问） ——
+        const bl = makeDelivery();
+        await finalizeFeatureTurn(
+          {
+            ...finalizeArgs({
+              status: "handled",
+              reply: blacklistedReply(BLACKLISTED_CAPABILITIES[0]),
+              sms: null,
+              decisionId: null,
+            }),
+            decisionPayload: {
+              blacklistedCapabilityId: BLACKLISTED_CAPABILITIES[0].id,
+              personId: GATE_SENDER,
+            },
+          },
+          bl.finalize
+        );
+        assert.equal(bl.decisions.length, 1, "黑名单收口恰好新建一条 decision");
+        assert.deepEqual(
+          bl.decisions[0].payload,
+          {
+            blacklistedCapabilityId: BLACKLISTED_CAPABILITIES[0].id,
+            personId: GATE_SENDER,
+          },
+          "黑名单收口必须把结构化引用写进 decision payload（代码写死的 id，不是自由文本）"
+        );
+        assert.equal(bl.thirdParty().length, 0, "黑名单收口零第三方出站");
       }
     );
 

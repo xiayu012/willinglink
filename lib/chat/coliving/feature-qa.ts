@@ -25,10 +25,20 @@ import { findGroundingViolations } from "./feature-grounding";
  *
  * - 两项已批准功能是**专门优化的快路径**（更快、更省），不是全部能力；
  * - 其它需要协调同住人的请求会走**完整的协调流程**处理，**不是不能做**；
- * - 真正办不了的只有老板明确登记的**黑名单**（`blacklist.ts`，**目前为空**）。
- *   空黑名单不得产生"办不了"的说法，也不得为它编造原因。
+ * - 真正办不了的只有老板明确登记的**黑名单**（`blacklist.ts`，当前是**「卫生整改要求」**
+ *   一项）。与问题对不上的条目不得被选中，也不得为它编造原因。
  *
  * 以后新增功能**只改事实源数据 / `APPROVED_FEATURES`，不改本文件**。
+ *
+ * ## 「刚才为什么」的窄引用（不按关键词猜）
+ *
+ * 住户被黑名单收口后**紧接着**追问「为什么连这么简单都没有?那你有什么功能？」时，
+ * 问题本身不含主题词，光靠 `keywords` 对不上条目。为此黑名单回复那一轮会由**纯代码**
+ * 把 `{ blacklistedCapabilityId, personId }` 写进 decision payload；本入口由调用方传入
+ * `referencedBlacklistedId`（`repo.latestBlacklistReference` 已按**本人 + 紧接本人上一条
+ * 入站 + 72h** 收窄），只在问题对不上任何条目、且这条引用可用时补上那一个条目。
+ * **不读自由文本、不靠关键词猜「刚才」**：本人后来发过别的（引用出局）或别的住户发问
+ * （查询按 personId 收窄）都不会错误继承。
  *
  * ## 与旧主生成、工具表完全无关
  *
@@ -119,13 +129,19 @@ export function isFeatureQaQuestion(text: string): boolean {
 
 /**
  * **只含事实源事实的兜底**。模型完全写不出可用回应、或写出违规内容时用它——它同样
- * 不承诺、不虚构、不列内部术语，只把事实摆出来。**空黑名单时不说任何"办不了"**。
+ * 不承诺、不虚构、不列内部术语，只把事实摆出来。**没有选中黑名单条目时不说任何
+ * "办不了"**。
  */
 export function featureQaFallback(args: {
   question: string;
   openFeatures: readonly { id: string; label: string }[];
+  /** 本人上一轮刚被黑名单拒绝的条目 id（结构化引用；没有则 null） */
+  referencedBlacklistedId?: string | null;
 }): string {
-  const blacklisted = selectBlacklistedCapabilities(args.question);
+  const blacklisted = selectBlacklistedCapabilities(
+    args.question,
+    args.referencedBlacklistedId
+  );
   const open = args.openFeatures.map((f) => f.label).join("、");
   if (blacklisted.length) {
     const f = blacklisted[0];
@@ -231,12 +247,18 @@ export async function generateFeatureQaReply(
   args: {
     question: string;
     openFeatures: readonly { id: string; label: string }[];
+    /**
+     * 本人**上一轮刚被黑名单拒绝**的条目 id（结构化引用；`repo.latestBlacklistReference`
+     * 的收窄查询结果）。问题本身对不上条目、但这是紧接被拒的追问时，据此说出名称与原因。
+     */
+    referencedBlacklistedId?: string | null;
   },
   llm: FeatureLlm
 ): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown }> {
   const bundle = buildFeatureQaFacts({
     openFeatures: args.openFeatures,
     question: args.question,
+    referencedBlacklistedId: args.referencedBlacklistedId ?? null,
   });
   // 住户明确问「你能做什么」时必须逐项列出全部专门优化功能名；只问「为什么某件事办不了」
   // 则不强制全列。
@@ -244,6 +266,7 @@ export async function generateFeatureQaReply(
   const fallback = featureQaFallback({
     question: args.question,
     openFeatures: args.openFeatures,
+    referencedBlacklistedId: args.referencedBlacklistedId ?? null,
   });
   try {
     const { value, usage } = await structuredCall(llm, {
@@ -297,6 +320,8 @@ export async function generateFeatureQaReply(
 export async function runFeatureQa(args: {
   text: string;
   openFeatures: readonly { id: string; label: string }[];
+  /** 本人上一轮刚被黑名单拒绝的条目 id（结构化引用；没有则 null） */
+  referencedBlacklistedId?: string | null;
   llm: FeatureLlm;
 }): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown } | null> {
   if (!isFeatureQaQuestion(args.text)) return null;
@@ -304,6 +329,7 @@ export async function runFeatureQa(args: {
     {
       question: args.text,
       openFeatures: args.openFeatures,
+      referencedBlacklistedId: args.referencedBlacklistedId ?? null,
     },
     args.llm
   );

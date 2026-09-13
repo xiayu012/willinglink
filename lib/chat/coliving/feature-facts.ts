@@ -1,5 +1,6 @@
 import {
   BLACKLISTED_CAPABILITIES,
+  blacklistedCapabilityById,
   type BlacklistedCapability,
 } from "./blacklist";
 
@@ -16,8 +17,9 @@ import {
  *    流程（是否该替住户联系某位同屋人，由 doctrine + 本轮 intent 判断）——**不是
  *    不能做**。问答里也要如实这么说。
  * 3. **真正办不了的事只有一个来源**：老板明确登记的**黑名单**
- *    （`blacklist.ts` 的 `BLACKLISTED_CAPABILITIES`，**目前为空**）。空黑名单
- *    不得产生任何"这件事办不了"的说法，也不得为它编造原因。
+ *    （`blacklist.ts` 的 `BLACKLISTED_CAPABILITIES`，当前是**「卫生整改要求」**一项：
+ *    看不到现场严重程度、当前技术不能可靠判断"脏到什么程度才该要求别人整改"）。
+ *    与问题**对不上**的条目不得被选中，也不得为它编造原因。
  *
  * 本文件只做数据查找，不做主题分叉：黑名单条目自带 `keywords`（关联用）与
  * `validation.reasonAnchors`（通用 grounding 用）。以后新增 / 改写：只改
@@ -42,30 +44,46 @@ export const FULL_FLOW_NOTE =
 export type FeatureQaFactBundle = {
   /** 当前开放（专门优化）的功能（含 id 供台账；正文只用 label） */
   openFeatures: readonly { id: string; label: string }[];
-  /** 与本次问题有关的黑名单条目；**可能为空**（空 = 没有能说出口的"办不了"） */
+  /** 与本次问题有关的黑名单条目；**可能为空**（空 = 这个问题没有对得上的"办不了"） */
   blacklisted: readonly BlacklistedCapability[];
-  /** 黑名单为空时的通用说明（不是"做不到"的托词） */
+  /** 没有选中黑名单条目时的通用说明（不是"做不到"的托词） */
   generic: { fastPath: string; fullFlow: string };
 };
 
-/** 与**这次问的问题**有关的黑名单条目（数据查找；空表恒为空数组）。 */
+/**
+ * 与**这次问的问题**有关的黑名单条目（数据查找；没有对得上的条目时为空数组）。
+ *
+ * **本次问题命中关键词优先**；只有问题本身对不上任何条目、但住户**上一轮刚被**这条
+ * 黑名单拒绝（`referencedId`，代码写入的结构化 id，不是自由文本）时，才用那一条——
+ * 于是「为什么连这么简单都没有?那你有什么功能？」这种**紧接被拒的追问**也能说出名称
+ * 与登记原因。**不按关键词猜「刚才」**：引用是否可用由 `repo.latestBlacklistReference`
+ * 的收窄查询（本人 + 紧接本人上一条入站 + 72h）决定，这里只做数据查找。
+ */
 export function selectBlacklistedCapabilities(
-  question: string
+  question: string,
+  referencedId?: string | null
 ): BlacklistedCapability[] {
   const t = (question ?? "").trim();
-  if (!t) return [];
-  return BLACKLISTED_CAPABILITIES.filter((c) =>
-    c.keywords.some((k) => t.includes(k))
-  );
+  const fromQuestion = t
+    ? BLACKLISTED_CAPABILITIES.filter((c) => c.keywords.some((k) => t.includes(k)))
+    : [];
+  if (fromQuestion.length) return fromQuestion;
+  const ref = referencedId ? blacklistedCapabilityById(referencedId) : null;
+  return ref ? [ref] : [];
 }
 
 export function buildFeatureQaFacts(args: {
   openFeatures: readonly { id: string; label: string }[];
   question: string;
+  /** 本人上一轮刚被黑名单拒绝的条目 id（代码写入的结构化引用；没有则 null） */
+  referencedBlacklistedId?: string | null;
 }): FeatureQaFactBundle {
   return {
     openFeatures: args.openFeatures,
-    blacklisted: selectBlacklistedCapabilities(args.question),
+    blacklisted: selectBlacklistedCapabilities(
+      args.question,
+      args.referencedBlacklistedId
+    ),
     generic: { fastPath: OPTIMIZED_FAST_PATH_NOTE, fullFlow: FULL_FLOW_NOTE },
   };
 }

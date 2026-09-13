@@ -40,10 +40,11 @@ import { generateReplyOnlyReply } from "./reply-only";
  * - **没命中（`none`）不等于拒绝**：落回**完整的 doctrine + 运行时主生成**。那里恢复
  *   了通用的短信联系能力（`turn.ts` 的 `contactPerson`），主生成按当前意图 / 流程判断
  *   是否该替住户联系同屋人。清单外的请求**不得因"不在清单里"自动拒绝**。
- * - **真正办不了只有一个来源**：老板明确登记的**黑名单**（`blacklist.ts`，目前为空）。
- *   它**复用这同一次路由**（黑名单条目也作为可选项用 `blocked:<id>` token 摆给模型），
- *   **只有模型判定住户正在交办该黑名单功能时才拦**——不按关键词、**不加第二次 LLM 调用**；
- *   表为空时路由选项为空、绝不拦。
+ * - **真正办不了只有一个来源**：老板明确登记的**黑名单**（`blacklist.ts`，当前是
+ *   「卫生整改要求」一项）。它**复用这同一次路由**（黑名单条目也作为可选项用
+ *   `blocked:<id>` token 摆给模型），**只有模型判定住户正在交办该黑名单功能时才拦**
+ *   ——不按关键词、**不加第二次 LLM 调用**；表里没有的事项、或经讨论 / 否定 / 引用 /
+ *   提问，都不拦。
  *
  * ## 为什么是"一次路由"，不是"每个功能各判一次"
  *
@@ -155,8 +156,8 @@ function routeSystem(): string {
  * `reply_only` 的值。清单外的词、JSON、带解释的整句……一律不命中。
  *
  * 返回命中的功能（`none` / `reply_only` / 黑名单 / 未知值都是 null）、是否命中保留结果
- * `reply_only`、命中的黑名单条目（空表恒 null），以及这次调用的真实用量。**即使不命中，
- * 用量也要往上交**——那次调用已经花了钱。
+ * `reply_only`、命中的黑名单条目（路由没选 `blocked:<id>` 时为 null），以及这次调用的
+ * 真实用量。**即使不命中，用量也要往上交**——那次调用已经花了钱。
  *
  * **黑名单复用这一次调用**：条目以 `blocked:<id>` token 摆给模型，代码用
  * `blacklistedCapabilityByRouteToken` 精确解析；**没有第二次 LLM 调用**，也**不按关键词**
@@ -198,7 +199,8 @@ export async function routeApprovedFeature(
  * - `reply_only`：保留对话轮——明确围绕某项功能但这一轮不动作，只回当前住户一两句
  *   （`handling.sms` 必为 null）。
  * - `blacklisted`：那一次路由判定住户**正在交办**一项老板明确登记的黑名单功能，用
- *   **纯代码**真话回复、零出站（`handling.sms` 必为 null）。空黑名单时不会出现。
+ *   **纯代码**真话回复、零出站（`handling.sms` 必为 null）。路由没选 `blocked:<id>` 时
+ *   不会出现。
  * - `none`：没命中快路径，落回普通（主生成）对话——**不是拒绝**。
  */
 export type FeatureRunMode = "feature" | "reply_only" | "blacklisted" | "none";
@@ -216,6 +218,12 @@ export type ApprovedFeatureRun = {
   handling: FeatureHandling | null;
   /** 命中功能的 id；路由 `none` / `reply_only` 或失败时为 null */
   featureId: string | null;
+  /**
+   * `mode: "blacklisted"` 时命中的黑名单条目 id（其余模式为 null）。调用方据此把
+   * `{ blacklistedCapabilityId, personId }` 写进这一轮 decision payload——供住户
+   * **紧接着**追问「刚才为什么」时关联到统一事实源里的同一条目。
+   */
+  blacklistedCapabilityId: string | null;
   /** 路由 + 抽取 + 生成（已发生的调用）的合计真实用量 */
   usage: FeatureUsage;
   /** 前门内部失败（用量已计入 `usage`）；调用方据此落回普通对话 */
@@ -232,6 +240,7 @@ export async function runApprovedFeature(
     mode: "none",
     handling: null,
     featureId: null,
+    blacklistedCapabilityId: null,
     usage: addFeatureUsage(usage, usageOfFeatureError(error)),
     error,
   });
@@ -250,8 +259,8 @@ export async function runApprovedFeature(
   }
 
   // 黑名单：那一次路由判定住户**正在交办**一项老板明确登记办不了的功能。**纯代码**
-  // 真话回复、零出站，不回主生成（否则又会绕回同一件事）。空表时 `blacklisted`
-  // 恒 null，这段永远走不到。
+  // 真话回复、零出站，不回主生成（否则又会绕回同一件事）。路由没选 `blocked:<id>`
+  // 时 `blacklisted` 为 null，这段走不到。
   if (blacklisted) {
     return {
       mode: "blacklisted",
@@ -262,6 +271,7 @@ export async function runApprovedFeature(
         decisionId: null,
       },
       featureId: null,
+      blacklistedCapabilityId: blacklisted.id,
       usage,
     };
   }
@@ -281,12 +291,20 @@ export async function runApprovedFeature(
         decisionId: null,
       },
       featureId: null,
+      blacklistedCapabilityId: null,
       usage,
       ...(reply.error ? { error: reply.error } : {}),
     };
   }
 
-  if (!match) return { mode: "none", handling: null, featureId: null, usage };
+  if (!match)
+    return {
+      mode: "none",
+      handling: null,
+      featureId: null,
+      blacklistedCapabilityId: null,
+      usage,
+    };
 
   let extraction: FeatureExtraction;
   try {
@@ -304,5 +322,11 @@ export async function runApprovedFeature(
   }
   usage = addFeatureUsage(usage, execution.usage);
 
-  return { mode: "feature", handling: execution.handling, featureId: match.id, usage };
+  return {
+    mode: "feature",
+    handling: execution.handling,
+    featureId: match.id,
+    blacklistedCapabilityId: null,
+    usage,
+  };
 }
