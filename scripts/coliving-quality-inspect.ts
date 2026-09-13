@@ -26,10 +26,12 @@ import {
 import {
   buildGeneratorSystemMessages,
   claimsContactCompletion,
+  claimsUnsentThirdPartyContact,
   checkProcessNarration,
   extractExplicitFixedStart,
   extractPreferredStart,
   extractSlotFromInquiry,
+  finalizeFeatureTurn,
   hasDeferredCoordination,
   isLowInformationFollowUp,
   isOpenConflictCase,
@@ -42,30 +44,74 @@ import {
   uncoveredBlockedPersonIds,
   scheduleInquiryConfirmation,
   TRUTHFUL_UNSENT_REPLY,
+  type FeatureFinalizeDeps,
 } from "../lib/chat/coliving/turn";
-// 严格口径后保留的两项受约束第三方出站：只测其确定性解析/固定文本/收据，
-// 不涉及任何模型调用，也不触发任何写入。
+// 已开放的两项受约束第三方出站：**功能是代码里写死的清单，功能不是工具**。
+// 主生成的工具表里既没有短信工具、也没有功能工具；`features.ts` 的功能前门在
+// `buildContext` 之后、主生成之前对照清单，用**一次内部白名单路由调用**判「是不是明确
+// 交办清单里的某一项」（不是每个功能各判一次、不新增 tool schema），命中才让**被选中
+// 那一个功能**抽取本功能获准字段写正文——生成阶段看不到原始混合请求——再由纯代码的
+// `sms-delivery.ts` 绑定原话点名且唯一的收件人并落库。各功能各写各的朴素模块
+// （`night-laundry-reminder.ts` / `personal-item-reminder.ts`），不强行抽象。
+// 这里不调真实模型（用注入的 mock `FeatureLlm`）、不写库；正文质量仍然证明不了
+// （见 docs/USER_FACING_CAPABILITY_TRUTH.md）。
 import {
-  deliverPersonalItemReminder,
-  hasPersonalItemAskSignal,
-  looksLikeApproximatePersonalItemAsk,
-  looksLikePersonalItemReminder,
-  PERSONAL_ITEM_REMINDER_FORM,
-  PERSONAL_ITEM_REMINDER_TEXT,
-  personalItemReminderReceipt,
-  recognizePersonalItemReminder,
-} from "../lib/chat/coliving/personal-item-reminder";
+  APPROVED_FEATURES,
+  FEATURE_ROUTE_NAME,
+  FEATURE_ROUTE_NONE,
+  FEATURE_ROUTE_REPLY_ONLY,
+  FEATURE_ROUTE_UNSUPPORTED,
+  FEATURE_ROUTE_STAGE,
+  routeApprovedFeature,
+  runApprovedFeature,
+} from "../lib/chat/coliving/features";
 import {
-  deliverNightLaundryReminder,
-  hasNightLaundryAskSignal,
-  looksLikeApproximateNightLaundryAsk,
-  looksLikeNightLaundryReminder,
-  NIGHT_LAUNDRY_REMINDER_FORM,
-  NIGHT_LAUNDRY_REMINDER_TEXT,
-  nightLaundryReminderReceipt,
-  recognizeNightLaundryReminder,
+  EMPTY_FEATURE_USAGE,
+  FeatureCallError,
+  FEATURE_MIN_OUTPUT_TOKENS,
+  featureErrorDiagnostics,
+  FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS,
+  FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
+  FEATURE_ROUTE_MAX_OUTPUT_TOKENS,
+  structuredCall,
+  usageOfFeatureError,
+  type FeatureCallBase,
+  type FeatureLlm,
+  type FeatureUsage,
+} from "../lib/chat/coliving/feature-llm";
+import {
+  REPLY_ONLY_FALLBACK,
+  REPLY_ONLY_NAME,
+  REPLY_ONLY_STAGE,
+} from "../lib/chat/coliving/reply-only";
+import {
+  UNSUPPORTED_FALLBACK,
+  UNSUPPORTED_NAME,
+  UNSUPPORTED_STAGE,
+} from "../lib/chat/coliving/unsupported";
+import type {
+  FeatureContext,
+  FeatureDeps,
+  FeatureHandling,
+} from "../lib/chat/coliving/feature-types";
+import {
+  AMBIGUOUS_SMS_RECIPIENT_REPLY,
+  deliverSms,
+  resolveNamedRecipient,
+  smsRecipientIneligibleReply,
+  type SmsDeliveryDeps,
+} from "../lib/chat/coliving/sms-delivery";
+import {
+  NIGHT_LAUNDRY_FEATURE_ID,
+  nightLaundryExtractionSchema,
+  nightLaundryFallbackReceipt,
 } from "../lib/chat/coliving/night-laundry-reminder";
-import { type ReminderExecutionDeps } from "../lib/chat/coliving/reminder-execution";
+import {
+  PERSONAL_ITEM_FEATURE_ID,
+  personalItemExtractionSchema,
+  personalItemFallbackReceipt,
+} from "../lib/chat/coliving/personal-item-reminder";
+import { NoOutputGeneratedError } from "ai";
 // 只留离线视图选择器：生产已只生成，quality 脚本不再断言批判器生产接线/选型。
 import { selectCriticRubric } from "../lib/chat/coliving/critic";
 import {
@@ -138,7 +184,7 @@ import {
 } from "../lib/chat/coliving/evals/action-plan-samples";
 
 const TOOL_DECL_NAMES = [
-  "sendReply", "decide", "logEvent", "contactPerson", "proposeRule",
+  "sendReply", "decide", "logEvent", "proposeRule",
   "recordStance", "notePartyAffected", "pickSchedule", "chooseSchedule",
   "recordShare", "scheduleReminder", "recordPosition", "addResident",
   "confirmRoster", "renamePerson", "remember", "closeCase", "noteObservation",
@@ -762,6 +808,40 @@ async function main() {
     // 相反方向（对方对我说）不算"我联系了对方"，排除在我的消息之外。
     assert.equal(claimsContactCompletion("小浩跟我说了这件事。"), false);
     assert.equal(claimsContactCompletion("他昨天跟我说了。"), false);
+
+    // 029 真实事故：普通轮零出站，模型回复「已经跟阿杰说了」——**没有主语**，旧判定
+    // （只抓第一人称）整条漏过，replyReview 标红却仍把谎话发出去。收窄替换必须抓住它，
+    // 同时不误伤「我正在跟你说话」这类冲当前说话人的句子与反方向事实。
+    assert.equal(
+      claimsUnsentThirdPartyContact("已经跟阿杰说了。声音要是还大，你跟我说一声。"),
+      true,
+      "无主语完成式「已经跟阿杰说了」必须判为假完成"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("跟小浩说了，在等他回话。"),
+      true,
+      "无主语完成式「跟小浩说了」必须判为假完成"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("阿杰跟我说了这件事。"),
+      false,
+      "反方向事实（对方跟我说）不得误伤"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("我已经跟你说过了，我没办法直接联系他。"),
+      false,
+      "冲当前说话人的「我已经跟你说过了」不得误伤"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("好，那这一轮我先不动，你想好要不要说再跟我讲。"),
+      false,
+      "正常讨论 / 保留轮不得误伤"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("我回头跟他说一声，看他愿不愿意。"),
+      false,
+      "将来时（回头跟他说）不是假完成，不得误伤"
+    );
   });
   check("explicit fixed-start wording is recovered from recorded facts", () => {
     assert.equal(extractExplicitFixedStart("我18点到家，只能18点开始做饭，要做两小时"), 1080);
@@ -1211,15 +1291,31 @@ async function main() {
       turnSrc.includes("claimsUnsentThirdPartyContact(reply)"),
       "普通回复的假完成真相保护必须保留"
     );
-    assert(turnSrc.includes("TRUTHFUL_UNSENT_REPLY"), "假完成必须替换成真话未发送说明");
-    // 泛化文字必须如实覆盖两项功能，不得再退回「只有个人物品提醒这一种」的
-    // 旧措辞（否则会把已开放的夜间洗衣提醒也说成做不到），且必须说没发。
+    // 029：无主语完成式（「已经跟阿杰说了」）也必须被替换，不能只把 replyReview 标红。
+    // 判定复用 checkFalseContactClaim 同源的 claimsContactCompletion，不另造大正则。
     assert(
-      TRUTHFUL_UNSENT_REPLY.includes("个人物品") &&
-        TRUTHFUL_UNSENT_REPLY.includes("夜间洗衣") &&
-        /没(?:有)?(?:把|发)/.test(TRUTHFUL_UNSENT_REPLY) &&
-        !TRUTHFUL_UNSENT_REPLY.includes("这一种"),
-      `未发送说明必须如实泛化到两项功能：${TRUTHFUL_UNSENT_REPLY}`
+      turnSrc.includes("return claimsContactCompletion(clause)"),
+      "无主语完成式必须复用 claimsContactCompletion（不另造一套大正则）"
+    );
+    // unsupported 保留轮的正文也必须过同一道真相闸再收尾（模型万一仍写「已经跟他说了」）。
+    assert(
+      turnSrc.includes("claimsUnsentThirdPartyContact(featureRun.handling.reply)"),
+      "unsupported 保留轮必须复用同一条假完成真相闸"
+    );
+    // 替换必须先于 checkFactFidelity 复核：换掉的那句真话要重新核对，而不是只标红。
+    assert(
+      turnSrc.indexOf("reply = TRUTHFUL_UNSENT_REPLY") <
+        turnSrc.indexOf("const factFidelityHit = checkFactFidelity(reply)"),
+      "假完成替换必须先于事实核对，替换后的真话要重新过一遍"
+    );
+    assert(turnSrc.includes("TRUTHFUL_UNSENT_REPLY"), "假完成必须替换成真话未发送说明");
+    // 泛化文字必须只说「没发出去」这一件事，**不列内部能力清单**——老板明确
+    // 不要「我只能做……」这种把能力边界念给住户听的措辞。两项受约束功能各有
+    // 自己的真话收据，不靠这句概括。
+    assert(
+      /没(?:有)?(?:把|发|替)/.test(TRUTHFUL_UNSENT_REPLY) &&
+        !/(?:只能|白名单|能力范围|未开放)/.test(TRUTHFUL_UNSENT_REPLY),
+      `未发送说明必须只说没发出去、不列能力边界：${TRUTHFUL_UNSENT_REPLY}`
     );
     assert(
       !/contactPerson:\s*tool\(/.test(turnSrc),
@@ -1515,13 +1611,27 @@ async function main() {
     // 瘦身前 ~7294；压缩后 ~5500。上限取 6000，锁住"又写长了"的回弹，又不卡死合理微调。
     assert(literals < 6000, `工具声明区字面量 ${literals} 超过护栏 6000，疑似描述又膨胀`);
   });
-  check("运行时上下文不再预先宣传默认未暴露的查询工具", () => {
+  check("运行时上下文不再预先宣传任何能力清单（边界由代码硬控）", () => {
     const ctx = readFileSync("lib/chat/coliving/context.ts", "utf8");
     assert(!ctx.includes("你还能查什么"), "查询工具默认不暴露后，上下文不应再宣传它们");
-    // 严格口径后不再有泛用主动联系人；上下文只保留两项受约束功能。
     assert(!ctx.includes("你可以主动联系这屋里的其他人"), "撤掉泛用主动联系人后不得再宣传它");
-    assert(ctx.includes("个人物品使用提醒"), "个人物品提醒必须在上下文里如实陈述");
-    assert(ctx.includes("夜间洗衣提醒"), "夜间洗衣提醒必须在上下文里如实陈述");
+    // 老板 2026-09-13 定稿：**不再每轮**把「能替住户发哪两件事、哪些发不出去」写进
+    // 上下文（那是被否决的 token 浪费 + 污染不相关对话）。能力边界由 `features.ts`
+    // 的功能前门硬控；住户明确问到时按准则如实说明即可。
+    assert(
+      !ctx.includes("使用我的个人物品前先问我"),
+      "上下文不得再每轮宣传个人物品功能（能力清单已撤出上下文）"
+    );
+    assert(
+      !ctx.includes("深夜别用洗衣机或烘干机"),
+      "上下文不得再每轮宣传夜间洗衣功能（能力清单已撤出上下文）"
+    );
+    assert(
+      !/你才有一个工具|sendRoommateMessage|那个共享短信工具/.test(ctx),
+      "上下文不得再提那个已被删除的共享短信工具"
+    );
+    // 渠道事实必须保留（短信格式、唯一实时渠道）。
+    assert(ctx.includes("短信（SMS）"), "短信渠道事实必须保留在上下文里");
   });
   check("stale-skipped contactPerson outbound does not count as contacted in judge trace", () => {
     // 旧回合跳过的消息不能出现在 outbound 里；judge 不会看到"已联系"
@@ -1552,1256 +1662,1540 @@ async function main() {
     assert.equal(scheduleInquiryConfirmation({ inquiryBody: "你用 17:30-18:00，愿意吗？", responseBody: "不行" }), null);
   });
 
+    /**
   /**
-   * ── 唯一保留的受约束第三方出站：个人物品使用提醒（2026-09-12 严格口径）──
+   * ── 已批准的两项受约束第三方出站：个人物品使用提醒 / 夜间洗衣提醒 ──────────
    *
-   * 泛用 contactPerson 与 outreach / kickoff / cron / enroll 的自由文本出站都已
-   * 撤掉，只剩这一条：识别纯正则、正文写死常量、不过模型。这里只测确定性的
-   * 解析与固定文本，不写库、不调模型、不触发任何投递。
+   * 老板 2026-09-13 定稿：任务能力是**一批功能的集合**，功能是老板批准的**最小产品
+   * 单位**，各功能各写各的朴素代码、允许重复、不强行抽象。**功能不是工具**：
+   *   · 主生成的工具表里没有短信工具、也没有功能工具（`turn.ts` 里没有
+   *     `sendRoommateMessage`，`TOOL_DECL_NAMES` 里也没有）；
+   *   · 功能识别是 `features.ts` 里**一次内部白名单路由调用**：路由器只能在代码清单
+   *     `APPROVED_FEATURES` 的 id 里选一个或 none，不是给主模型的 tool，也不新增
+   *     tool schema；**不是每个功能各调一次 judge**（清单长大时不能变成 N 次调用）；
+   *   · 命中后只调**被选中那一个功能**的 `extract`（抽取本功能获准字段）与 `compose`；
+   *   · 命中轮在 `buildContext` 之后、主生成之前直接办完并返回，`toolsUsed` 为空、
+   *     不进主生成；清单外 / 零命中 / 同时交办两个都不执行、零出站。
+   *
+   * 数据流（关键：**生成阶段看不到原始混合请求**）：
+   *   住户原话 → 一次路由（白名单选一个 id 或 none；即使 none 也计真实用量）
+   *            → 命中功能 `extract`（只抽取本功能获准字段）
+   *            → 代码绑定收件人 `resolveNamedRecipient`（原话点名且唯一）
+   *            → 模型只拿收窄字段写正文与短回执（该功能 `compose`）
+   *            → 纯代码 `deliverSms` 落库投递。
+   *   **路由 + 抽取 + 生成三段真实用量一路并进 `TurnUsage`**，未命中 / 失败也不丢。
+   *
+   * 这一整段**不调真实模型**（注入 mock `FeatureLlm`）、**不写库**（注入假 repo）。
+   * **机械断言只能证明结构**（发给谁、有没有出站、字段有没有收窄、正文是不是模型
+   * 生成的那句），**证明不了语气是否自然、是否得体**——语气留给 semantic judge 与
+   * 人工逐轮阅读，见 `docs/USER_FACING_CAPABILITY_TRUTH.md`。
    */
-  check("个人物品提醒：精确命令识别出唯一收件人（含礼貌前缀变体）", () => {
-    assert.deepEqual(
-      recognizePersonalItemReminder("提醒 阿川：使用我的个人物品前先问我"),
-      { recipientName: "阿川" }
-    );
-    // 允许标点与礼貌前缀的细微变体
-    assert.deepEqual(
-      recognizePersonalItemReminder("麻烦提醒一下 阿川：用我的东西之前先问我。"),
-      { recipientName: "阿川" }
-    );
-    // 宽松线索命中：这是这一族功能的请求（形式不合规时调用方回短指引、绝不外发）
-    assert.equal(
-      looksLikePersonalItemReminder("提醒 阿川：使用我的个人物品前先问我"),
-      true
-    );
+  type GateMember = FeatureContext["members"][number];
+  const gateMember = (
+    personId: string,
+    name: string,
+    over: Partial<GateMember> = {}
+  ): GateMember => ({
+    personId,
+    name,
+    role: "tenant",
+    resides: true,
+    movedInAt: null,
+    nameConfirmed: true,
+    address: "+15550000001",
+    notes: [],
+    ...over,
   });
-  check("个人物品提醒：命令体夹带附加内容（头发/费用/规则等）一律不识别", () => {
-    for (const smuggled of [
-      "提醒 阿川：使用我的个人物品前先问我，顺便把地漏的头发清理了",
-      "提醒 阿川：使用我的个人物品前先问我，这个月水费也分摊一下",
-      "提醒 阿川：使用我的个人物品前先问我，以后这是全屋的规矩",
-      "提醒 阿川：使用我的个人物品前先问我，别再用我的洗衣机",
-    ]) {
-      assert.equal(
-        recognizePersonalItemReminder(smuggled),
-        null,
-        `命令体夹带附加内容必须不识别：${smuggled}`
-      );
-    }
-  });
-  check("个人物品提醒：错误对象/格式一律不识别", () => {
-    for (const wrong of [
-      // 对象不是「我的个人物品」：洗衣机 / 深夜安静 / 清理头发
-      "提醒 阿川：用我的洗衣机之前先问我",
-      "提醒 阿川：晚上十一点后不要用洗衣机",
-      "提醒 阿川：把地漏里的头发清理一下",
-      // 格式不对：缺收件人分隔符 / 缺「提醒」前缀 / 收件人为空
-      "提醒阿川使用我的个人物品前先问我",
-      "阿川：使用我的个人物品前先问我",
-      "提醒 ：使用我的个人物品前先问我",
-    ]) {
-      assert.equal(
-        recognizePersonalItemReminder(wrong),
-        null,
-        `错误对象/格式必须不识别：${wrong}`
-      );
-    }
-  });
-  check("个人物品提醒：固定第三方正文不含收件人名字或任何夹带内容", () => {
-    // 收件人文案是写死的常量，不含来源、用户原话、物品名、理由或额外要求。
-    assert.equal(
-      PERSONAL_ITEM_REMINDER_TEXT,
-      "使用室友的个人物品前，请先征得对方同意。"
-    );
-    for (const forbidden of ["阿川", "小禾", "地漏", "头发", "费用", "规则", "提醒"]) {
-      assert(
-        !PERSONAL_ITEM_REMINDER_TEXT.includes(forbidden),
-        `固定第三方正文不得含「${forbidden}」：${PERSONAL_ITEM_REMINDER_TEXT}`
-      );
-    }
-    // 给住户的指引用占位符，不把模板读成"必须提醒某个真实姓名的人"。
-    assert.equal(
-      PERSONAL_ITEM_REMINDER_FORM,
-      "提醒 <室友名字>：使用我的个人物品前先问我"
-    );
-    // 回给发起人的收据是固定真话：只说做成了什么，不复述内部过程。
-    const receipt = personalItemReminderReceipt("阿川");
-    assert(receipt.includes("阿川") && receipt.includes("个人物品") && receipt.includes("先问你"),
-      `收据必须点名收件人并复述固定功能：${receipt}`);
-  });
-  check("个人物品提醒：可回放场景 JSON 结构自洽（无模型确定性路径）", () => {
-    // 这条场景是「具体功能逐项开放」后唯一受约束第三方出站的可回放证据：
-    // 只查结构（谁能收到、正文是不是常量、回执是不是固定真话、有没有额外第三方），
-    // 不跑模型、不写库，也不证明正文读起来自然——那留给人工与语义判定。
-    const raw = JSON.parse(
-      readFileSync(
-        "lib/chat/coliving/evals/scenarios/personal-item-reminder-2026-09-12.json",
-        "utf8"
-      )
-    );
-    const scenario = validateScenario(
-      raw,
-      "personal-item-reminder-2026-09-12.json"
-    );
-    // 两个同屋测试住户：发信人小禾、被提醒人阿川（只有两人，天然排除第三方）。
-    assert.deepEqual(
-      scenario.people?.map((p) => p.name),
-      ["小禾", "阿川"],
-      "场景只应有两个同屋住户"
-    );
-    assert.equal(scenario.turns.length, 1, "只应有一条精确命令");
-    const turn = scenario.turns[0];
-    // 当前人发的这句话必须被确定性识别器认成「提醒阿川」——认不出就走不到无模型路径。
-    assert.deepEqual(
-      recognizePersonalItemReminder(turn.text),
-      { recipientName: "阿川" },
-      `场景命令必须被确定性识别为提醒阿川：${turn.text}`
-    );
-    const expect = scenario.expect ?? {};
-    // 无模型路径：不得要求 contactPerson；命中 personalItemReminder 这条代码路径。
-    assert.deepEqual(
-      expect.mustUseTools,
-      ["personalItemReminder"],
-      "无模型路径必须命中 personalItemReminder"
-    );
-    assert.deepEqual(expect.mustNotUseTools, ["contactPerson"], "不得要求 contactPerson");
-    assert.deepEqual(expect.mustContactNames, ["阿川"], "必须有一条通过审稿的出站发给阿川");
-    assert.deepEqual(expect.mustNotContactNames, ["小禾"], "不得产生发给当前人小禾的第三方出站");
-    // 出站正文必须逐字等于模块常量（用常量构造锚定正则，场景写漂就会红）。
-    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const exactBody = `^${escapeRegExp(PERSONAL_ITEM_REMINDER_TEXT)}$`;
-    assert.deepEqual(
-      expect.outboundMustMatch,
-      [exactBody],
-      "出站正文锚定正则必须逐字来自 PERSONAL_ITEM_REMINDER_TEXT"
-    );
-    assert(new RegExp(exactBody).test(PERSONAL_ITEM_REMINDER_TEXT));
-    // 回给当前人的收据是固定真话（每条 replyMustMatch 都要命中 personalItemReminderReceipt）。
-    const receipt = personalItemReminderReceipt("阿川");
-    assert((expect.replyMustMatch ?? []).length > 0, "必须断言回给当前人的收据");
-    for (const p of expect.replyMustMatch ?? []) {
-      assert(new RegExp(p).test(receipt), `收据断言必须命中固定收据：${p} → ${receipt}`);
-    }
-    // 无模型路径的正确结果：一条发给阿川的固定正文出站 + 一句固定收据 → 场景 expect 全过。
-    assert.deepEqual(
-      evaluateTurnExpectation(expect, {
-        toolsUsed: ["personalItemReminder"],
-        reply: receipt,
-        outbound: [{ toName: "阿川", text: PERSONAL_ITEM_REMINDER_TEXT, blocked: false }],
-      }),
-      [],
-      "确定性路径的实际结果必须通过场景 expect"
-    );
-    // 反向：把出站发给当前人小禾（越权/额外第三方）、或正文被夹带改动 → 必须红灯。
-    assert(
-      evaluateTurnExpectation(expect, {
-        toolsUsed: ["personalItemReminder"],
-        reply: receipt,
-        outbound: [{ toName: "小禾", text: PERSONAL_ITEM_REMINDER_TEXT, blocked: false }],
-      }).length > 0,
-      "出站发给当前人小禾必须判失败"
-    );
-    assert(
-      evaluateTurnExpectation(expect, {
-        toolsUsed: ["personalItemReminder"],
-        reply: receipt,
-        outbound: [
-          { toName: "阿川", text: `${PERSONAL_ITEM_REMINDER_TEXT}顺便把地漏头发清了`, blocked: false },
-        ],
-      }).length > 0,
-      "出站正文被夹带、不再逐字等于常量必须判失败"
-    );
-  });
-  check("严格口径源码闸：activeTools 无 contactPerson、无 forced-contact 调用、outreach 不生成不入队", () => {
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    // 剥掉注释后再查，只认真正的运行调用/接线，注释里解释历史不算残留。
-    const turnCode = turnSrc
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "");
-    assert(!turnCode.includes("contactPerson"), "生产代码不得再出现泛用 contactPerson（注释除外）");
-    assert(!turnCode.includes("forced-contact"), "不得残留任何 forced-contact 运行调用");
-    assert(!/contactPerson:\s*tool\(/.test(turnSrc), "生产不得再定义泛用 contactPerson 工具");
-    assert(!turnSrc.includes("activeTools.contactPerson"), "activeTools 不得再挂 contactPerson");
-
-    const outreachSrc = readFileSync("lib/chat/coliving/outreach.ts", "utf8");
-    const outreachCode = outreachSrc
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "");
-    assert(!outreachCode.includes("generateText"), "outreach.ts 不得再有生成调用");
-    assert(!outreachCode.includes("queueCommunication"), "outreach.ts 不得再入队任何消息");
-  });
-  check("corpus-033 严格口径：只有合规个人物品提醒出站，其余一律零第三方", () => {
-    const raw = JSON.parse(
-      readFileSync(
-        "lib/chat/coliving/evals/scenarios/corpus-033-personal-item-reminder-2026-09-12.json",
-        "utf8"
-      )
-    );
-    const scenario = validateScenario(raw, "corpus-033.json");
-    assert.equal(scenario.turns.length, 4, "corpus-033 应有四轮：合规/夹带/深夜洗衣/浴室头发");
-
-    // 第 1 轮：合规命令 → 唯一固定出站 + 真话收据。
-    const t1 = scenario.turns[0];
-    assert.deepEqual(t1.expect?.mustUseTools, ["personalItemReminder"]);
-    assert.deepEqual(t1.expect?.mustContactNames, ["阿川"]);
-    assert.deepEqual(t1.expect?.mustNotContactNames, ["小禾"]);
-    assert.equal(
-      recognizePersonalItemReminder(t1.text)?.recipientName,
-      "阿川",
-      "第 1 轮必须能被确定性识别为发给阿川的个人物品提醒"
-    );
-    // 场景里的出站正向哨兵必须真的命中写死的固定正文——把离线断言和常量绑在一起，
-    // 常量一改，这条哨兵立刻失效报警，不会静静漂移。
-    for (const pattern of t1.expect?.outboundMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(PERSONAL_ITEM_REMINDER_TEXT),
-        `第 1 轮正向哨兵「${pattern}」必须命中固定正文：${PERSONAL_ITEM_REMINDER_TEXT}`
-      );
-    }
-    // 反向哨兵（不得含收件人姓名或夹带内容）必须被固定正文通过。
-    for (const pattern of t1.expect?.outboundMustNotMatch ?? []) {
-      assert(
-        !new RegExp(pattern).test(PERSONAL_ITEM_REMINDER_TEXT),
-        `固定正文不得命中第 1 轮反向哨兵「${pattern}」`
-      );
-    }
-    // 回给发起人的收据必须点名收件人并复述固定功能。
-    const receipt = personalItemReminderReceipt("阿川");
-    for (const pattern of t1.expect?.replyMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(receipt),
-        `第 1 轮收据必须命中「${pattern}」：${receipt}`
-      );
-    }
-
-    // 第 2 轮：命令体夹带 → 识别整体失败（走短指引），零第三方出站。
-    const t2 = scenario.turns[1];
-    assert(
-      looksLikePersonalItemReminder(t2.text),
-      "第 2 轮带着「提醒」与「我的个人物品」，仍属这一族请求"
-    );
-    assert.equal(
-      recognizePersonalItemReminder(t2.text),
-      null,
-      "夹带头发/水费/全屋规矩的命令体必须整体不识别"
-    );
-    assert.deepEqual(t2.expect?.mustContactNames, undefined);
-    assert.deepEqual(t2.expect?.mustNotContactNames, ["阿川", "小禾"]);
-    assert(
-      (t2.expect?.mustNotUseTools ?? []).includes("personalItemReminder") &&
-        (t2.expect?.mustNotUseTools ?? []).includes("contactPerson"),
-      "夹带轮不得走任何第三方出站工具"
-    );
-    // `PERSONAL_ITEM_REMINDER_FORM` 只为兼容既有断言保留，**不再出现在任何发给
-    // 住户的消息里**（老板已驳回「只支持这一种说法」的模板指引）。这里只锁它
-    // 还是那句带占位符的旧句式，真正的用户可见文案由下面的行为测试覆盖。
-    assert(PERSONAL_ITEM_REMINDER_FORM.includes("个人物品"));
-
-    // 第 3 轮：深夜洗衣的合规自然请求（不是窄命令形态）→ 直接走夜间洗衣的
-    // 受约束执行器，恰好一条固定出站 + 真话收据，不需要二次确认。
-    const t3 = scenario.turns[2];
-    assert.equal(
-      looksLikePersonalItemReminder(t3.text),
-      false,
-      "第 3 轮不是个人物品提醒，不得被个人物品模块收口"
-    );
-    assert.equal(
-      looksLikeNightLaundryReminder(t3.text),
-      false,
-      "第 3 轮不是窄命令形态，走的是合规自然请求入口"
-    );
-    assert(
-      looksLikeApproximateNightLaundryAsk(t3.text, ["阿川"]),
-      "第 3 轮必须被夜间洗衣的合规自然请求判定命中"
-    );
-    assert.deepEqual(t3.expect?.mustUseTools, ["nightLaundryReminder"]);
-    assert.deepEqual(t3.expect?.mustContactNames, ["阿川"]);
-    assert.deepEqual(t3.expect?.mustNotContactNames, ["小禾"]);
-    for (const pattern of t3.expect?.outboundMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
-        `第 3 轮正向哨兵「${pattern}」必须命中固定正文：${NIGHT_LAUNDRY_REMINDER_TEXT}`
-      );
-    }
-
-    // 第 4 轮：浴室头发 → 零第三方出站，落回普通对话。
-    const t4 = scenario.turns[3];
-    assert.equal(
-      looksLikePersonalItemReminder(t4.text),
-      false,
-      "第 4 轮不是个人物品提醒，必须落回普通对话"
-    );
-    assert.equal(
-      looksLikeNightLaundryReminder(t4.text),
-      false,
-      "第 4 轮不是夜间洗衣提醒的窄命令形态，必须落回普通对话"
-    );
-    assert.deepEqual(
-      t4.expect?.mustNotContactNames,
-      ["阿川", "小禾"],
-      "第 4 轮不得产生任何第三方出站"
-    );
-    assert(
-      (t4.expect?.mustNotUseTools ?? []).includes("contactPerson") &&
-        (t4.expect?.mustNotUseTools ?? []).includes("personalItemReminder"),
-      "第 4 轮不得调用任何第三方出站工具"
-    );
-
-    // 判法自检：固定正文作为唯一出站时，第 1 轮应判过；同一条哨兵也能抓住
-    // "把收件人姓名写进第三方正文" 这种泄漏。
-    assert.deepEqual(
-      evaluateTurnExpectation(t1.expect, {
-        toolsUsed: ["personalItemReminder"],
-        reply: receipt,
-        outbound: [{ toName: "阿川", text: PERSONAL_ITEM_REMINDER_TEXT }],
-      }),
-      [],
-      "合规个人物品提醒出站不该被判失败"
-    );
-    assert(
-      evaluateTurnExpectation(t1.expect, {
-        toolsUsed: ["personalItemReminder"],
-        reply: receipt,
-        outbound: [
-          { toName: "阿川", text: `${PERSONAL_ITEM_REMINDER_TEXT}阿川` },
-        ],
-      }).length > 0,
-      "第三方正文里出现收件人姓名必须被哨兵抓住"
-    );
-    assert(
-      evaluateTurnExpectation(t4.expect, {
-        toolsUsed: [],
-        reply: "好的。",
-        outbound: [{ toName: "阿川", text: "已经跟他说了。" }],
-      }).length > 0,
-      "未开放功能若产生任何第三方出站，必须判失败"
-    );
-  });
+  const GATE_SENDER = "11111111-0000-0000-0000-000000000001";
+  const GATE_ACHUAN = "22222222-0000-0000-0000-000000000002";
+  const GATE_XIAOMEI = "33333333-0000-0000-0000-000000000003";
+  const GATE_HOUSE = "aaaaaaaa-0000-0000-0000-000000000000";
+  const gateMembers: GateMember[] = [
+    gateMember(GATE_SENDER, "小禾"),
+    gateMember(GATE_ACHUAN, "阿川"),
+  ];
+  /** 一组「合规代表正文」：证明契约是**结构地板**，不是写死某一句模型没义务逐字产出的话。 */
+  const NIGHT_BODY =
+    "阿川，深夜开洗衣机或烘干机的声音会吵到休息，麻烦你尽量避开深夜时段，谢谢。";
+  const ITEM_BODY =
+    "阿川，我的个人物品有时候我自己也要用，你用之前先跟我说一声，方便我安排，谢谢。";
+  /** 老板指定的 034 混合请求：夹带头发 / 水费 / 全屋规矩，只有夜间洗衣那一件获准。 */
+  const MIXED_REQUEST =
+    "提醒 阿川：深夜别开洗衣机或烘干机，顺便把地漏的头发清理了，这个月水费也分摊一下，以后这条全屋都得守";
 
   /**
-   * ── 第二项受约束第三方出站：夜间洗衣提醒（2026-09-12 老板列为首批方向）──
-   *
-   * 跟个人物品提醒同构：识别纯正则、正文写死常量、不过模型。这里只测确定性
-   * 解析与固定文本，不写库、不调模型、不触发任何投递。它只处理「深夜运行
-   * 洗衣机/烘干机影响别人休息」这一件共同影响，**不要求 AI 先裁定谁的卫生
-   * 阈值或物品所有权**，也不能外推到一般噪音、卫生整改、规则制定、费用分摊
-   * 或去留协调。
+   * 脚本化 mock `FeatureLlm`：只返回模型会返回的**原始文本**（按调用 name 预置），
+   * 真实的裸 token 精确解析 / JSON 提取 + `safeParse` 由生产代码照跑——mock 不替代
+   * 解析，只替代模型本身。可另给每个 name 一份假用量用于验证累计口径。预置值是
+   * `Error` 时就抛出它——用来验证「失败的调用也把已发生用量带回来」。
+   * **不调模型、不花钱**，但能见证功能模块到底把什么喂给了「生成」这一步。
    */
-  check("夜间洗衣提醒：精确命令识别出唯一收件人（含礼貌/标点变体）", () => {
-    assert.deepEqual(
-      recognizeNightLaundryReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
-      { recipientName: "阿川" }
-    );
-    for (const variant of [
-      "麻烦提醒一下 阿川：晚上不要用洗衣机。",
-      "请提醒 阿川：别在深夜开洗衣机或烘干机",
-      "帮我提醒 阿川：半夜别再洗衣服了",
-      "提醒 阿川：深夜不要开洗衣机、烘干机，谢谢",
-    ]) {
-      assert.deepEqual(
-        recognizeNightLaundryReminder(variant),
-        { recipientName: "阿川" },
-        `合规变体必须识别：${variant}`
-      );
-    }
-    assert.equal(
-      looksLikeNightLaundryReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
-      true
-    );
-  });
-  check("夜间洗衣提醒：命令体夹带附加内容（头发/费用/规则/攻击）一律不识别", () => {
-    for (const smuggled of [
-      "提醒 阿川：深夜别开洗衣机或烘干机，顺便把地漏的头发清理了",
-      "提醒 阿川：深夜别开洗衣机或烘干机，这个月水费也分摊一下",
-      "提醒 阿川：深夜别开洗衣机或烘干机，以后这是全屋的规矩",
-      "提醒 阿川：深夜别开洗衣机或烘干机，你个秃头再吵我投诉你",
-      "提醒 阿川：深夜别开洗衣机或烘干机，顺便把厨房也擦一遍",
-    ]) {
-      assert.equal(
-        recognizeNightLaundryReminder(smuggled),
-        null,
-        `命令体夹带附加内容必须不识别：${smuggled}`
-      );
-      // 仍属这一族请求 → 调用方回短指引、零第三方出站（不是落回普通对话后放行自由出站）。
-      assert.equal(
-        looksLikeNightLaundryReminder(smuggled),
-        true,
-        `夹带尝试仍属夜间洗衣提醒一族：${smuggled}`
-      );
-    }
-    // 具体钟点不在窄命令形态内（固定正文里也不许出现钟点），同样只回指引、不发。
-    assert.equal(
-      recognizeNightLaundryReminder("提醒 阿川：晚上十一点后不要用洗衣机"),
-      null
-    );
-    assert.equal(
-      looksLikeNightLaundryReminder("提醒 阿川：晚上十一点后不要用洗衣机"),
-      true
-    );
-  });
-  check("夜间洗衣提醒：错误对象/格式不识别，且与个人物品提醒互不串台", () => {
-    for (const wrong of [
-      "提醒 阿川：把地漏里的头发清理一下",
-      "提醒 阿川：使用我的个人物品前先问我",
-      "提醒阿川深夜别开洗衣机",
-      "阿川：深夜别开洗衣机",
-      "提醒 ：深夜别开洗衣机",
-      "深夜别开洗衣机或烘干机",
-    ]) {
-      assert.equal(
-        recognizeNightLaundryReminder(wrong),
-        null,
-        `错误对象/格式必须不识别：${wrong}`
-      );
-    }
-    // 两项功能互不识别对方的命令与宽松线索（新增第二项不得让第一项回退出错）。
-    assert.deepEqual(
-      recognizePersonalItemReminder("提醒 阿川：使用我的个人物品前先问我"),
-      { recipientName: "阿川" }
-    );
-    assert.equal(
-      recognizeNightLaundryReminder("提醒 阿川：使用我的个人物品前先问我"),
-      null
-    );
-    assert.equal(
-      recognizePersonalItemReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
-      null
-    );
-    assert.equal(
-      looksLikeNightLaundryReminder("提醒 阿川：使用我的个人物品前先问我"),
-      false
-    );
-    assert.equal(
-      looksLikePersonalItemReminder("提醒 阿川：深夜别开洗衣机或烘干机"),
-      false
-    );
-  });
-  check("夜间洗衣提醒：固定第三方正文不含姓名、来源、具体钟点或夹带内容", () => {
-    assert.equal(
-      NIGHT_LAUNDRY_REMINDER_TEXT,
-      "深夜使用洗衣机或烘干机容易影响他人休息，请尽量避开深夜时段。"
-    );
-    for (const forbidden of [
-      "阿川", "小禾", "头发", "地漏", "水费", "费用", "规矩", "规则",
-      "全屋", "凌晨", "四点", "点钟",
-    ]) {
-      assert(
-        !NIGHT_LAUNDRY_REMINDER_TEXT.includes(forbidden),
-        `固定第三方正文不得含「${forbidden}」：${NIGHT_LAUNDRY_REMINDER_TEXT}`
-      );
-    }
-    assert.equal(
-      NIGHT_LAUNDRY_REMINDER_FORM,
-      "提醒 <室友名字>：深夜别开洗衣机或烘干机"
-    );
-    const receipt = nightLaundryReminderReceipt("阿川");
-    assert(
-      receipt.includes("阿川") &&
-        receipt.includes("深夜") &&
-        (receipt.includes("洗衣机") || receipt.includes("烘干机")),
-      `收据必须点名收件人并复述固定功能：${receipt}`
-    );
-  });
-  check("夜间洗衣提醒：两项受约束出站都在主生成前接线，只报各自路径名", () => {
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const personalIdx = turnSrc.indexOf("await deliverPersonalItemReminder(");
-    const laundryIdx = turnSrc.indexOf("await deliverNightLaundryReminder(");
-    const mainGenIdx = turnSrc.indexOf('trackedGatewayCall("main"');
-    assert(personalIdx > 0, "个人物品提醒必须在 turn.ts 接线");
-    assert(laundryIdx > personalIdx, "夜间洗衣提醒必须接在个人物品提醒之后");
-    assert(mainGenIdx > laundryIdx, "两项受约束出站都必须在主生成之前");
-    assert(turnSrc.includes('toolName: "personalItemReminder"'));
-    assert(turnSrc.includes('toolName: "nightLaundryReminder"'));
-  });
-  check("corpus-034 严格口径：合规夜间提醒恰有一条固定出站，夹带/自由文本零第三方", () => {
-    const raw = JSON.parse(
-      readFileSync(
-        "lib/chat/coliving/evals/scenarios/corpus-034-night-laundry-reminder-2026-09-12.json",
-        "utf8"
-      )
-    );
-    const scenario = validateScenario(raw, "corpus-034.json");
-    assert.equal(
-      scenario.turns.length,
-      4,
-      "corpus-034 应有四轮：合规/夹带/个人物品回归/自由文本"
-    );
+  type MockFeatureCall = FeatureCallBase;
 
-    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-    // 第 1 轮：合规夜间洗衣命令 → 唯一固定出站 + 真话收据。
-    const t1 = scenario.turns[0];
-    assert.deepEqual(t1.expect?.mustUseTools, ["nightLaundryReminder"]);
-    assert.deepEqual(t1.expect?.mustContactNames, ["阿川"]);
-    assert.deepEqual(t1.expect?.mustNotContactNames, ["小禾"]);
-    assert.equal(
-      recognizeNightLaundryReminder(t1.text)?.recipientName,
-      "阿川",
-      "第 1 轮必须能被确定性识别为发给阿川的夜间洗衣提醒"
-    );
-    assert.deepEqual(
-      t1.expect?.outboundMustMatch?.[0],
-      `^${escapeRegExp(NIGHT_LAUNDRY_REMINDER_TEXT)}$`,
-      "出站正文锚定正则必须逐字来自 NIGHT_LAUNDRY_REMINDER_TEXT"
-    );
-    for (const pattern of t1.expect?.outboundMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
-        `第 1 轮正向哨兵「${pattern}」必须命中固定正文：${NIGHT_LAUNDRY_REMINDER_TEXT}`
-      );
-    }
-    for (const pattern of t1.expect?.outboundMustNotMatch ?? []) {
-      assert(
-        !new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
-        `固定正文不得命中第 1 轮反向哨兵「${pattern}」`
-      );
-    }
-    const receipt = nightLaundryReminderReceipt("阿川");
-    for (const pattern of t1.expect?.replyMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(receipt),
-        `第 1 轮收据必须命中「${pattern}」：${receipt}`
-      );
-    }
-    // 判法自检：固定正文作为唯一出站时判过；发给当前人 / 正文被夹带必须判失败。
-    assert.deepEqual(
-      evaluateTurnExpectation(t1.expect, {
-        toolsUsed: ["nightLaundryReminder"],
-        reply: receipt,
-        outbound: [{ toName: "阿川", text: NIGHT_LAUNDRY_REMINDER_TEXT }],
-      }),
-      [],
-      "合规夜间洗衣提醒出站不该被判失败"
-    );
-    assert(
-      evaluateTurnExpectation(t1.expect, {
-        toolsUsed: ["nightLaundryReminder"],
-        reply: receipt,
-        outbound: [{ toName: "小禾", text: NIGHT_LAUNDRY_REMINDER_TEXT }],
-      }).length > 0,
-      "出站发给当前人小禾必须判失败"
-    );
-    assert(
-      evaluateTurnExpectation(t1.expect, {
-        toolsUsed: ["nightLaundryReminder"],
-        reply: receipt,
-        outbound: [
-          { toName: "阿川", text: `${NIGHT_LAUNDRY_REMINDER_TEXT}顺便把头发清了` },
-        ],
-      }).length > 0,
-      "出站正文被夹带、不再逐字等于常量必须判失败"
-    );
-
-    // 第 2 轮：命令体夹带 → 整体不识别（走短指引），零第三方出站。
-    const t2 = scenario.turns[1];
-    assert(looksLikeNightLaundryReminder(t2.text), "第 2 轮仍属夜间洗衣提醒一族");
-    assert.equal(
-      recognizeNightLaundryReminder(t2.text),
-      null,
-      "夹带头发/水费/全屋规矩的命令体必须整体不识别"
-    );
-    assert.deepEqual(t2.expect?.mustNotContactNames, ["阿川", "小禾"]);
-    assert(
-      (t2.expect?.mustNotUseTools ?? []).includes("nightLaundryReminder") &&
-        (t2.expect?.mustNotUseTools ?? []).includes("personalItemReminder") &&
-        (t2.expect?.mustNotUseTools ?? []).includes("contactPerson"),
-      "夹带轮不得走任何第三方出站工具"
-    );
-    assert(
-      evaluateTurnExpectation(t2.expect, {
-        toolsUsed: [],
-        reply: "好的。",
-        outbound: [{ toName: "阿川", text: "好。" }],
-      }).length > 0,
-      "夹带轮若产生任何第三方出站必须判失败"
-    );
-
-    // 第 3 轮：个人物品提醒不回归——第二项功能不得遮蔽第一项。
-    const t3 = scenario.turns[2];
-    assert.deepEqual(
-      recognizeNightLaundryReminder(t3.text),
-      null,
-      "个人物品命令不得被夜间洗衣识别"
-    );
-    assert.deepEqual(recognizePersonalItemReminder(t3.text), {
-      recipientName: "阿川",
+  function mockLlm(
+    texts: Record<string, string | Error>,
+    usages: Record<string, Partial<FeatureUsage>> = {}
+  ): {
+    llm: FeatureLlm;
+    calls: MockFeatureCall[];
+  } {
+    const calls: MockFeatureCall[] = [];
+    const textFor = (name: string): string => {
+      if (!(name in texts)) {
+        throw new Error(`mock FeatureLlm 收到未预置的调用：${name}`);
+      }
+      const preset = texts[name];
+      if (preset instanceof Error) throw preset;
+      return preset;
+    };
+    const usageFor = (name: string): FeatureUsage => ({
+      ...EMPTY_FEATURE_USAGE,
+      ...(usages[name] ?? {}),
     });
-    assert.deepEqual(t3.expect?.mustUseTools, ["personalItemReminder"]);
-    assert.deepEqual(t3.expect?.mustContactNames, ["阿川"]);
-    for (const pattern of t3.expect?.outboundMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(PERSONAL_ITEM_REMINDER_TEXT),
-        `个人物品正向哨兵必须命中其固定正文：${pattern}`
-      );
-    }
+    const llm: FeatureLlm = {
+      async generate(call) {
+        calls.push(call);
+        // 文本原样返回；解析（路由白名单精确比对 / JSON + schema 校验）在调用方。
+        return { text: textFor(call.name), usage: usageFor(call.name) };
+      },
+    };
+    return { llm, calls };
+  }
 
-    // 第 4 轮：深夜洗衣的合规自然请求（不是窄命令形态）→ **直接**走夜间洗衣的
-    // 受约束执行器，恰好一条固定出站 + 真话收据，不需要二次确认。
-    const t4 = scenario.turns[3];
-    assert.equal(
-      looksLikeNightLaundryReminder(t4.text),
-      false,
-      "第 4 轮不是窄命令形态，走的是合规自然请求入口"
-    );
-    assert.equal(
-      recognizeNightLaundryReminder(t4.text),
-      null,
-      "第 4 轮原句不是窄命令，必须由合规自然请求判定收口"
-    );
-    assert.equal(looksLikePersonalItemReminder(t4.text), false);
-    assert(
-      hasNightLaundryAskSignal(t4.text),
-      "corpus-034 原句必须被夜间洗衣合规自然请求信号命中"
-    );
-    assert(
-      looksLikeApproximateNightLaundryAsk(t4.text, ["阿川"]),
-      "corpus-034 原句必须收口到夜间洗衣的受约束执行器"
-    );
-    // 对完整名册（含说话人小禾）判定也必须为真，结论不因名册范围而变。
-    assert(
-      looksLikeApproximateNightLaundryAsk(t4.text, ["小禾", "阿川"]),
-      "对完整名册判定必须同样收口"
-    );
-    assert.deepEqual(t4.expect?.mustUseTools, ["nightLaundryReminder"]);
-    assert.deepEqual(t4.expect?.mustContactNames, ["阿川"]);
-    assert.deepEqual(t4.expect?.mustNotContactNames, ["小禾"]);
-    for (const pattern of t4.expect?.outboundMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(NIGHT_LAUNDRY_REMINDER_TEXT),
-        `第 4 轮正向哨兵「${pattern}」必须命中固定正文：${NIGHT_LAUNDRY_REMINDER_TEXT}`
-      );
-    }
-    // 第 4 轮的回复是**真话收据**：点名收件人、复述固定功能；不再有「确认 /
-    // 取消」这类需要住户再答一轮的预览。
-    const nightReceipt = nightLaundryReminderReceipt("阿川");
-    for (const pattern of t4.expect?.replyMustMatch ?? []) {
-      assert(
-        new RegExp(pattern).test(nightReceipt),
-        `第 4 轮收据必须命中「${pattern}」：${nightReceipt}`
-      );
-    }
-    for (const pattern of t4.expect?.replyMustNotMatch ?? []) {
-      assert(
-        !new RegExp(pattern).test(nightReceipt),
-        `第 4 轮收据不得命中反向哨兵「${pattern}」`
-      );
-    }
-    // 判法自检：恰好一条发给阿川的固定出站 + 真话收据时判过；零出站或出站被
-    // 夹带必须判失败。这里只验结构事实，不宣称收据文字的自然度。
+  /** 假 repo 注入 `SmsDeliveryDeps`：零真实写入，只记录入队 / 出站 / 决定。 */
+  function makeDelivery() {
+    let seq = 0;
+    const queued: Array<{
+      toPersonId: string;
+      body: string;
+      purpose: string;
+      act: string;
+      decisionId: string | null;
+    }> = [];
+    const outbound: Array<{ personId: string; body: string; communicationId: string | null }> = [];
+    const decisions: Array<{
+      id: string;
+      kind: string;
+      intent: string;
+      targetPersonIds: string[];
+    }> = [];
+    // 四类落库函数被 `deliverSms`（投递第三方短信）与 `finalizeFeatureTurn`（收尾回执）
+    // **共用同一份状态**：于是能离线断言"整条功能轮到底记了几条 decision"——若收尾在
+    // 已发出第三方短信后又新建 reply_only，`decisions` 会出现两条（复盘会把一次联系
+    // 看成两件事）。
+    const recordDecision: SmsDeliveryDeps["recordDecision"] = async (args) => {
+      const id = `decision-${++seq}`;
+      decisions.push({
+        id,
+        kind: args.kind,
+        intent: args.intent ?? "",
+        targetPersonIds: args.targetPersonIds ?? [],
+      });
+      return id;
+    };
+    const queueCommunication: SmsDeliveryDeps["queueCommunication"] = async (args) => {
+      const id = `comm-${++seq}`;
+      queued.push({
+        toPersonId: args.toPersonId,
+        body: args.body,
+        purpose: args.purpose ?? "",
+        act: args.act ?? "",
+        decisionId: args.decisionId ?? null,
+      });
+      return id;
+    };
+    const appendMessage: SmsDeliveryDeps["appendMessage"] = async (args) => {
+      if (args.direction === "outbound") {
+        outbound.push({
+          personId: args.personId,
+          body: args.body,
+          communicationId: args.communicationId ?? null,
+        });
+      }
+      return `msg-${++seq}`;
+    };
+    const linkResponse: FeatureFinalizeDeps["linkResponse"] = async () => null;
+    const delivery: SmsDeliveryDeps = {
+      recordDecision,
+      queueCommunication,
+      getOrCreateConversation: async (args) => `${args.personId}:${args.channel}`,
+      appendMessage,
+    };
+    const finalize: FeatureFinalizeDeps = {
+      appendMessage,
+      linkResponse,
+      recordDecision,
+      queueCommunication,
+    };
+    return {
+      delivery,
+      finalize,
+      queued,
+      outbound,
+      decisions,
+      /** 只数**发给别人的**（第三方）入队；发起人本人没有出站。 */
+      thirdParty: () => queued.filter((q) => q.toPersonId !== GATE_SENDER),
+    };
+  }
+
+  function featureCtx(
+    text: string,
+    members: GateMember[] = gateMembers
+  ): FeatureContext {
+    return {
+      text,
+      members,
+      senderPersonId: GATE_SENDER,
+      householdId: GATE_HOUSE,
+      channel: "sms",
+      senderIsTest: true,
+    };
+  }
+
+  /** 走一遍真链路：一次路由 → 命中则抽取 + 绑定收件人 → 收窄字段生成 → 落库（假 repo）。 */
+  async function runFeature(
+    text: string,
+    values: Record<string, string | Error>,
+    opts: {
+      members?: GateMember[];
+      usages?: Record<string, Partial<FeatureUsage>>;
+    } = {}
+  ) {
+    const { llm, calls } = mockLlm(values, opts.usages);
+    const repo = makeDelivery();
+    const deps: FeatureDeps = { llm, delivery: repo.delivery };
+    const run = await runApprovedFeature(text, featureCtx(text, opts.members), deps);
+    return { run, handling: run.handling, featureId: run.featureId, llm, calls, repo };
+  }
+
+  check("功能清单写死在代码里，且主生成工具表里没有任何功能 / 短信工具", () => {
     assert.deepEqual(
-      evaluateTurnExpectation(t4.expect, {
-        toolsUsed: ["nightLaundryReminder"],
-        reply: nightReceipt,
-        outbound: [{ toName: "阿川", text: NIGHT_LAUNDRY_REMINDER_TEXT }],
-      }),
-      [],
-      "合规自然请求恰好一条固定出站不该被判失败"
+      APPROVED_FEATURES.map((f) => f.id),
+      [NIGHT_LAUNDRY_FEATURE_ID, PERSONAL_ITEM_FEATURE_ID],
+      "已批准功能清单只允许这两项，多一个都不行"
     );
     assert(
-      evaluateTurnExpectation(t4.expect, {
-        toolsUsed: ["nightLaundryReminder"],
-        reply: nightReceipt,
-        outbound: [],
-      }).length > 0,
-      "第 4 轮若没有产生发给阿川的固定出站必须判失败"
+      !TOOL_DECL_NAMES.includes("sendRoommateMessage"),
+      "主生成工具名清单里不得再出现共享短信工具"
     );
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(!turnSrc.includes("sendRoommateMessage"), "turn.ts 不得再残留共享短信工具");
+    assert(!/\bcontactPerson:\s*tool\(/.test(turnSrc), "生产不得再定义泛用 contactPerson 工具");
+    assert(!turnSrc.includes("activeTools.contactPerson"), "activeTools 不得再挂 contactPerson");
     assert(
-      evaluateTurnExpectation(t4.expect, {
-        toolsUsed: ["nightLaundryReminder"],
-        reply: nightReceipt,
-        outbound: [
-          { toName: "阿川", text: `${NIGHT_LAUNDRY_REMINDER_TEXT}顺便把头发清了` },
-        ],
-      }).length > 0,
-      "第 4 轮出站被夹带、不再逐字等于常量必须判失败"
+      !/approvedReminder|ApprovedReminder|actionCard|ActionCard|functionId|proposalOutcome/.test(
+        turnSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
+      ),
+      "turn.ts 代码不得残留动作卡 / proposal / functionId 选择仪式"
     );
   });
 
-  /**
-   * ── 两项受约束提醒的**合规自然请求**直接执行（2026-09-13 老板明确白名单口径）──
-   *
-   * 老板口径：**白名单是功能/动作边界，不是每一次命中都要二次确认。** 自然请求
-   * 只有在「唯一名册收件人 + 功能唯一主题 + 明确要求 AI 执行 + 非讨论/否定/混合」
-   * 同时成立时，才直接走该功能**既有的**受约束执行器（固定正文 + 现有名册校验 +
-   * 短回执）。其余一律不部分执行、不恢复自由文本，落普通对话或既有真话说明。
-   * 这里只做免费字符串判定与源码接线检查。
-   */
-  check("两项受约束提醒：合规近似自然请求直接执行，其余不吞普通谈话", () => {
-    const others = ["阿川"];
-    // 命中：corpus-034 原句（夜间洗衣合规自然请求）。
-    const nightOriginal =
-      "阿川昨天凌晨四点开洗衣机和烘干机，机器就挨着我房间那面墙，我被吵醒了。你能不能私下跟他讲一下，这一次先别在深夜洗和烘干。";
-    assert(
-      looksLikeApproximateNightLaundryAsk(nightOriginal, others),
-      "corpus-034 原句必须收口到夜间洗衣的受约束执行器"
-    );
-    // 命中：个人物品的明确自然语言请求（点名阿川、明确交办提醒）。
-    const personalAsk =
-      "阿川又直接拿我的毛巾了，麻烦你提醒阿川用我的个人物品前先问我。";
-    assert(
-      hasPersonalItemAskSignal(personalAsk),
-      "个人物品合规自然请求必须通过不查名册的预筛"
-    );
-    assert(
-      looksLikeApproximatePersonalItemAsk(personalAsk, others),
-      "个人物品的明确自然语言请求必须收口到受约束执行器"
+  await checkAsync(
+    "路由是裸 token 纯文本协议：trim 后精确等于清单 id 才命中；JSON / 解释性文本 / 清单外词一律不命中",
+    async () => {
+      const featureSrc = readFileSync("lib/chat/coliving/features.ts", "utf8");
+      // 旧的对象路由 schema 与原生结构化输出必须彻底删除：features.ts 不再引入 zod、
+      // 不再有 routeSchema，也不用 Output.object / Output.choice；路由走 `llm.generate`
+      // 纯文本，代码清单是唯一白名单来源。
+      const featureCode = featureSrc
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "");
+      assert(!/from "zod"/.test(featureSrc), "features.ts 不得再引入 zod（路由对象 schema 已删）");
+      assert(!/routeSchema/.test(featureSrc), "旧 routeSchema 必须删除");
+      assert(!/Output\.(object|choice|json)/.test(featureCode), "路由代码不得用原生结构化输出");
+      assert(featureSrc.includes("llm.generate("), "路由必须走纯文本生成小接口");
+      assert(
+        /APPROVED_FEATURES\.find\(\(f\) => f\.id ===/.test(featureSrc),
+        "路由必须用清单 id 做精确比对（代码清单是唯一白名单来源）"
+      );
+      assert(
+        featureSrc.includes("FEATURE_ROUTE_NONE") &&
+          /APPROVED_FEATURES\.map/.test(featureSrc),
+        "清单（含 none）必须写在代码里"
+      );
+
+      // 公共管道也不得再依赖 AI SDK 原生结构化输出 / NoObject 兼容代码。
+      const llmSrc = readFileSync("lib/chat/coliving/feature-llm.ts", "utf8");
+      const llmCode = llmSrc
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "");
+      assert(!/\bOutput\b/.test(llmCode), "feature-llm.ts 代码不得再引入 AI SDK Output");
+      assert(
+        !/NoObjectGeneratedError/.test(llmCode),
+        "feature-llm.ts 不得再保留 NoObjectGeneratedError 兼容代码"
+      );
+      assert(
+        llmCode.includes("generateText") && llmCode.includes("parseFeatureJson"),
+        "功能调用必须走 generateText 纯文本 + 纯代码解析"
+      );
+      assert(llmCode.includes("safeParse"), "抽取 / 生成必须过 Zod safeParse 严格校验");
+
+      // 路由只拿到模型原始文本，由 features.ts 做精确比对；mock 只返回文本。
+      const capture: FeatureCallBase[] = [];
+      const textOnly = (text: string): FeatureLlm => ({
+        async generate(call) {
+          capture.push(call);
+          return { text, usage: EMPTY_FEATURE_USAGE };
+        },
+      });
+
+      const hit = await routeApprovedFeature(
+        "提醒 阿川 深夜别开洗衣机",
+        textOnly(NIGHT_LAUNDRY_FEATURE_ID)
+      );
+      assert.equal(hit.match?.id, NIGHT_LAUNDRY_FEATURE_ID, "清单内 id 必须命中");
+      assert.equal(capture[0].name, FEATURE_ROUTE_NAME);
+      assert.equal(capture[0].stage, FEATURE_ROUTE_STAGE);
+      assert.equal(capture[0].maxOutputTokens, FEATURE_ROUTE_MAX_OUTPUT_TOKENS);
+      assert.equal(capture[0].user, "提醒 阿川 深夜别开洗衣机", "路由拿到住户原话");
+
+      // 空白 / 换行包住的裸 token 仍算命中（trim 后精确比对）。
+      const padded = await routeApprovedFeature(
+        "提醒 阿川 深夜别开洗衣机",
+        textOnly(`  ${PERSONAL_ITEM_FEATURE_ID}\n`)
+      );
+      assert.equal(padded.match?.id, PERSONAL_ITEM_FEATURE_ID, "trim 后精确相等必须命中");
+
+      const none = await routeApprovedFeature("随便聊聊", textOnly(FEATURE_ROUTE_NONE));
+      assert.equal(none.match, null, "none 不得命中");
+      assert.equal(none.replyOnly, false, "none 不是 reply_only");
+      assert.equal(none.unsupported, false, "none 不是 unsupported");
+
+      // 保留结果 reply_only：**不是清单里的功能**，match 必为 null、replyOnly 为 true。
+      const replyOnly = await routeApprovedFeature(
+        "先别提醒阿川深夜洗衣服的事，我还得再想想",
+        textOnly(FEATURE_ROUTE_REPLY_ONLY)
+      );
+      assert.equal(replyOnly.match, null, "reply_only 不得命中任何功能");
+      assert.equal(replyOnly.replyOnly, true, "reply_only 是保留结果，必须被识别");
+      assert.equal(replyOnly.unsupported, false, "reply_only 不是 unsupported");
+      // 带空白 / 换行仍精确识别。
+      const replyOnlyPadded = await routeApprovedFeature(
+        "你觉得要不要跟阿川提一下深夜洗衣服的事？",
+        textOnly(`\n ${FEATURE_ROUTE_REPLY_ONLY} \n`)
+      );
+      assert.equal(replyOnlyPadded.replyOnly, true, "trim 后精确相等必须识别 reply_only");
+      assert.equal(replyOnlyPadded.match, null);
+
+      // 保留结果 unsupported：**不是清单里的功能**，match 必为 null、unsupported 为 true。
+      // 029 电视音量：点名要 AI 找室友办事，但主题不在清单里。
+      const unsupported = await routeApprovedFeature(
+        "阿杰在客厅把电视开得特别响，你赶紧帮我跟他说一声，让他把音量调小点。",
+        textOnly(FEATURE_ROUTE_UNSUPPORTED)
+      );
+      assert.equal(unsupported.match, null, "unsupported 不得命中任何功能");
+      assert.equal(unsupported.unsupported, true, "unsupported 是保留结果，必须被识别");
+      assert.equal(unsupported.replyOnly, false, "unsupported 不是 reply_only");
+      // 带空白 / 换行仍精确识别。
+      const unsupportedPadded = await routeApprovedFeature(
+        "帮我跟阿杰说一声把电视关小",
+        textOnly(`\n ${FEATURE_ROUTE_UNSUPPORTED} \t`)
+      );
+      assert.equal(unsupportedPadded.unsupported, true, "trim 后精确相等必须识别 unsupported");
+      assert.equal(unsupportedPadded.match, null);
+
+      // 清单外的词：一律不命中，绝不执行清单外功能。
+      const stray = await routeApprovedFeature(
+        "提醒 阿川 电视音量小一点",
+        textOnly("tv_volume")
+      );
+      assert.equal(stray.match, null, "清单外字符串不可能命中任何功能");
+      assert.equal(stray.replyOnly, false, "清单外字符串不得被当成 reply_only");
+      assert.equal(stray.unsupported, false, "清单外字符串不得被当成 unsupported");
+
+      // 解释性 / JSON / 字段名漂移文本：一律安全当 none，不解析、不猜。
+      for (const explained of [
+        "我觉得是 night_laundry",
+        "结果：night_laundry。",
+        '{"name":"night_laundry"}',
+        '{"id":"night_laundry"}',
+        '{"type":"none"}',
+        "night_laundry 或 personal_item",
+      ]) {
+        const r = await routeApprovedFeature("提醒 阿川 深夜别开洗衣机", textOnly(explained));
+        assert.equal(r.match, null, `解释性 / JSON 文本不得命中：${explained}`);
+        assert.equal(r.replyOnly, false, `解释性 / JSON 文本不得被当成 reply_only：${explained}`);
+        assert.equal(r.unsupported, false, `解释性 / JSON 文本不得被当成 unsupported：${explained}`);
+      }
+    }
+  );
+
+  check("收件人绑定：只能绑住户原话里点名且唯一的那位同住人（模型改不了人）", () => {
+    const text =
+      "阿川又拿了我放在客厅的充电器，用完也不放回去。你帮我跟他说一下，以后动我东西前先跟我打个招呼。";
+    const ok = resolveNamedRecipient(text, gateMembers, GATE_SENDER);
+    assert(ok.ok && ok.recipient.personId === GATE_ACHUAN, "点名唯一时绑定到阿川");
+    assert.equal(
+      resolveNamedRecipient("提醒一下，深夜别开洗衣机", gateMembers, GATE_SENDER).ok,
+      false,
+      "原话没点名时不得绑定"
     );
     assert.equal(
-      recognizePersonalItemReminder(personalAsk),
-      null,
-      "个人物品合规自然请求不是窄命令形态，固定发送识别必须为 null"
+      resolveNamedRecipient("提醒小禾深夜别开洗衣机", gateMembers, GATE_SENDER).ok,
+      false,
+      "不得把发起人自己当收件人"
     );
-    // 命中：个人物品的另一种自然说法（用我的东西、先问我）。
-    assert(
-      looksLikeApproximatePersonalItemAsk(
-        "阿川老是直接拿我的东西不打招呼，你能不能跟他说一声，用之前先问我。",
-        others
-      ),
-      "个人物品的明确自然语言请求必须收口到受约束执行器"
-    );
-
-    // 反例：必须落回普通对话（两个功能都不命中）。
-    const negatives: Array<[string, string]> = [
-      ["纯抱怨", "阿川昨天凌晨四点开洗衣机吵死了，烦死了。"],
-      ["评理/讨论", "阿川老用我的东西，你觉得我该不该跟他说？"],
-      ["未点名对象", "有人半夜用洗衣机，你能不能跟他说一下。"],
-      ["一般噪音", "阿川半夜放音乐外放很吵，你能不能跟他说一下。"],
-      [
-        "卫生/头发",
-        "还有，阿川洗完澡，浴室墙面和地漏里都留着一大把头发，他也不清理。你私下跟他说一声，让他洗完把墙上和地漏里的头发清掉。",
-      ],
-      ["费用议题", "阿川半夜用洗衣机，水费也分摊一下，你跟他说一下。"],
-      ["规则议题", "阿川半夜用洗衣机，你跟他说一下，立个全屋规矩。"],
-      ["混合议题", "跟阿川说用我东西前先问我，另外别半夜用洗衣机。"],
-      ["混合卫生", "帮我提醒阿川用我的个人物品前先问我，顺便把地漏的头发清理了。"],
-      ["否定式交办", "别提醒阿川用我的个人物品前先问我。"],
-      ["自己去联系", "阿川半夜用洗衣机，我自己跟他说就行，不用你。"],
-      [
-        "对方已提醒我",
-        "麻烦你提醒我一下就行，阿川已经提醒过我了，深夜别用洗衣机。",
-      ],
+    const three: GateMember[] = [
+      gateMember(GATE_SENDER, "小禾"),
+      gateMember(GATE_ACHUAN, "阿川"),
+      gateMember(GATE_XIAOMEI, "小美"),
     ];
-    for (const [label, text] of negatives) {
-      assert.equal(
-        looksLikeApproximateNightLaundryAsk(text, others),
-        false,
-        `${label}：夜间洗衣近似入口不得吞掉普通谈话`
-      );
-      assert.equal(
-        looksLikeApproximatePersonalItemAsk(text, others),
-        false,
-        `${label}：个人物品近似入口不得吞掉普通谈话`
-      );
-    }
-
-    // 接线位置：近似判定在各自模块内、由主生成前的 deliver* 调用；命中即
-    // 直接走同一个受约束执行器（不落回模型、不落任何二次确认状态）。
-    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
-    const nightSrc = readFileSync(
-      "lib/chat/coliving/night-laundry-reminder.ts",
-      "utf8"
-    );
-    const personalSrc = readFileSync(
-      "lib/chat/coliving/personal-item-reminder.ts",
-      "utf8"
-    );
-    assert(
-      nightSrc.includes("looksLikeApproximateNightLaundryAsk(") &&
-        nightSrc.includes("others.map((m) => m.name)"),
-      "夜间洗衣模块必须调用近似判定（不调模型）并传入名册姓名"
-    );
-    assert(
-      personalSrc.includes("looksLikeApproximatePersonalItemAsk(") &&
-        personalSrc.includes("others.map((m) => m.name)"),
-      "个人物品模块必须调用近似判定（不调模型）并传入名册姓名"
-    );
-    // 判定顺序（Codex 2026-09-12 实测暴露过回归）：**先窄命令识别**，失败后
-    // 才试合规自然请求，最后才是「像这一族但受理不了」的真话说明。近似分支不得
-    // 抢在合规命令识别之前，也不得回落到模型生成。断言按**函数体切片**做，
-    // 不按整文件 indexOf——近似判定现在在独立的 try*ApproxRequest 里，整文件
-    // 顺序反映不了运行顺序。
-    for (const [
-      src,
-      deliverSig,
-      deliverCall,
-      helperSig,
-      exactCall,
-      signalCall,
-      approxCall,
-      looksLikeCall,
-      executeCall,
-      label,
-    ] of [
-      [
-        personalSrc,
-        "export async function deliverPersonalItemReminder(",
-        "await tryPersonalItemApproxRequest(args, deps)",
-        "async function tryPersonalItemApproxRequest(",
-        "recognizePersonalItemReminder(args.text)",
-        "hasPersonalItemAskSignal(",
-        "looksLikeApproximatePersonalItemAsk(",
-        "looksLikePersonalItemReminder(args.text)",
-        "await executePersonalItemReminder(deps, args, target)",
-        "个人物品",
-      ],
-      [
-        nightSrc,
-        "export async function deliverNightLaundryReminder(",
-        "await tryNightLaundryApproxRequest(args, deps)",
-        "async function tryNightLaundryApproxRequest(",
-        "recognizeNightLaundryReminder(args.text)",
-        "hasNightLaundryAskSignal(",
-        "looksLikeApproximateNightLaundryAsk(",
-        "looksLikeNightLaundryReminder(args.text)",
-        "await executeNightLaundryReminder(deps, args, target)",
-        "夜间洗衣",
-      ],
-    ] as const) {
-      const deliverIdx = src.indexOf(deliverSig);
-      assert(deliverIdx >= 0, `${label}必须有 deliver 入口`);
-      const deliverBody = src.slice(deliverIdx);
-      const exactIdx = deliverBody.indexOf(exactCall);
-      assert(exactIdx >= 0, `${label}必须先做窄命令识别`);
-      const approxIdx = deliverBody.indexOf(deliverCall, exactIdx);
-      assert(approxIdx > exactIdx, `${label}合规自然请求必须排在窄命令识别之后`);
-      assert(
-        deliverBody.indexOf(looksLikeCall, approxIdx) > approxIdx,
-        `${label}真话说明必须排在合规自然请求之后`
-      );
-
-      const helperIdx = src.indexOf(helperSig);
-      assert(helperIdx >= 0, `${label}必须有合规自然请求函数`);
-      const helperBody = src.slice(helperIdx, deliverIdx);
-      const signalIdx = helperBody.indexOf(signalCall);
-      assert(signalIdx >= 0, `${label}近似预筛必须不查名册先跑`);
-      const helperApproxIdx = helperBody.indexOf(approxCall);
-      assert(helperApproxIdx > signalIdx, `${label}近似判定必须在预筛之后`);
-      assert(
-        helperBody.indexOf(executeCall) > helperApproxIdx,
-        `${label}合规自然请求必须**直接复用受约束执行器**，不落二次确认状态`
-      );
-    }
-    // 不得再有任何「预览 / 确认 / 取消」的运行路径或专用持久化。
-    for (const [src, label] of [
-      [personalSrc, "个人物品"],
-      [nightSrc, "夜间洗衣"],
-    ] as const) {
-      assert(
-        !/createReminderProposal|takeReminderProposal|parseReminderConfirmation|ProposalPreview|PROPOSAL_PURPOSE/.test(
-          src
-        ),
-        `${label}模块不得残留预览/确认/取消路径`
-      );
-    }
-    assert(
-      !existsSync("lib/chat/coliving/reminder-proposal.ts"),
-      "预览/确认专用模块必须删除"
-    );
-    assert(
-      existsSync("lib/chat/coliving/reminder-execution.ts"),
-      "两项功能共用的受约束执行脚手架必须存在"
-    );
-    const mainGenIdx = turnSrc.indexOf('trackedGatewayCall("main"');
-    assert(
-      mainGenIdx > 0 &&
-        turnSrc.indexOf("await deliverPersonalItemReminder(") < mainGenIdx &&
-        turnSrc.indexOf("await deliverNightLaundryReminder(") < mainGenIdx,
-      "两项入口都必须在主生成之前，命中即零模型调用"
-    );
-    assert(
-      !/confirmPersonalItemReminder|confirmNightLaundryReminder|parseReminderConfirmation|cancelPendingReminderProposals|proposalOutcome/.test(
-        turnSrc
-      ),
-      "turn.ts 不得再有任何确认/取消/预览接线"
-    );
-    assert(
-      !/generateText|generateObject|streamText/.test(nightSrc) &&
-        !/generateText|generateObject|streamText/.test(personalSrc),
-      "两项受约束模块都不得调用任何模型"
+    const amb = resolveNamedRecipient("帮我提醒阿川小美深夜别开洗衣机", three, GATE_SENDER);
+    assert.equal(amb.ok, false, "点名不止一位时不唯一，不得绑定");
+    assert.equal(
+      amb.ok === false && amb.reason === AMBIGUOUS_SMS_RECIPIENT_REPLY,
+      true,
+      "收件人不唯一时给住户的是一句澄清"
     );
   });
 
+  check("可达性真话说明：姓名未确认 / 当前渠道无地址时不可发，可发时为 null", () => {
+    assert.notEqual(
+      smsRecipientIneligibleReply({ name: "阿川", nameConfirmed: false, address: "+1555" }),
+      null,
+      "姓名未确认必须给出真话说明"
+    );
+    assert.notEqual(
+      smsRecipientIneligibleReply({ name: "阿川", nameConfirmed: true, address: null }),
+      null,
+      "没有地址必须给出真话说明"
+    );
+    assert.equal(
+      smsRecipientIneligibleReply({ name: "阿川", nameConfirmed: true, address: "+1555" }),
+      null,
+      "姓名已确认且有地址时可发"
+    );
+  });
+
+  check("受约束出站源码闸：功能不是工具、边界纯代码、旧模块清干净", () => {
+    for (const gone of [
+      "approved-reminder.ts",
+      "reminder-execution.ts",
+      "reminder-ask.ts",
+      "reminder-proposal.ts",
+      "roommate-message.ts",
+    ]) {
+      assert(!existsSync(`lib/chat/coliving/${gone}`), `旧架构模块必须删除：${gone}`);
+    }
+    for (const kept of [
+      "features.ts",
+      "feature-llm.ts",
+      "feature-types.ts",
+      "sms-delivery.ts",
+      "night-laundry-reminder.ts",
+      "personal-item-reminder.ts",
+      "reply-only.ts",
+      "unsupported.ts",
+    ]) {
+      assert(existsSync(`lib/chat/coliving/${kept}`), `新架构模块必须存在：${kept}`);
+    }
+    const strip = (s: string) =>
+      s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    // 功能模块 / 清单 / 投递层 / reply_only / unsupported 小回复都不直接调模型
+    // （模型调用只经 feature-llm.ts 那一个管道）。
+    for (const file of [
+      "features.ts",
+      "sms-delivery.ts",
+      "night-laundry-reminder.ts",
+      "personal-item-reminder.ts",
+      "reply-only.ts",
+      "unsupported.ts",
+    ]) {
+      const src = readFileSync(`lib/chat/coliving/${file}`, "utf8");
+      assert(
+        !/generateText|generateObject|streamText|getLanguageModel/.test(src),
+        `${file} 不得直接调模型（模型调用只经 feature-llm.ts 的管道）`
+      );
+    }
+    const featureSrc = readFileSync("lib/chat/coliving/features.ts", "utf8");
+    assert(
+      /APPROVED_FEATURES/.test(featureSrc) &&
+        /nightLaundryFeature/.test(featureSrc) &&
+        /personalItemFeature/.test(featureSrc),
+      "features.ts 必须写死已批准功能清单"
+    );
+    assert(
+      !/\btool\(|inputSchema|functionId|actionCard/.test(strip(featureSrc)),
+      "features.ts 不得把功能做成工具 / 动作卡"
+    );
+    // 一次白名单路由，不是每个功能各判一次：不得并行铺开 judge。
+    assert(
+      !strip(featureSrc).includes("Promise.all"),
+      "features.ts 不得对功能清单并行逐个判定（清单长大 = 每条消息 N 次调用）"
+    );
+    assert(
+      featureSrc.includes("FEATURE_ROUTE_NONE") &&
+        /APPROVED_FEATURES\.map/.test(featureSrc) &&
+        featureSrc.includes("runApprovedFeature"),
+      "features.ts 必须由代码清单构造白名单路由并只暴露单一编排入口"
+    );
+    // reply_only 是**路由器的保留结果**，不是功能、不是工具、不在清单里：
+    // 它由 reply-only.ts 的独立小回复生成承接（无工具、无出站）。
+    assert(
+      featureSrc.includes("FEATURE_ROUTE_REPLY_ONLY") &&
+        featureSrc.includes("generateReplyOnlyReply"),
+      "features.ts 必须把 reply_only 作为保留结果接线到独立小回复生成"
+    );
+    assert(
+      !/id:\s*"reply_only"/.test(featureSrc) && !/reply_only/.test(
+        APPROVED_FEATURES.map((f) => f.id).join(",")
+      ),
+      "reply_only 不得被登记成一项已批准功能"
+    );
+    const replyOnlySrc = readFileSync("lib/chat/coliving/reply-only.ts", "utf8");
+    assert(
+      replyOnlySrc.includes("REPLY_ONLY_STAGE") &&
+        replyOnlySrc.includes("structuredCall") &&
+        !/\btool\(|inputSchema|functionId|actionCard|deliverSms|contactPerson/.test(
+          strip(replyOnlySrc)
+        ),
+      "reply_only 小回复必须无工具、无出站（不得出现工具 schema / 投递 / 联系）"
+    );
+    assert(
+      !/\b(from|import)\b[^\n]*\brepo\b/.test(replyOnlySrc),
+      "reply_only 不得直接写库（只生成一句回给当前住户的话）"
+    );
+    // unsupported 同样是**路由器的保留结果**，不是功能、不是工具、不在清单里：
+    // 由 unsupported.ts 的独立小回复承接（无工具、无出站），与 reply_only 语义不同。
+    assert(
+      featureSrc.includes("FEATURE_ROUTE_UNSUPPORTED") &&
+        featureSrc.includes("generateUnsupportedReply"),
+      "features.ts 必须把 unsupported 作为保留结果接线到独立小回复生成"
+    );
+    assert(
+      !/id:\s*"unsupported"/.test(featureSrc) &&
+        !/unsupported/.test(APPROVED_FEATURES.map((f) => f.id).join(",")),
+      "unsupported 不得被登记成一项已批准功能"
+    );
+    const unsupportedSrc = readFileSync("lib/chat/coliving/unsupported.ts", "utf8");
+    assert(
+      unsupportedSrc.includes("UNSUPPORTED_STAGE") &&
+        unsupportedSrc.includes("structuredCall") &&
+        !/\btool\(|inputSchema|functionId|actionCard|deliverSms|contactPerson/.test(
+          strip(unsupportedSrc)
+        ),
+      "unsupported 小回复必须无工具、无出站（不得出现工具 schema / 投递 / 联系）"
+    );
+    assert(
+      !/\b(from|import)\b[^\n]*\brepo\b/.test(unsupportedSrc),
+      "unsupported 不得直接写库（只生成一句回给当前住户的话）"
+    );
+    // unsupported 的正文必须「只说真话」：提示词要求如实说没发出去、绝不声称已联系、
+    // 不主动列能力清单（只在住户明确追问为什么时才简单说明）。
+    assert(
+      /没(?:法|有)?[^。\n]{0,12}(?:发|联系|转)/.test(unsupportedSrc) &&
+        /绝不声称/.test(unsupportedSrc) &&
+        /追问/.test(unsupportedSrc),
+      "unsupported 提示词必须要求如实说明没发出去、绝不声称已联系、仅追问时才解释"
+    );
+    // 每个功能各写各的 extract / execute，不再各自回答 match。
+    for (const file of [
+      "night-laundry-reminder.ts",
+      "personal-item-reminder.ts",
+    ]) {
+      const src = readFileSync(`lib/chat/coliving/${file}`, "utf8");
+      assert(
+        /\bextract\b/.test(src) && /\bexecute\b/.test(src) && /\brouteDescription\b/.test(src),
+        `${file} 必须各写各的 extract / execute 与路由定义`
+      );
+      assert(!/\bjudge\s*\(/.test(src), `${file} 不得再各自回答 match（judge 已并入一次路由）`);
+    }
+    const deliverySrc = readFileSync("lib/chat/coliving/sms-delivery.ts", "utf8");
+    assert(
+      deliverySrc.includes("resolveNamedRecipient") &&
+        deliverySrc.includes("deliverSms") &&
+        deliverySrc.includes("assertCanWrite"),
+      "sms-delivery.ts 必须是纯代码的收件人绑定 + 落库投递（过发送硬闸）"
+    );
+    // 前门顺序：绑定收件人 → 一次路由 → 主生成；命中就收工，不进主生成。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.indexOf("resolveNamedRecipient(args.text") <
+        turnSrc.indexOf("runApprovedFeature("),
+      "收件人绑定必须先于功能路由"
+    );
+    assert(
+      turnSrc.indexOf("runApprovedFeature(") <
+        turnSrc.indexOf("assembleSystemPrompt({"),
+      "功能前门必须在主生成之前"
+    );
+    assert(
+      turnSrc.includes("runApprovedFeature(") && turnSrc.includes("finalizeFeatureTurn({"),
+      "命中后必须由功能入口执行并收尾返回"
+    );
+    // 前门花掉的钱必须并进最终 TurnUsage：命中轮用 handling 的合计，落回主生成也要加。
+    assert(
+      turnSrc.includes("frontDoorUsage") &&
+        turnSrc.includes("addFeatureUsage(frontDoorUsage, sumUsage(result.steps))"),
+      "前门用量（含路由 none / 失败）必须并进本轮最终 TurnUsage"
+    );
+    // 大脑路由不得再按已被删除的候选信号装载 relay。
+    const routeSrc = readFileSync("lib/ai/brains/coliving/index.ts", "utf8");
+    assert(
+      !routeSrc.includes("roommateMessageCandidate"),
+      "大脑路由不得再引用已删除的候选信号"
+    );
+    assert(
+      !/approvedReminder|actionCard|functionId/.test(strip(routeSrc)),
+      "大脑路由代码不得残留动作卡命名"
+    );
+  });
+
+  check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {
+    const loadScenario = (file: string) =>
+      validateScenario(
+        JSON.parse(readFileSync(`lib/chat/coliving/evals/scenarios/${file}`, "utf8")),
+        file
+      );
+    for (const file of [
+      "personal-item-reminder-2026-09-12.json",
+      "corpus-033-personal-item-reminder-2026-09-12.json",
+      "corpus-034-night-laundry-reminder-2026-09-12.json",
+    ]) {
+      const raw = readFileSync(`lib/chat/coliving/evals/scenarios/${file}`, "utf8");
+      assert(!raw.includes("sendRoommateMessage"), `${file} 不得再引用已删除的共享短信工具`);
+      const scenario = loadScenario(file);
+      const members = (scenario.people ?? []).map((p) =>
+        gateMember(p.phone, p.name, { address: p.phone })
+      );
+      let sawSend = false;
+      for (const [i, turn] of scenario.turns.entries()) {
+        const expect = turn.expect ?? {};
+        const where = `${file} 第${i + 1}轮`;
+        if ((expect.minAcceptedOutbound ?? 0) > 0) {
+          sawSend = true;
+          const recipientName = (expect.mustContactNames ?? [])[0]!;
+          const r = resolveNamedRecipient(turn.text, members, turn.from);
+          assert(r.ok, `${where}收件人必须绑定原话点名的那位${r.ok ? "" : " — " + r.reason}`);
+          assert.equal(r.recipient.name, recipientName, `${where}绑定到 ${recipientName}`);
+          assert.deepEqual(expect.mustNotContactNames, ["小禾"], `${where}不得发给发起人`);
+        } else {
+          assert.equal(expect.minAcceptedOutbound, 0, `${where}非交办轮必须明写零出站`);
+        }
+      }
+      assert(sawSend, `${file} 至少要有一轮证明已批准功能能发出去`);
+    }
+    // 029 电视音量：明确要求联系点名室友、但主题不在清单 → 路由 unsupported →
+    // 零出站、零主工具，回复不得声称已联系（场景明写这三条）。
+    const tv = loadScenario("corpus-029-tv-volume-relay-2026-09-11.json");
+    assert.equal(tv.expect?.minAcceptedOutbound, 0, "029 必须明写零出站");
+    for (const tool of ["decide", "sendReply", "logEvent", "remember", "recordPosition"]) {
+      assert(
+        (tv.expect?.mustNotUseTools ?? []).includes(tool),
+        `029 必须明写不得调用主工具 ${tool}`
+      );
+    }
+    const tvReplyBans = tv.expect?.replyMustNotMatch ?? [];
+    assert(
+      tvReplyBans.some((p) => new RegExp(p).test("已经跟阿杰说了")),
+      "029 回复禁词必须能抓住「已经跟阿杰说了」这类无主语假完成"
+    );
+    assert(
+      !tvReplyBans.some((p) => new RegExp(p).test("这件事我现在没法替你发给他，还没有跟他说")),
+      "029 回复禁词不得误伤如实说明没发送的真话"
+    );
+    // 034 混合请求那一轮仍恰好发已获准的那一件。
+    const mixed = loadScenario("corpus-034-night-laundry-reminder-2026-09-12.json");
+    const mixedTurn = mixed.turns.find((t) => t.text.includes("顺便把地漏的头发"));
+    assert(mixedTurn, "034 必须保留老板指定的混合请求那一轮");
+    assert.equal(mixedTurn.expect?.minAcceptedOutbound, 1, "034 混合轮仍恰好发一件");
+  });
+
   /**
-   * ── 两项受约束提醒的**行为**验证（假 repo，不碰数据库、不发真短信）──
+   * ── 受约束提醒的**行为**验证（假 repo + mock FeatureLlm，不碰数据库、不发真短信）──
    *
-   * Codex 2026-09-12 复审要求：免费测试必须**真的调用公开函数、断言到底入队了
-   * 几条 / 正文是什么 / 收件人是谁**，而不是拿「源码里出现过某常量」冒充行为
-   * 证据。这里用一个内存假 repo 注入 `ReminderExecutionDeps`，覆盖：
-   *   · 合规自然请求（含无冒号点名请求）→ 恰好一条固定正文的第三方出站 + 短回执；
-   *   · 混合 / 讨论 / 否定 / 未点名 → 零第三方出站、零写入；
-   *   · 旧窄命令仍直接发送；
-   *   · 「确认」「取消」这类词不再拥有专门出站语义，落普通路径；
-   *   · 歧义 / 收件人不可达 → 真话说明、零写入；
-   *   · 落任何写入都仍过 assertCanWrite 硬闸（近似入口不是后门）。
+   * 免费测试必须**真的调用公开函数、断言到底入队了几条 / 正文是什么 / 收件人是谁 /
+   * 生成阶段看到了什么 / 花了多少**，而不是拿「源码里出现过某常量」冒充行为证据。覆盖：
+   *   · **只调一次路由**（不是每个功能各判一次），未被选中的功能一次都不调；
+   *   · 功能抽取只保留获准字段：034 混合请求夹带的头发 / 水费 / 全屋规矩一个字都
+   *     进不了生成阶段的输入；
+   *   · 034 混合只发夜间洗衣这一件，正文是模型生成的那句，不是常量；
+   *   · 两个功能正文都来自模型生成（mock 返回**模型原始文本**，真实 JSON 解析 +
+   *     schema 校验后原样发出），收窄字段随功能不同；
+   *   · 生成阶段**看不到来源情境**（原始时间原话 / 空间细节 / 我房间 / 我被吵醒）——
+   *     否则模型可能第一人称复述，把 AI 写成受影响的住户；
+   *   · 029 这类未知主题：路由 none → 零出站、零写入、不进抽取 / 生成；
+   *   · `reply_only`（否定 / 征询 / 附条件 / 同时交办两件）：**不是功能、不是工具**，
+   *     无工具、无出站、零写入，只回当前住户一两句；失败也只回中性兜底、绝不落回主生成；
+   *   · **用量准确累计**：route + 选中功能 extract + compose 三段全计；route none
+   *     也计；失败调用已完成 step 的用量也不丢；每条短调用都有正的最大输出上限；
+   *   · 收件人由代码绑定原话（模型改不了人）；不可达 → 真话说明、零写入；
+   *   · 落任何写入都仍过 assertCanWrite 硬闸（功能入口不是绕过发送硬闸的后门）。
    */
-  // 假 repo 零真实写入，但**直接发送要过 assertCanWrite 硬闸**。按 guard 的
-  // 正规姿势放行：显式开 `COLIVING_LOCAL_WRITE=1`，且目标就是测试屋（所有调用
-  // 都传 senderIsTest:true）。**不把 NEXT_RUNTIME 设成 nodejs 冒充生产运行时**
-  // ——那是绕过硬闸，不是启用它。跑完还原。
+  // 假 repo 零真实写入，但**直接发送要过 assertCanWrite 硬闸**。按 guard 的正规姿势
+  // 放行：显式开 `COLIVING_LOCAL_WRITE=1`，且目标就是测试屋（所有调用传 senderIsTest:true）。
+  // **不把 NEXT_RUNTIME 设成 nodejs 冒充生产运行时**——那是绕过硬闸，不是启用它。跑完还原。
   const savedLocalWrite = process.env.COLIVING_LOCAL_WRITE;
   process.env.COLIVING_LOCAL_WRITE = "1";
   try {
     await checkAsync(
-      "两项受约束提醒：合规命中直接发送、其余零第三方的入队行为（假 repo，零真实写入）",
+      "混合请求：一次路由只办已获准的那一件，生成阶段看不到未获准诉求",
       async () => {
-        type ReminderMember = Awaited<
-          ReturnType<ReminderExecutionDeps["getMembers"]>
-        >[number];
+        const { run, handling, featureId, calls, repo } = await runFeature(MIXED_REQUEST, {
+          feature_route: NIGHT_LAUNDRY_FEATURE_ID,
+          // mock 返回的是**模型原始文本**，真实的 JSON 提取 + schema 校验照跑。
+          // 抽取只留三个中性类别字段：设备类别 / 时段 / 是否影响休息。
+          night_laundry_extract: JSON.stringify({
+            machine: "both",
+            timeWindow: "pre_dawn",
+            affectsRest: true,
+          }),
+          night_laundry_message: JSON.stringify({
+            message: NIGHT_BODY,
+            receipt: "好，已经跟阿川说了，在等他回话。",
+          }),
+        });
+        assert.equal(featureId, NIGHT_LAUNDRY_FEATURE_ID, "混合请求必须命中夜间洗衣这一项");
+        // **只调一次路由**，不是每个功能各判一次；且只走被选中功能的抽取。
+        const routeCalls = calls.filter((c) => c.name === FEATURE_ROUTE_NAME);
+        assert.equal(routeCalls.length, 1, "路由只允许一次调用");
+        assert.equal(routeCalls[0].stage, FEATURE_ROUTE_STAGE);
+        assert.equal(routeCalls[0].user, MIXED_REQUEST, "路由阶段拿到住户原话");
+        assert.equal(
+          calls.filter((c) => c.name.startsWith("personal_item")).length,
+          0,
+          "未被选中的功能一次都不能调（不再是 N 个 judge 并行）"
+        );
+        assert(handling, "命中且收件人唯一时必须办完");
+        // 生成阶段：只拿三个中性类别字段，看不到原话，更看不到夹带诉求与来源情境。
+        const compose = calls.find((c) => c.name === "night_laundry_message");
+        assert(compose, "必须走到生成阶段");
+        assert(compose!.user.includes("阿川"), "生成阶段可以知道收件人");
+        assert(
+          compose!.user.includes("洗衣机和烘干机"),
+          "生成阶段拿到的是设备类别，不是原始设备描述"
+        );
+        assert(compose!.user.includes("凌晨"), "生成阶段拿到的是时段类别，不是原始时间原话");
+        for (const leak of ["头发", "地漏", "水费", "分摊", "全屋", "规矩", "清理"]) {
+          assert(
+            !compose!.user.includes(leak),
+            `未获准的诉求「${leak}」绝不能进入生成阶段的输入`
+          );
+        }
+        // **来源情境绝不能被喂进生成阶段**（否则模型可能第一人称复述，把 AI 写成受影响
+        // 的住户）：原始时间原话、原始空间细节、原始混合请求本身，一个都不许出现。
+        assert(!compose!.user.includes(MIXED_REQUEST), "生成阶段看不到原始混合请求");
+        for (const privateDetail of ["昨天凌晨四点", "机器挨着房间那面墙", "我房间", "我被吵醒"]) {
+          assert(
+            !compose!.user.includes(privateDetail),
+            `来源情境「${privateDetail}」绝不能进入生成阶段的输入`
+          );
+        }
+        // 真的只发这一条、正文是模型写的那句。
+        assert.equal(repo.thirdParty().length, 1, "恰好一条第三方出站");
+        assert.equal(repo.thirdParty()[0].toPersonId, GATE_ACHUAN, "收件人只能是阿川");
+        assert.equal(repo.thirdParty()[0].body, NIGHT_BODY, "正文是模型生成的那句，不是常量");
+        assert.equal(repo.queued.length, 1, "夹带的诉求一律不执行");
+        assert.equal(handling!.sms?.text, NIGHT_BODY);
+        assert.equal(handling!.reply, "好，已经跟阿川说了，在等他回话。", "回执用模型写的那句");
+      }
+    );
 
-        const SENDER = "11111111-0000-0000-0000-000000000001";
-        const ACHUAN = "22222222-0000-0000-0000-000000000002";
-        const XIAOHE = "33333333-0000-0000-0000-000000000003";
-        const HOUSE = "aaaaaaaa-0000-0000-0000-000000000000";
+    await checkAsync(
+      "个人物品功能：收窄字段随功能不同，正文来自模型生成，空回执才回落兜底",
+      async () => {
+        const request =
+          "阿川又拿了我搁在客厅的充电器，用完也不吭声。你帮我跟他讲一声，下次动我东西前先跟我打个招呼。";
+        const { featureId, handling, calls, repo } = await runFeature(request, {
+          feature_route: PERSONAL_ITEM_FEATURE_ID,
+          personal_item_extract: JSON.stringify({
+            item: "客厅的充电器",
+            notPutBack: true,
+          }),
+          personal_item_message: JSON.stringify({ message: ITEM_BODY, receipt: "" }),
+        });
+        assert.equal(featureId, PERSONAL_ITEM_FEATURE_ID, "个人物品交办必须命中个人物品这一项");
+        assert.equal(
+          calls.filter((c) => c.name === FEATURE_ROUTE_NAME).length,
+          1,
+          "路由只调一次"
+        );
+        assert.equal(
+          calls.filter((c) => c.name.startsWith("night_laundry")).length,
+          0,
+          "未被选中的夜间洗衣功能一次都不能调"
+        );
+        const compose = calls.find((c) => c.name === "personal_item_message");
+        assert(compose, "必须走到生成阶段");
+        assert(compose!.user.includes("客厅的充电器"), "生成阶段拿到本功能获准的物品");
+        assert(compose!.user.includes("没有归位"), "生成阶段拿到的是归位与否这个中性字段");
+        assert(!/洗衣|烘干|深夜/.test(compose!.user), "生成阶段不得看到另一功能的主题");
+        // 来源情境 / 原始请求 / 第一人称描述一律不能喂进生成阶段：否则模型可能用
+        // 第一人称冒充物品主人（「我的东西」「我搁在」）。
+        assert(!compose!.user.includes(request), "生成阶段看不到原始请求");
+        for (const privateDetail of ["我搁在", "用完也不吭声", "我东西"]) {
+          assert(
+            !compose!.user.includes(privateDetail),
+            `来源情境「${privateDetail}」绝不能进入生成阶段的输入`
+          );
+        }
+        assert(handling, "命中且收件人唯一时必须办完");
+        assert.equal(repo.thirdParty().length, 1, "恰好一条第三方出站");
+        assert.equal(repo.thirdParty()[0].toPersonId, GATE_ACHUAN, "收件人只能是阿川");
+        assert.equal(repo.thirdParty()[0].body, ITEM_BODY, "正文是模型生成的那句，不是常量");
+        assert.equal(
+          handling!.reply,
+          personalItemFallbackReceipt("阿川"),
+          "模型回执为空时才回落到兜底短句"
+        );
+      }
+    );
 
-        const member = (
-          personId: string,
-          name: string,
-          over: Partial<ReminderMember> = {}
-        ): ReminderMember => ({
-          personId,
-          name,
-          role: "tenant",
-          resides: true,
-          movedInAt: null,
-          nameConfirmed: true,
-          address: "+15550000001",
-          notes: [],
-          ...over,
+    await checkAsync(
+      "none（与清单无关的普通话）：落回普通对话，零出站、零写入、不进抽取/生成",
+      async () => {
+        const members = [gateMember(GATE_SENDER, "小禾"), gateMember(GATE_ACHUAN, "阿杰")];
+        const { run, handling, featureId, calls, repo } = await runFeature(
+          "最近天气凉了，屋里有点冷。",
+          { feature_route: "none" },
+          {
+            members,
+            usages: {
+              feature_route: { steps: 1, inputTokens: 50, outputTokens: 2, costUsd: 0.004 },
+            },
+          }
+        );
+        assert.equal(featureId, null, "普通话不得命中任何已批准功能");
+        assert.equal(run.mode, "none", "普通话必须落回普通对话");
+        assert.equal(handling, null, "没命中就不执行");
+        assert.equal(run.error, undefined, "none 是正常结果，不是失败");
+        assert.equal(repo.queued.length, 0, "零写入");
+        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
+        assert.equal(repo.decisions.length, 0, "零决定");
+        assert.equal(calls.length, 1, "只调一次路由");
+        assert.equal(calls[0].name, FEATURE_ROUTE_NAME);
+        assert.equal(
+          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
+          0,
+          "none 不进抽取 / 生成"
+        );
+        // 即使 none，路由这次调用真实花的钱也必须计回来。
+        assert.equal(run.usage.steps, 1);
+        assert.equal(run.usage.inputTokens, 50);
+        assert.equal(run.usage.costUsd, 0.004, "route none 也要计费");
+      }
+    );
+
+    await checkAsync(
+      "unsupported（不是功能、不是工具）：029 电视音量点名要 AI 找室友，主题不在清单 → 无工具、无出站、只回一句真话",
+      async () => {
+        const tv =
+          "阿杰在客厅把电视开得特别响，我在房间补觉根本睡不着。你赶紧帮我跟他说一声，让他先把音量调小点，行吗？";
+        const truth =
+          "这件事我现在没法替你发给阿杰，还没有跟他说。";
+        const members = [gateMember(GATE_SENDER, "小禾"), gateMember(GATE_ACHUAN, "阿杰")];
+        const { run, handling, featureId, calls, repo } = await runFeature(
+          tv,
+          {
+            feature_route: FEATURE_ROUTE_UNSUPPORTED,
+            feature_unsupported: JSON.stringify({ reply: truth }),
+          },
+          {
+            members,
+            usages: {
+              feature_route: { steps: 1, inputTokens: 60, outputTokens: 1, costUsd: 0.002 },
+              feature_unsupported: { steps: 1, inputTokens: 80, outputTokens: 22, costUsd: 0.003 },
+            },
+          }
+        );
+        assert.equal(featureId, null, "unsupported 不是功能，featureId 必须为 null");
+        assert.equal(run.mode, "unsupported", "电视音量这类未开放交办必须显式标成 unsupported");
+        assert(handling, "保留对话轮也要给当前住户一句真话");
+        assert.equal(handling!.sms, null, "unsupported 绝不产生任何出站");
+        assert.equal(handling!.decisionId, null, "unsupported 不落联系决定");
+        assert.equal(handling!.reply, truth, "回给当前住户的是模型生成的那句真话");
+        // 零第三方出站、零写入、零决定：它不是功能、不是工具。
+        assert.equal(repo.queued.length, 0, "零写入");
+        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
+        assert.equal(repo.decisions.length, 0, "零决定");
+        // 两次调用：一次路由 + 一次 unsupported 小回复；绝不进任何功能的抽取 / 生成。
+        assert.equal(calls.length, 2, "恰好两次调用：路由 + unsupported");
+        assert.equal(calls[0].name, FEATURE_ROUTE_NAME);
+        assert.equal(calls[1].name, UNSUPPORTED_NAME);
+        assert.equal(calls[1].stage, UNSUPPORTED_STAGE);
+        assert.equal(
+          calls[1].maxOutputTokens,
+          FEATURE_UNSUPPORTED_MAX_OUTPUT_TOKENS,
+          "unsupported 用独立档位常量，不写字面量"
+        );
+        assert.equal(calls[1].user === tv, true, "小回复只对当前说话人，可以看他的原话");
+        assert.equal(
+          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
+          0,
+          "unsupported 不进任何功能的抽取 / 生成"
+        );
+        // 用量照记：路由 + 小回复两段都并进本轮。
+        assert.equal(run.usage.steps, 2);
+        assert.equal(run.usage.inputTokens, 140);
+        assert.equal(run.usage.outputTokens, 23);
+        assert.equal(Math.round(run.usage.costUsd * 1000) / 1000, 0.005);
+      }
+    );
+
+    await checkAsync(
+      "unsupported 生成失败 → 中性兜底收尾，绝不落回主生成（不调 proposeRule 之类）",
+      async () => {
+        const tv = "帮我跟阿杰说一声把电视调小点。";
+        const members = [gateMember(GATE_SENDER, "小禾"), gateMember(GATE_ACHUAN, "阿杰")];
+        const boom = new FeatureCallError(
+          UNSUPPORTED_STAGE,
+          new Error("unsupported json invalid"),
+          { ...EMPTY_FEATURE_USAGE, steps: 1, inputTokens: 30, outputTokens: 5, costUsd: 0.002 }
+        );
+        const { run, handling, calls, repo } = await runFeature(
+          tv,
+          { feature_route: FEATURE_ROUTE_UNSUPPORTED, feature_unsupported: boom },
+          {
+            members,
+            usages: {
+              feature_route: { steps: 1, inputTokens: 40, outputTokens: 1, costUsd: 0.001 },
+            },
+          }
+        );
+        assert.equal(run.mode, "unsupported", "失败也必须留在 unsupported 收尾");
+        assert.equal(run.featureId, null);
+        assert(handling, "失败也要给当前住户一句中性兜底");
+        assert.equal(handling!.sms, null, "兜底也绝不出站");
+        assert.equal(handling!.reply, UNSUPPORTED_FALLBACK, "失败回落到中性兜底短句");
+        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
+        assert.equal(repo.decisions.length, 0, "零决定");
+        assert.equal(
+          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
+          0,
+          "失败不得落回任何功能的抽取 / 生成"
+        );
+        // 失败调用已发生的真实用量不得丢。
+        assert.equal(run.usage.steps, 2, "路由 + 失败的 unsupported");
+        assert.equal(run.usage.costUsd, 0.003, "路由 + 失败调用已花的钱都要照记");
+        assert.equal(run.error, boom, "失败作为 error 暴露（供日志定位，但不当成落回主生成的理由）");
+      }
+    );
+
+    await checkAsync(
+      "reply_only（不是功能、不是工具）：明确围绕已批准功能但本轮不动作 → 无工具、无出站、只回当前住户",
+      async () => {
+        const text = "先别提醒阿川深夜洗衣服的事，我还得再想想，别急着替我说。";
+        const replyText = "好，那这一轮我先不动，你想好要不要说再跟我讲。";
+        const { run, handling, featureId, calls, repo } = await runFeature(
+          text,
+          {
+            feature_route: FEATURE_ROUTE_REPLY_ONLY,
+            feature_reply_only: JSON.stringify({ reply: replyText }),
+          },
+          {
+            usages: {
+              feature_route: { steps: 1, inputTokens: 40, outputTokens: 1, costUsd: 0.001 },
+              feature_reply_only: { steps: 1, inputTokens: 60, outputTokens: 20, costUsd: 0.002 },
+            },
+          }
+        );
+        assert.equal(run.mode, "reply_only", "保留对话轮必须显式标成 reply_only");
+        assert.equal(featureId, null, "reply_only 不是功能，featureId 必须为 null");
+        assert(handling, "保留对话轮也要给当前住户一句回应");
+        assert.equal(handling!.sms, null, "reply_only 绝不产生任何出站");
+        assert.equal(handling!.decisionId, null, "reply_only 不落决定");
+        assert.equal(handling!.reply, replyText, "回给当前住户的是模型生成的那句，不是常量");
+        // 零第三方出站、零写入、零决定：它不是功能、不是工具。
+        assert.equal(repo.queued.length, 0, "零写入");
+        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
+        assert.equal(repo.decisions.length, 0, "零决定");
+        // 两次调用：一次路由 + 一次小回复；绝不进任何功能的抽取 / 生成。
+        assert.equal(calls.length, 2, "恰好两次调用：路由 + reply_only");
+        assert.equal(calls[0].name, FEATURE_ROUTE_NAME);
+        assert.equal(calls[1].name, REPLY_ONLY_NAME);
+        assert.equal(calls[1].stage, REPLY_ONLY_STAGE);
+        assert.equal(
+          calls[1].maxOutputTokens,
+          FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS,
+          "reply_only 用独立档位常量，不写字面量"
+        );
+        assert(calls[1].user === text, "小回复只对当前说话人，可以看他的原话");
+        assert.equal(
+          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
+          0,
+          "reply_only 不进任何功能的抽取 / 生成"
+        );
+        // 用量照记：路由 + 小回复两段都并进本轮。
+        assert.equal(run.usage.steps, 2);
+        assert.equal(run.usage.inputTokens, 100);
+        assert.equal(run.usage.outputTokens, 21);
+        assert.equal(Math.round(run.usage.costUsd * 1000) / 1000, 0.003);
+      }
+    );
+
+    await checkAsync(
+      "reply_only 生成失败 → 中性兜底收尾，绝不落回主生成（不调 proposeRule 之类）",
+      async () => {
+        const boom = new FeatureCallError(
+          REPLY_ONLY_STAGE,
+          new Error("reply_only json invalid"),
+          { ...EMPTY_FEATURE_USAGE, steps: 1, inputTokens: 30, outputTokens: 5, costUsd: 0.002 }
+        );
+        const { run, handling, calls, repo } = await runFeature(
+          "先别提醒阿川深夜洗衣服的事，我还得再想想。",
+          { feature_route: FEATURE_ROUTE_REPLY_ONLY, feature_reply_only: boom },
+          {
+            usages: {
+              feature_route: { steps: 1, inputTokens: 40, outputTokens: 1, costUsd: 0.001 },
+            },
+          }
+        );
+        assert.equal(run.mode, "reply_only", "失败也必须留在 reply_only 收尾");
+        assert.equal(run.featureId, null);
+        assert(handling, "失败也要给当前住户一句中性兜底");
+        assert.equal(handling!.sms, null, "兜底也绝不出站");
+        assert.equal(handling!.reply, REPLY_ONLY_FALLBACK, "失败回落到中性兜底短句");
+        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
+        assert.equal(repo.decisions.length, 0, "零决定");
+        assert.equal(
+          calls.filter((c) => c.name.endsWith("_extract") || c.name.endsWith("_message")).length,
+          0,
+          "失败不得落回任何功能的抽取 / 生成"
+        );
+        // 失败调用已发生的真实用量不得丢。
+        assert.equal(run.usage.steps, 2, "路由 + 失败的 reply_only");
+        assert.equal(run.usage.costUsd, 0.003, "路由 + 失败调用已花的钱都要照记");
+        assert.equal(run.error, boom, "失败作为 error 暴露（供日志定位，但不当成落回主生成的理由）");
+      }
+    );
+
+    await checkAsync(
+      "生成阶段拿不出正文 → 不执行、零写入（前门落回普通对话）",
+      async () => {
+        const { run, handling, repo } = await runFeature("提醒 阿川 深夜别开洗衣机", {
+          feature_route: NIGHT_LAUNDRY_FEATURE_ID,
+          night_laundry_extract: JSON.stringify({
+            machine: "both",
+            timeWindow: "late_night",
+            affectsRest: false,
+          }),
+          night_laundry_message: JSON.stringify({ message: "", receipt: "好。" }),
+        });
+        assert.equal(run.mode, "feature", "命中过功能就是 feature 模式，即使没形成出站");
+        assert.equal(handling, null, "空正文不得形成出站");
+        assert.equal(repo.queued.length, 0, "零写入");
+        assert.equal(repo.thirdParty().length, 0, "零第三方出站");
+      }
+    );
+
+    await checkAsync(
+      "收件人不可达：真话说明、零写入（sms 为 null），且不再调生成",
+      async () => {
+        const unreachable = [
+          gateMember(GATE_SENDER, "小禾"),
+          gateMember(GATE_ACHUAN, "阿川", { nameConfirmed: false }),
+        ];
+        const { featureId, handling, calls, repo } = await runFeature(
+          "提醒 阿川 用我的个人物品前先问我",
+          {
+            feature_route: PERSONAL_ITEM_FEATURE_ID,
+            personal_item_extract: JSON.stringify({ item: "个人物品", notPutBack: false }),
+            // 不预置 personal_item_message：不可达时它在 execute 里就返回，根本不该被调到。
+          },
+          { members: unreachable }
+        );
+        assert.equal(featureId, PERSONAL_ITEM_FEATURE_ID, "交办本身命中");
+        assert(handling, "命中但收件人不可达时也要给住户一句真话");
+        assert.equal(handling!.sms, null, "不可达 → 零出站");
+        assert.match(handling!.reply, /姓名还没确认/, "回给住户的是真话说明");
+        assert.equal(repo.queued.length, 0, "不可达时零写入");
+        assert.equal(repo.thirdParty().length, 0, "不可达时零第三方出站");
+        assert.equal(
+          calls.filter((c) => c.name === "personal_item_message").length,
+          0,
+          "不可达时不得再调生成"
+        );
+      }
+    );
+
+    await checkAsync(
+      "用量准确累计：一次路由 + 选中功能抽取 + 生成三段都并进 run.usage",
+      async () => {
+        const { run, calls } = await runFeature(
+          MIXED_REQUEST,
+          {
+            feature_route: NIGHT_LAUNDRY_FEATURE_ID,
+            night_laundry_extract: JSON.stringify({
+              machine: "both",
+              timeWindow: "late_night",
+              affectsRest: false,
+            }),
+            night_laundry_message: JSON.stringify({ message: NIGHT_BODY, receipt: "好。" }),
+          },
+          {
+            usages: {
+              feature_route: { steps: 1, inputTokens: 100, outputTokens: 3, costUsd: 0.001 },
+              night_laundry_extract: { steps: 1, inputTokens: 200, outputTokens: 10, costUsd: 0.002 },
+              night_laundry_message: { steps: 1, inputTokens: 300, outputTokens: 20, costUsd: 0.003 },
+            },
+          }
+        );
+        assert(run.handling, "命中必须办完");
+        assert.equal(calls.length, 3, "恰好三次调用：路由 + 抽取 + 生成");
+        assert.equal(calls[0].name, FEATURE_ROUTE_NAME, "第一次就是路由");
+        assert.equal(run.usage.steps, 3);
+        assert.equal(run.usage.inputTokens, 600);
+        assert.equal(run.usage.outputTokens, 33);
+        assert.equal(Math.round(run.usage.costUsd * 1000) / 1000, 0.006);
+        assert(
+          calls.every((c) => Number.isInteger(c.maxOutputTokens) && c.maxOutputTokens > 0),
+          "每条短调用都必须有正的最大输出上限"
+        );
+        // 上限必须**在合理推理输出之前不会截断**：DeepSeek V4.1 Flash 把 reasoning
+        // tokens 计入 maxOutputTokens，128 / 320 这种旧值会在文本产出前耗尽（真实
+        // 复现过 NoOutputGeneratedError），守一个下限防回归。
+        assert(
+          calls.every((c) => c.maxOutputTokens >= FEATURE_MIN_OUTPUT_TOKENS),
+          `每条短调用的上限都必须 ≥ ${FEATURE_MIN_OUTPUT_TOKENS}（推理也占额度）`
+        );
+        assert.equal(
+          calls[0].maxOutputTokens,
+          FEATURE_ROUTE_MAX_OUTPUT_TOKENS,
+          "路由档位用统一常量，不写字面量"
+        );
+      }
+    );
+
+    await checkAsync(
+      "失败调用也计入：抽取抛错时，路由已花的钱与失败调用用量都不丢",
+      async () => {
+        const boom = new FeatureCallError(
+          "feature:night_laundry:extract",
+          new Error("extract json invalid"),
+          {
+            ...EMPTY_FEATURE_USAGE,
+            steps: 1,
+            inputTokens: 40,
+            outputTokens: 7,
+            costUsd: 0.002,
+          }
+        );
+        const { run, calls, repo } = await runFeature("提醒 阿川 深夜别开洗衣机", {
+          feature_route: NIGHT_LAUNDRY_FEATURE_ID,
+          night_laundry_extract: boom,
+        }, {
+          usages: {
+            feature_route: { steps: 1, inputTokens: 30, outputTokens: 1, costUsd: 0.001 },
+          },
+        });
+        assert.equal(run.error, boom, "失败要作为 error 暴露（调用方落回普通对话）");
+        assert.equal(run.handling, null);
+        assert.equal(run.featureId, null);
+        assert.equal(run.usage.steps, 2, "路由 + 失败的抽取");
+        assert.equal(run.usage.costUsd, 0.003, "route + 失败抽取的真实用量都要计入");
+        assert.equal(repo.thirdParty().length, 0, "失败时零出站");
+        assert.equal(
+          calls.filter((c) => c.name.endsWith("_message")).length,
+          0,
+          "抽取失败后不得再调生成"
+        );
+      }
+    );
+
+    await checkAsync(
+      "功能轮收尾不重复记 decision：真发出第三方短信时复用 deliverSms 的 contact_one，只有无出站才新建 reply_only",
+      async () => {
+        const gateSender = {
+          personId: GATE_SENDER,
+          name: "小禾",
+          role: "tenant" as const,
+          householdId: GATE_HOUSE,
+          householdLabel: "评测功能轮收尾",
+          dwellingId: "dwelling-gate",
+          isTest: true,
+        };
+        const finalizeArgs = (handling: FeatureHandling) =>
+          ({
+            text: "提醒 阿川 深夜别开洗衣机",
+            channel: "sms",
+            decisionIntent: "已批准功能（night_laundry）命中",
+            handling,
+            usage: EMPTY_FEATURE_USAGE,
+            sender: gateSender,
+            conversationId: "conv-gate",
+            modelId: "test-model",
+            turnStartedAt: new Date(0),
+          }) satisfies Parameters<typeof finalizeFeatureTurn>[0];
+
+        // —— 1. 功能真的把短信发给室友：deliverSms 已落一条 contact_one，收尾必须复用 ——
+        const { handling, repo } = await runFeature("提醒 阿川 深夜别开洗衣机", {
+          feature_route: NIGHT_LAUNDRY_FEATURE_ID,
+          night_laundry_extract: JSON.stringify({
+            machine: "washer",
+            timeWindow: "late_night",
+            affectsRest: true,
+          }),
+          night_laundry_message: JSON.stringify({
+            message: NIGHT_BODY,
+            receipt: "好，已经跟阿川说了，在等他回话。",
+          }),
+        });
+        assert(handling?.sms, "这一轮必须真的发出第三方短信");
+        assert.equal(repo.decisions.length, 1, "deliverSms 恰好落一条 decision");
+        assert.equal(repo.decisions[0].kind, "contact_one", "投递落的是 contact_one");
+        const contactDecisionId = repo.decisions[0].id;
+        assert.equal(
+          handling!.decisionId,
+          contactDecisionId,
+          "handling 必须把这条联系决策带回收尾"
+        );
+
+        const outcome = await finalizeFeatureTurn(finalizeArgs(handling!), repo.finalize);
+        assert.equal(
+          repo.decisions.length,
+          1,
+          "收尾不得再新建第二条 decision（否则复盘会把一次联系看成两件事）"
+        );
+        assert.equal(
+          repo.decisions.filter((d) => d.kind === "reply_only").length,
+          0,
+          "已经真的发出去了，就不该再落一条 reply_only"
+        );
+        assert.equal(
+          outcome.decisionId,
+          contactDecisionId,
+          "TurnOutcome.decisionId 必须复用 contact_one，而不是收尾新建的 reply_only"
+        );
+        assert.equal(outcome.outbound.length, 1, "第三方出站照旧返回给调用方投递");
+        assert.equal(outcome.outbound[0].personId, GATE_ACHUAN, "出站仍是原话点名的阿川");
+        const receipt = repo.queued.find((q) => q.toPersonId === GATE_SENDER);
+        assert(receipt, "必须有一条回给发起人的回执");
+        assert.equal(
+          receipt!.decisionId,
+          contactDecisionId,
+          "回给发起人的回执 communication 必须挂同一条 contact_one decision"
+        );
+
+        // —— 2. reply_only 保留轮：没有第三方短信可挂 → 才新建一条 reply_only ——
+        const ro = makeDelivery();
+        const replyOnlyOutcome = await finalizeFeatureTurn(
+          finalizeArgs({
+            status: "handled",
+            reply: "好，这一轮我先不替你发出去，你想好了再跟我说。",
+            sms: null,
+            decisionId: null,
+          }),
+          ro.finalize
+        );
+        assert.equal(ro.decisions.length, 1, "无出站时恰好新建一条 decision");
+        assert.equal(ro.decisions[0].kind, "reply_only", "无出站时新建的是 reply_only");
+        assert.equal(
+          replyOnlyOutcome.decisionId,
+          ro.decisions[0].id,
+          "TurnOutcome.decisionId 是新建的 reply_only"
+        );
+        assert.equal(replyOnlyOutcome.outbound.length, 0, "reply_only 零出站");
+        assert.equal(
+          ro.queued.find((q) => q.toPersonId === GATE_SENDER)?.decisionId,
+          ro.decisions[0].id,
+          "reply_only 的回执挂新建的 reply_only decision"
+        );
+
+        // —— 3. 收件人不可达 / 没形成第三方出站：同样新建 reply_only（不是 contact_one） ——
+        const unreachable = makeDelivery();
+        const unreachableOutcome = await finalizeFeatureTurn(
+          finalizeArgs({
+            status: "handled",
+            reply: "阿川 的姓名还没确认，我暂时没法把提醒发给他。",
+            sms: null,
+            decisionId: null,
+          }),
+          unreachable.finalize
+        );
+        assert.equal(unreachable.decisions.length, 1);
+        assert.equal(
+          unreachable.decisions[0].kind,
+          "reply_only",
+          "不可达没有联系决策，只落一条 reply_only"
+        );
+        assert.equal(unreachableOutcome.decisionId, unreachable.decisions[0].id);
+        assert.equal(unreachableOutcome.outbound.length, 0, "不可达零出站");
+      }
+    );
+
+    check("抽取 schema 只收有限结构字段（required、无任意 detail、越界/缺字段一律拒绝）", () => {
+      // **返工核心约束**：抽取不再放任意的 detail 原文，只保留有限的结构字段
+      // （枚举 / 布尔 / nullable 字符串）——生成阶段因此看不到来源情境，不可能把
+      // 「我房间」「我被吵醒」这类第一人称复述进发给室友的正文。
+      // 字段全是 required（无 optional：部分 provider 结构化输出兼容性差），
+      // 缺字段会被 `safeParse` 拒绝 → 安全不发送；未知一律落到中性值。
+      for (const [label, field] of [
+        ["night_laundry.machine", nightLaundryExtractionSchema.shape.machine],
+        ["night_laundry.timeWindow", nightLaundryExtractionSchema.shape.timeWindow],
+        ["night_laundry.affectsRest", nightLaundryExtractionSchema.shape.affectsRest],
+        ["personal_item.item", personalItemExtractionSchema.shape.item],
+        ["personal_item.notPutBack", personalItemExtractionSchema.shape.notPutBack],
+      ] as const) {
+        assert.equal(field.isOptional(), false, `${label} 不得是 optional（缺字段必须被拒）`);
+      }
+      // 物品「没指明」要能表达 → required + nullable（显式 null 被接受）。
+      assert.equal(
+        personalItemExtractionSchema.shape.item.isNullable(),
+        true,
+        "personal_item.item 必须是 nullable（没有就显式 null）"
+      );
+      // 旧的任意 detail 字段必须彻底删掉。
+      for (const [label, shape] of [
+        ["夜间洗衣", nightLaundryExtractionSchema.shape],
+        ["个人物品", personalItemExtractionSchema.shape],
+      ] as const) {
+        assert(!("detail" in shape), `${label}抽取不得再留任意 detail 字段`);
+      }
+
+      // 合法值接受。
+      assert.equal(
+        nightLaundryExtractionSchema.safeParse({
+          machine: "both",
+          timeWindow: "pre_dawn",
+          affectsRest: true,
+        }).success,
+        true,
+        "合法夜间洗衣字段必须被接受"
+      );
+      assert.equal(
+        personalItemExtractionSchema.safeParse({ item: null, notPutBack: false }).success,
+        true,
+        "物品显式为 null 必须被接受"
+      );
+      // 缺字段被拒（required）。
+      assert.equal(
+        nightLaundryExtractionSchema.safeParse({ machine: "washer" }).success,
+        false,
+        "缺字段必须被拒（required）"
+      );
+      assert.equal(
+        personalItemExtractionSchema.safeParse({ item: "充电器" }).success,
+        false,
+        "缺 notPutBack 必须被拒（required）"
+      );
+      // 越界枚举 / 自由文本 / 类型漂移一律被拒：字段是有限结构，不是自由文本。
+      assert.equal(
+        nightLaundryExtractionSchema.safeParse({
+          machine: "washing machine",
+          timeWindow: "pre_dawn",
+          affectsRest: true,
+        }).success,
+        false,
+        "枚举外的设备类别必须被拒"
+      );
+      assert.equal(
+        nightLaundryExtractionSchema.safeParse({
+          machine: "both",
+          timeWindow: "凌晨四点",
+          affectsRest: true,
+        }).success,
+        false,
+        "自由文本时段必须被拒（只能枚举）"
+      );
+      assert.equal(
+        nightLaundryExtractionSchema.safeParse({
+          machine: "both",
+          timeWindow: "pre_dawn",
+          affectsRest: "yes",
+        }).success,
+        false,
+        "布尔字段不得接受字符串"
+      );
+    });
+
+    await checkAsync(
+      "抽取/生成走纯文本 JSON 协议：合法 JSON / code fence 通过；坏 JSON / 多对象 / 错字段安全失败且用量不丢",
+      async () => {
+        const stage = "feature:night_laundry:extract";
+        const call = {
+          stage,
+          name: "night_laundry_extract",
+          schema: nightLaundryExtractionSchema,
+          system: "s",
+          user: "u",
+          maxOutputTokens: 4096,
+        };
+        const genUsage = {
+          ...EMPTY_FEATURE_USAGE,
+          steps: 1,
+          inputTokens: 40,
+          outputTokens: 7,
+          costUsd: 0.002,
+        };
+        const fromText = (text: string): FeatureLlm => ({
+          async generate() {
+            return { text, usage: genUsage };
+          },
         });
 
-        function makeRepo(opts: { members: ReminderMember[] }) {
-          let seq = 0;
-          const queued: Array<{
-            toPersonId: string;
-            body: string;
-            purpose: string;
-            act: string;
-          }> = [];
-          const outbound: Array<{
-            conversationId: string;
-            personId: string;
-            body: string;
-            communicationId: string | null;
-          }> = [];
-          const decisions: Array<{
-            kind: string;
-            intent: string;
-            targetPersonIds: string[];
-            modelId: string | null;
-          }> = [];
+        // 合法 JSON 通过，并带回真实用量（gateway cost 照计）。
+        const ok = await structuredCall(
+          fromText('{"machine":"both","timeWindow":"pre_dawn","affectsRest":true}'),
+          call
+        );
+        assert.deepEqual(ok.value, { machine: "both", timeWindow: "pre_dawn", affectsRest: true });
+        assert.equal(ok.usage.costUsd, 0.002, "通过的调用带回真实用量");
 
-          const deps: ReminderExecutionDeps = {
-            getMembers: async () => opts.members,
-            recordDecision: async (args) => {
-              decisions.push({
-                kind: args.kind,
-                intent: args.intent ?? "",
-                targetPersonIds: args.targetPersonIds ?? [],
-                modelId: args.modelId ?? null,
-              });
-              return `decision-${++seq}`;
-            },
-            queueCommunication: async (args) => {
-              const id = `comm-${++seq}`;
-              queued.push({
-                toPersonId: args.toPersonId,
-                body: args.body,
-                purpose: args.purpose ?? "",
-                act: args.act ?? "",
-              });
-              return id;
-            },
-            getOrCreateConversation: async (args) =>
-              `${args.personId}:${args.channel}`,
-            appendMessage: async (args) => {
-              if (args.direction === "outbound") {
-                outbound.push({
-                  conversationId: args.conversationId,
-                  personId: args.personId,
-                  body: args.body,
-                  communicationId: args.communicationId ?? null,
-                });
-              }
-              return `msg-${++seq}`;
-            },
-          };
+        // 常见 markdown 代码围栏允许（围栏里就是那个 JSON 对象）。
+        const fenced = await structuredCall(
+          fromText(
+            '```json\n{"machine":"unspecified","timeWindow":"late_night","affectsRest":false}\n```'
+          ),
+          call
+        );
+        assert.deepEqual(fenced.value, {
+          machine: "unspecified",
+          timeWindow: "late_night",
+          affectsRest: false,
+        });
 
-          return {
-            deps,
-            queued,
-            outbound,
-            decisions,
-            /** 只数**发给别人的**（第三方）入队；发起人本人没有出站。 */
-            thirdParty: () => queued.filter((q) => q.toPersonId !== SENDER),
-          };
-        }
-
-        const baseMembers = [member(SENDER, "小林"), member(ACHUAN, "阿川")];
-        const personalAsk = "帮我提醒阿川用我的个人物品前先问我";
-        const nightAsk = "帮我提醒阿川深夜别开洗衣机";
-
-        // ① 合规自然请求（含无冒号点名请求）→ 恰好一条固定第三方出站 + 短回执。
-        {
-          const repo = makeRepo({ members: baseMembers });
-          const out = await deliverPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              text: personalAsk,
-            },
-            repo.deps
-          );
-          assert.equal(
-            out.kind,
-            "sent",
-            "点名但没按固定格式的个人物品请求必须直接发送，不能再回「说清楚要提醒谁」"
-          );
-          assert(
-            out.kind === "sent" &&
-              out.recipientPersonId === ACHUAN &&
-              out.text === PERSONAL_ITEM_REMINDER_TEXT &&
-              out.receiptText === personalItemReminderReceipt("阿川"),
-            "个人物品发送必须用固定正文 + 核对过的收件人 + 固定回执"
-          );
-          assert.equal(repo.thirdParty().length, 1, "个人物品恰好一条第三方出站");
-          assert.equal(repo.thirdParty()[0].toPersonId, ACHUAN);
-          assert.equal(
-            repo.thirdParty()[0].body,
-            PERSONAL_ITEM_REMINDER_TEXT,
-            "第三方出站正文必须是固定常量"
-          );
-          assert.equal(repo.queued.length, 1, "除那一条外不得有别的入队");
-          assert.equal(repo.outbound.length, 1, "只给收件人落一条出站消息");
-          assert.equal(repo.outbound[0].personId, ACHUAN);
-        }
-        {
-          const repo = makeRepo({ members: baseMembers });
-          const out = await deliverNightLaundryReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              text: nightAsk,
-            },
-            repo.deps
-          );
-          assert.equal(
-            out.kind,
-            "sent",
-            "点名但没按固定格式的夜间洗衣请求必须直接发送"
-          );
-          assert(
-            out.kind === "sent" &&
-              out.recipientPersonId === ACHUAN &&
-              out.text === NIGHT_LAUNDRY_REMINDER_TEXT &&
-              out.receiptText === nightLaundryReminderReceipt("阿川"),
-            "夜间洗衣发送必须用固定正文 + 核对过的收件人 + 固定回执"
-          );
-          assert.equal(repo.thirdParty().length, 1, "夜间洗衣恰好一条第三方出站");
-          assert.equal(repo.thirdParty()[0].body, NIGHT_LAUNDRY_REMINDER_TEXT);
-        }
-
-        // ② 混合 / 讨论 / 否定 / 未点名 → 零第三方出站、零写入、绝不部分执行。
-        {
-          const cases: Array<{
-            label: string;
-            deliver: (
-              args: {
-                householdId: string;
-                senderPersonId: string;
-                senderIsTest: boolean;
-                channel: string;
-                text: string;
-              },
-              deps: ReminderExecutionDeps
-            ) => Promise<{ kind: string }>;
-            text: string;
-          }> = [
-            {
-              label: "混合卫生（个人物品）",
-              deliver: deliverPersonalItemReminder,
-              text: "帮我提醒阿川用我的个人物品前先问我，顺便把地漏的头发清理了",
-            },
-            {
-              label: "混合费用（夜间洗衣）",
-              deliver: deliverNightLaundryReminder,
-              text: "帮我提醒阿川深夜别开洗衣机，水费也分摊一下",
-            },
-            {
-              label: "讨论",
-              deliver: deliverPersonalItemReminder,
-              text: "阿川老用我的东西，你觉得我该不该跟他说？",
-            },
-            {
-              label: "否定",
-              deliver: deliverPersonalItemReminder,
-              text: "别提醒阿川用我的个人物品前先问我。",
-            },
-            {
-              label: "未点名",
-              deliver: deliverNightLaundryReminder,
-              text: "有人半夜用洗衣机，你能不能跟他说一下。",
-            },
-          ];
-          for (const c of cases) {
-            const repo = makeRepo({ members: baseMembers });
-            const out = await c.deliver(
-              {
-                householdId: HOUSE,
-                senderPersonId: SENDER,
-                senderIsTest: true,
-                channel: "sms",
-                text: c.text,
-              },
-              repo.deps
-            );
-            assert.notEqual(out.kind, "sent", `${c.label}：绝不能发送`);
-            assert.equal(repo.thirdParty().length, 0, `${c.label}：零第三方出站`);
-            assert.equal(repo.queued.length, 0, `${c.label}：零写入`);
-            assert.equal(repo.outbound.length, 0, `${c.label}：零出站消息`);
-          }
-        }
-
-        // ③ 旧窄命令兼容：固定句式仍然直接发送，行为不变。
-        {
-          const repo = makeRepo({ members: baseMembers });
-          const out = await deliverPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              text: "提醒 阿川：使用我的个人物品前先问我",
-            },
-            repo.deps
-          );
-          assert.equal(out.kind, "sent", "旧窄命令必须仍然直接发送（兼容不破坏）");
-          assert.equal(repo.thirdParty().length, 1, "旧窄命令恰好一条第三方出站");
-        }
-        {
-          const repo = makeRepo({ members: baseMembers });
-          const out = await deliverNightLaundryReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              text: "提醒 阿川：深夜别开洗衣机或烘干机",
-            },
-            repo.deps
-          );
-          assert.equal(out.kind, "sent", "旧窄命令必须仍然直接发送（兼容不破坏）");
-          assert.equal(repo.thirdParty().length, 1, "旧窄命令恰好一条第三方出站");
-        }
-
-        // ④ 「确认」「取消」不再拥有专门出站语义：只是普通消息，零第三方。
-        {
-          for (const text of ["确认", "取消"]) {
-            const repo = makeRepo({ members: baseMembers });
-            const personal = await deliverPersonalItemReminder(
-              {
-                householdId: HOUSE,
-                senderPersonId: SENDER,
-                senderIsTest: true,
-                channel: "sms",
-                text,
-              },
-              repo.deps
-            );
-            const night = await deliverNightLaundryReminder(
-              {
-                householdId: HOUSE,
-                senderPersonId: SENDER,
-                senderIsTest: true,
-                channel: "sms",
-                text,
-              },
-              repo.deps
-            );
-            assert.equal(personal.kind, "none", `「${text}」不是个人物品请求`);
-            assert.equal(night.kind, "none", `「${text}」不是夜间洗衣请求`);
-            assert.equal(repo.thirdParty().length, 0, `「${text}」零第三方出站`);
-            assert.equal(repo.queued.length, 0, `「${text}」零写入`);
-          }
-        }
-
-        // ⑤ 点了不止一位室友（歧义）→ 真话澄清、零写入。
-        {
-          const repo = makeRepo({
-            members: [...baseMembers, member(XIAOHE, "小禾")],
-          });
-          const out = await deliverPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              text: "帮我提醒阿川和小禾用我的个人物品前先问我",
-            },
-            repo.deps
-          );
-          assert.equal(out.kind, "guidance", "点了不止一个人名必须给真话澄清");
-          assert.equal(repo.queued.length, 0, "歧义时零写入");
-        }
-
-        // ⑥ 收件人不可达（姓名未确认）→ 真话说明、零写入。
-        {
-          const repo = makeRepo({
-            members: [
-              member(SENDER, "小林"),
-              member(ACHUAN, "阿川", { nameConfirmed: false }),
-            ],
-          });
-          const out = await deliverPersonalItemReminder(
-            {
-              householdId: HOUSE,
-              senderPersonId: SENDER,
-              senderIsTest: true,
-              channel: "sms",
-              text: personalAsk,
-            },
-            repo.deps
-          );
-          assert.equal(out.kind, "guidance", "收件人姓名未确认时只回真话说明");
-          assert.equal(repo.queued.length, 0, "收件人不可达时零写入");
-        }
-
-        // ⑦ 直接执行同样过 assertCanWrite 硬闸：不开 COLIVING_LOCAL_WRITE、也不
-        // 把进程标成服务器运行时（不冒充生产），合规自然请求必须被拦下、零写入。
-        // 这条证明「近似入口」不是绕过发送硬闸的后门。
-        {
-          const repo = makeRepo({ members: baseMembers });
-          const savedLocal = process.env.COLIVING_LOCAL_WRITE;
-          const savedRuntime = process.env.NEXT_RUNTIME;
-          delete process.env.COLIVING_LOCAL_WRITE;
-          delete process.env.NEXT_RUNTIME;
+        // 坏 JSON / 多对象 / 错字段 / 字段类型错 / 枚举越界 / 夹带解释文字 / 根本不是对象：
+        // 一律安全失败（抛带 stage 的 FeatureCallError），且这次 generate 已花的
+        // 用量必须挂在错误上，不得丢成 0。
+        for (const bad of [
+          '{"machine": "both"', // 坏 JSON（未闭合）
+          '{"machine":"both","timeWindow":"late_night","affectsRest":false}{"machine":"washer","timeWindow":"late_night","affectsRest":true}', // 多对象
+          '{"machine":"both"}', // 缺 required 字段
+          '{"machine":1,"timeWindow":"late_night","affectsRest":false}', // 字段类型错
+          '{"machine":"washing machine","timeWindow":"late_night","affectsRest":false}', // 枚举越界
+          '好的，结果是 {"machine":"both","timeWindow":"late_night","affectsRest":false}', // 夹带解释文字
+          "深夜", // 不是 JSON 对象
+        ]) {
+          let caught: unknown;
           try {
-            await assert.rejects(
-              () =>
-                deliverPersonalItemReminder(
-                  {
-                    householdId: HOUSE,
-                    senderPersonId: SENDER,
-                    senderIsTest: true,
-                    channel: "sms",
-                    text: personalAsk,
-                  },
-                  repo.deps
-                ),
-              /本地进程不许写真实数据/,
-              "没开 COLIVING_LOCAL_WRITE 时直接发送必须被硬闸拦下"
-            );
-            assert.equal(repo.queued.length, 0, "被硬闸拦下时零写入");
-            assert.equal(repo.thirdParty().length, 0, "被硬闸拦下时零第三方出站");
-          } finally {
-            if (savedLocal === undefined) delete process.env.COLIVING_LOCAL_WRITE;
-            else process.env.COLIVING_LOCAL_WRITE = savedLocal;
-            if (savedRuntime === undefined) delete process.env.NEXT_RUNTIME;
-            else process.env.NEXT_RUNTIME = savedRuntime;
+            await structuredCall(fromText(bad), call);
+          } catch (error) {
+            caught = error;
           }
+          assert(caught instanceof FeatureCallError, `必须安全失败：${bad}`);
+          assert.equal((caught as FeatureCallError).stage, stage, "失败必须带 stage");
+          assert.match(
+            (caught as FeatureCallError).message,
+            /^stage=feature:night_laundry:extract: /,
+            "失败 message 必须以 stage 开头"
+          );
+          assert.equal(
+            usageOfFeatureError(caught).costUsd,
+            0.002,
+            "解析失败也不能把这次 generate 的用量丢成 0"
+          );
+        }
+
+        // 诊断里的模型文本必须截断，不能把整段输出塞进错误消息。
+        const longErr = await structuredCall(
+          fromText(`好的，这是结果 {"machine":${"x".repeat(400)}}`),
+          call
+        ).then(
+          () => null,
+          (error: unknown) => error
+        );
+        assert(longErr instanceof FeatureCallError);
+        assert(
+          !(longErr as FeatureCallError).message.includes("x".repeat(300)),
+          "诊断里的模型文本必须截断"
+        );
+
+        // 普通错误没有 SDK 诊断字段：回落默认 message，但 **仍须带 stage**。
+        const plain = new Error("network reset");
+        assert.equal(featureErrorDiagnostics(plain), null);
+        const plainWrapped = new FeatureCallError(
+          stage,
+          plain,
+          EMPTY_FEATURE_USAGE
+        );
+        assert.equal(
+          plainWrapped.message,
+          `stage=${stage}: network reset`,
+          "任何错误类型的 message 都必须带 stage（否则日志无法定位）"
+        );
+      }
+    );
+
+    // 真实 034 复现：推理把 maxOutputTokens 耗尽 → 输出为空 → SDK 抛
+    // NoOutputGeneratedError（无 text / response / usage）。以前只回落成
+    // 「No output generated.」，日志看不出是哪一步；现在至少要带 stage 与 cause。
+    check("NoOutputGeneratedError：诊断带 stage + cause；已完成 step 的用量照计", () => {
+      const stage = "feature:personal_item:compose";
+      const noOutput = new NoOutputGeneratedError({
+        cause: new Error("max output tokens reached before any output"),
+      });
+      const diag = featureErrorDiagnostics(noOutput);
+      assert(diag, "NoOutputGeneratedError 必须有诊断摘要");
+      assert.match(diag!, /NoOutputGeneratedError/);
+      assert.match(diag!, /cause=max output tokens reached/);
+      // 已完成 step 的真实用量（onStepFinish 已触发）必须能经 FeatureCallError 带出来——
+      // 推理耗尽的那次调用 step 本身是完成的，不能因为读不到错误自带 usage 就记 0。
+      const captured = {
+        ...EMPTY_FEATURE_USAGE,
+        steps: 1,
+        inputTokens: 500,
+        outputTokens: 4096,
+        costUsd: 0.004,
+      };
+      const wrapped = new FeatureCallError(stage, noOutput, captured, diag!);
+      assert.equal(wrapped.stage, stage);
+      assert.equal(wrapped.cause, noOutput);
+      assert.equal(
+        wrapped.message,
+        `stage=${stage}: ${diag}`,
+        "NoOutput 的 message 也必须带 stage"
+      );
+      assert.equal(
+        usageOfFeatureError(wrapped).outputTokens,
+        4096,
+        "NoOutput 时已完成 step 的 token 不得丢"
+      );
+      assert.equal(usageOfFeatureError(wrapped).costUsd, 0.004, "已发生的费用照记");
+    });
+
+    check("两个已批准功能仍是各自独立的模块（各写各的 extract / execute）", () => {
+      assert.equal(APPROVED_FEATURES.length, 2, "当前只批准两项");
+      const ids = APPROVED_FEATURES.map((f) => f.id);
+      assert.equal(new Set(ids).size, ids.length, "两个功能 id 必须互异");
+      for (const f of APPROVED_FEATURES) {
+        assert.equal(typeof f.extract, "function", `${f.id} 必须有自己的抽取`);
+        assert.equal(typeof f.execute, "function", `${f.id} 必须有自己的执行`);
+        assert(f.routeDescription.trim().length > 0, `${f.id} 必须有路由定义`);
+      }
+    });
+
+    await checkAsync(
+      "落库仍过 assertCanWrite 硬闸：不开 COLIVING_LOCAL_WRITE 时直接发送被拦、零写入",
+      async () => {
+        const repo = makeDelivery();
+        const savedLocal = process.env.COLIVING_LOCAL_WRITE;
+        const savedRuntime = process.env.NEXT_RUNTIME;
+        delete process.env.COLIVING_LOCAL_WRITE;
+        delete process.env.NEXT_RUNTIME;
+        try {
+          await assert.rejects(
+            () =>
+              deliverSms(
+                {
+                  householdId: GATE_HOUSE,
+                  channel: "sms",
+                  senderIsTest: true,
+                  purposeLabel: "夜间洗衣提醒",
+                  recipient: gateMembers[1],
+                  text: NIGHT_BODY,
+                },
+                repo.delivery
+              ),
+            /本地进程不许写真实数据/,
+            "没开 COLIVING_LOCAL_WRITE 时直接发送必须被硬闸拦下"
+          );
+          assert.equal(repo.queued.length, 0, "被硬闸拦下时零写入");
+          assert.equal(repo.thirdParty().length, 0, "被硬闸拦下时零第三方出站");
+        } finally {
+          if (savedLocal === undefined) delete process.env.COLIVING_LOCAL_WRITE;
+          else process.env.COLIVING_LOCAL_WRITE = savedLocal;
+          if (savedRuntime === undefined) delete process.env.NEXT_RUNTIME;
+          else process.env.NEXT_RUNTIME = savedRuntime;
+        }
+        // 兜底短句本身不得主动列能力 / 讲内部边界。
+        for (const t of [
+          nightLaundryFallbackReceipt("阿川"),
+          personalItemFallbackReceipt("阿川"),
+        ]) {
+          assert(
+            !/只能|能帮|帮不了|做不到|没办法|不能替|未开放|白名单|能力范围/.test(t),
+            `兜底短句不得主动讲能力边界：${t}`
+          );
         }
       }
     );
@@ -5704,13 +6098,14 @@ async function main() {
       turnSrc.includes("promptComposition: PromptComposition | null;"),
       "TurnOutcome 必须带可空观测字段（null=本轮没走模型）"
     );
-    // 五个 TurnOutcome 返回点都要显式给出：四条不调模型的路径显式 null
-    // （未知号码/接管/短路/已开放的个人物品使用提醒程序化早返回，不是 0），
-    // 主生成路径给真实长度/名称。少一个就会出现字段缺失。
+    // TurnOutcome 返回点都要显式给出：四条不调主模型的路径显式 null
+    // （未知号码 / 接管 / 短路 / 已批准功能前门命中，不是 0），主生成路径给真实长度/名称。
+    // 已批准功能现在在 `buildContext` 之后、主生成之前由功能前门直接办完并早返回
+    // （`finalizeFeatureTurn`），这是一条新的不调主模型的路径，所以这里回到四条。
     assert.equal(
       turnSrc.split("promptComposition: null,").length - 1,
       4,
-      "四条不走模型的返回路径（未知号码/接管/短路/已开放的个人物品使用提醒程序化早返回）都要显式 null"
+      "四条不走主模型的返回路径（未知号码/接管/短路/功能前门）都要显式 null"
     );
     assert(
       turnSrc.includes("doctrineChars: doctrine.length") &&
@@ -5973,7 +6368,7 @@ async function main() {
     );
   });
 
-  check("短信唯一：Twilio 投递路径与个人物品受限提醒仍保留", () => {
+  check("短信唯一：Twilio 投递路径与两项已批准功能仍保留（功能不是工具）", () => {
     const twilioSrc = readFileSync("app/api/twilio/messages/route.ts", "utf8");
     assert(
       twilioSrc.includes('channel: "sms"'),
@@ -5984,20 +6379,44 @@ async function main() {
         twilioSrc.includes("deliverWithGate"),
       "Twilio 短信投递的发送前竞态门禁必须保留"
     );
+    // 功能前门：turn.ts 在 buildContext 之后、主生成之前，经一次白名单路由判定并直接办完。
     const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
     assert(
-      turnSrc.includes("deliverPersonalItemReminder"),
-      "唯一受约束的第三方出站（个人物品提醒）必须仍在 turn.ts 接入"
-    );
-    const reminderSrc = readFileSync(
-      "lib/chat/coliving/personal-item-reminder.ts",
-      "utf8"
+      turnSrc.includes("runApprovedFeature(") && turnSrc.includes("finalizeFeatureTurn("),
+      "两项已批准功能必须由 turn.ts 的功能前门接入（一次路由，不经工具调用）"
     );
     assert(
-      reminderSrc.includes("PERSONAL_ITEM_REMINDER_TEXT"),
-      "个人物品提醒必须仍发写死正文（不接受自由文本）"
+      !turnSrc.includes("sendRoommateMessage"),
+      "共享短信工具已删，不得以任何形式回归 turn.ts"
+    );
+    // 清单写死在 features.ts；两个功能模块存在。
+    const featureSrc = readFileSync("lib/chat/coliving/features.ts", "utf8");
+    assert(
+      featureSrc.includes("nightLaundryFeature") &&
+        featureSrc.includes("personalItemFeature") &&
+        featureSrc.includes("APPROVED_FEATURES"),
+      "已批准功能清单必须写死在 features.ts"
+    );
+    assert(
+      existsSync("lib/chat/coliving/night-laundry-reminder.ts") &&
+        existsSync("lib/chat/coliving/personal-item-reminder.ts"),
+      "两项功能各写各的朴素模块，必须存在"
+    );
+    // 纯代码投递层：收件人绑定 + 落库发送 + 发送硬闸。
+    const deliverySrc = readFileSync("lib/chat/coliving/sms-delivery.ts", "utf8");
+    assert(
+      deliverySrc.includes("resolveNamedRecipient") &&
+        deliverySrc.includes("deliverSms") &&
+        deliverySrc.includes("assertCanWrite"),
+      "sms-delivery.ts 必须是纯代码的收件人绑定 + 落库投递（过 assertCanWrite）"
+    );
+    // 旧共享工具模块已删除。
+    assert(
+      !existsSync("lib/chat/coliving/roommate-message.ts"),
+      "旧架构的共享短信工具 roommate-message.ts 必须删除"
     );
   });
+
 
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);
 

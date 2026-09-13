@@ -162,10 +162,10 @@ export async function buildContext(
       "显示成符号。准则里的加粗和列表是写给你看的排版，别照抄发出去——要强调就把" +
       "话说重，要列几条就直接换行。"
   );
-  lines.push(
-    "当前你只能回复正在跟你说话的人。除「个人物品使用提醒」和「夜间洗衣提醒」" +
-      "这两种固定功能外，你不能给别的住户发消息，也不能替住户转达、催办或协调。"
-  );
+  // 这里**不再**列「能替住户发哪两件事、哪些发不出去」的能力清单：
+  // 边界由代码硬控（见 `features.ts` 的功能前门与 `docs/USER_FACING_CAPABILITY_TRUTH.md`），
+  // 每轮把这套话写进上下文只是白烧 token，还会污染不相关的对话。住户明确问到时，
+  // 按准则如实说明即可；回复里假装已经联系过对方会被 `claimsUnsentThirdPartyContact` 拦下。
   lines.push("");
 
   if (opts.answering) {

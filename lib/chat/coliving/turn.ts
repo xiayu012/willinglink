@@ -17,9 +17,11 @@ import {
 import { assertCanWrite } from "./guard";
 import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
-import { deliverNightLaundryReminder } from "./night-laundry-reminder";
-import { deliverPersonalItemReminder } from "./personal-item-reminder";
+import { runApprovedFeature } from "./features";
+import { addFeatureUsage, productionFeatureLlm } from "./feature-llm";
+import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
+import { resolveNamedRecipient, smsDeliveryDeps } from "./sms-delivery";
 import {
   bestSchedulePlans,
   checkScheduleSlotConsistency,
@@ -100,42 +102,65 @@ export function isUnsolicitedContactClaim(args: {
 }
 
 /**
- * **一般回复里的「假完成」收窄判定（严格收回第三方出站之后）。**
+ * **一般回复里的「假完成」收窄判定。**
  *
- * 现在普通对话没有任何第三方出站能力（只有个人物品提醒、夜间洗衣提醒两条
- * 受约束路径，命中时都已在主生成前收工）。
- * 模型仍可能在自由文本里说「我已经提醒他了」「我跟他说了」——那件事根本没发生。
- * 这里只抓**第一人称、完成/进行态**的声称，并且整句里不能有第二人称或建议
- * 语气（`你/您/请/建议/记得/最好/应该/能不能/要不要`）——那些是**在跟当前
- * 说话人讨论**，不是 AI 声称自己联系过，不能误伤。见 `claimsContactCompletion`
- * 的说明：正常讨论不受影响，只拦真正说出口的假完成。
+ * 第三方出站仍然只有两条受约束路径（个人物品使用提醒 / 夜间洗衣提醒），
+ * 但它们现在是**主生成之前就命中、直接收工的功能入口**（见 `features.ts`）：
+ * 命中的那一轮由功能自己的短回执回答，根本走不到这里。所以下面这条只覆盖
+ * **没有出站的普通轮**——那里模型更可能在自由文本里说「我已经提醒他了」
+ * 「我跟他说了」而这一轮其实没发出去。
+ *
+ * 逐句判断，整句里不能有第二人称或建议语气（`你/您/请/建议/记得/最好/应该/
+ * 能不能/要不要`）——那些是**在跟当前说话人讨论**，不是 AI 声称自己联系过，
+ * 不能误伤（「我已经跟你说过了」是合法的，不替换）。
+ *
+ * 两个来源（都复用现成判定，不另造大正则）：
+ *  1. 第一人称、完成/进行态的声称（下面 `FIRST_PERSON_UNSENT_CONTACT_PATTERN`）；
+ *  2. **省略主语的完成式**（「跟小浩说了」「已经跟阿杰说了」）——直接复用
+ *     `claimsContactCompletion`（`checkFalseContactClaim` 用的就是它）。
+ *     029 真实事故里模型回复「已经跟阿杰说了」没有主语，旧判定整条漏过、
+ *     `replyReview` 标红却仍把这句谎话发出去；这里把它纳入替换。
+ *     `claimsContactCompletion` 内部 `(?!我|您|你)` 保证「阿杰跟我说了」这类
+ *     **对方对我说**的反方向事实不被误伤。
  */
+function firstPersonUnsentContact(clause: string): boolean {
+  if (
+    /(?:我|这边|我们)/.test(clause) &&
+    /(?:已经|已|刚刚?|刚才|这就|马上|现在|正在|还在)/.test(clause) &&
+    /(?:说|讲|提|转达|传达|商量|联系|沟通|通知|确认|问|催|提醒|发|告诉)/.test(
+      clause
+    )
+  ) {
+    return true;
+  }
+  return /(?:我|这边|我们)[^。！？!?\n]{0,8}(?:联系|通知|提醒|转达|传达|告诉|问|催|发给)[^。！？!?\n]{0,4}(?:了|过)/.test(
+    clause
+  );
+}
+
 export function claimsUnsentThirdPartyContact(text: string): boolean {
   return text.split(/[。！？!?\n]/).some((clause) => {
     if (/[你您]|请|建议|记得|最好|应该|能不能|要不要/.test(clause)) {
       return false;
     }
-    if (
-      /(?:我|这边|我们)/.test(clause) &&
-      /(?:已经|已|刚刚?|刚才|这就|马上|现在|正在|还在)/.test(clause) &&
-      /(?:说|讲|提|转达|传达|商量|联系|沟通|通知|确认|问|催|提醒|发|告诉)/.test(
-        clause
-      )
-    ) {
+    if (firstPersonUnsentContact(clause)) {
       return true;
     }
-    return /(?:我|这边|我们)[^。！？!?\n]{0,8}(?:联系|通知|提醒|转达|传达|告诉|问|催|发给)[^。！？!?\n]{0,4}(?:了|过)/.test(
-      clause
-    );
+    // 省略主语的完成式：复用 claimsContactCompletion，与 checkFalseContactClaim 同源。
+    return claimsContactCompletion(clause);
   });
 }
 
 /**
  * 命中假完成时**只替换这一句**，换成一句短的、说真话的未发送说明。
  * 不改写其它内容——普通回复只要没有假完成就原样保留。
+ *
+ * **只说「没发出去」这一件事**，不列内部能力清单（老板明确不要
+ * 「我只能做……」这种把能力边界念给住户听的措辞；两项受约束功能的事
+ * 有各自的真话收据，不靠这句话概括）。
  */
 export const TRUTHFUL_UNSENT_REPLY =
-  "这件事我还没发给对方——现在能替你发的固定提醒只有「个人物品使用提醒」和「夜间洗衣提醒」两种。";
+  "这件事我还没发出去——我没有替你把话转给对方。";
 
 /** case.kind 是开放文本；只有明确属于同住人或共享资源争用的未结事项才算。 */
 export function isOpenConflictCase(c: { kind: string; title: string }): boolean {
@@ -1178,6 +1203,134 @@ export function buildGeneratorSystemMessages(input: {
   ];
 }
 
+/**
+ * `finalizeFeatureTurn` 收尾时用到的四类既有链路。**默认真 repo**；离线评测注入假
+ * repo，好断言"这一轮到底记了几条 decision"——功能轮**不该**在真的发出第三方短信后
+ * 又凭空新建一条 `reply_only` decision（那会让同一轮留下两条互不相关的判断记录）。
+ */
+export type FeatureFinalizeDeps = {
+  appendMessage: typeof repo.appendMessage;
+  linkResponse: typeof repo.linkResponse;
+  recordDecision: typeof repo.recordDecision;
+  queueCommunication: typeof repo.queueCommunication;
+};
+
+export const featureFinalizeDeps: FeatureFinalizeDeps = {
+  appendMessage: repo.appendMessage,
+  linkResponse: repo.linkResponse,
+  recordDecision: repo.recordDecision,
+  queueCommunication: repo.queueCommunication,
+};
+
+/**
+ * **已批准功能命中后的收尾——纯代码簿记，与普通轮同一条落库路径。**
+ *
+ * 功能入口在 `execute` 里已经用**只有本功能获准的字段**生成正文、由代码绑定
+ * 收件人、经 `deliverSms` 把发给室友的那条落库（decision → communication →
+ * appendMessage）。这里只补回给发起人的那一半：入站消息落库、linkResponse、
+ * 回执落库，并把这一轮组装成普通 `TurnOutcome` 返回——**不做主生成、不调
+ * 批判器、零额外模型调用**。
+ *
+ * 功能轮没有构建系统提示词，`promptComposition` 因此是 `null`（同简单肯定短路）。
+ */
+export async function finalizeFeatureTurn(
+  args: {
+    text: string;
+    channel: string;
+    /** 新建 **reply decision** 时的说明文字（命中功能 / 保留对话轮各不相同） */
+    decisionIntent: string;
+    handling: FeatureHandling;
+    /** 路由 + 抽取 + 生成（或 reply_only 小回复）各段真实用量合计 */
+    usage: TurnUsage;
+    sender: repo.Sender;
+    conversationId: string;
+    modelId: string;
+    turnStartedAt: Date;
+  },
+  deps: FeatureFinalizeDeps = featureFinalizeDeps
+): Promise<TurnOutcome> {
+  const { handling, sender } = args;
+
+  const inboundId = await deps.appendMessage({
+    conversationId: args.conversationId,
+    personId: sender.personId,
+    direction: "inbound",
+    channel: args.channel,
+    body: args.text,
+  });
+  if (inboundId) {
+    await deps.linkResponse({ personId: sender.personId, messageId: inboundId });
+  }
+
+  const reply = handling.reply.trim();
+
+  /**
+   * **收据只认一条 decision：真发出去就复用联系决策，没发才新建回复决策。**
+   *
+   * 功能轮真的把短信发给室友时，`deliverSms` 已经落了一条 `contact_one` decision，
+   * 并由 `handling.decisionId` 带回。回给发起人的回执 communication 必须挂**这同一条**
+   * decision——`TurnOutcome.decisionId` 也回它。否则同一轮会留下两条互不相关的 decision
+   * （一条联系人、一条回复本人），事后复盘会把一次联系拆成两件事，看不出"AI 判断得
+   * 对不对"（呼应 `repo.upgradeDecisionKind`：判断记录必须和实际行为一致）。
+   *
+   * 只有 `reply_only` 保留轮、或收件人不可达 / 没形成第三方出站（`handling.sms` 为空）
+   * 时，这一轮根本没有联系决策可挂，才新建这条 `reply_only` decision。
+   */
+  const sentSms = handling.sms;
+  const reusedContactDecisionId =
+    sentSms && handling.decisionId ? handling.decisionId : null;
+  const replyDecisionId =
+    reusedContactDecisionId ??
+    (await deps.recordDecision({
+      householdId: sender.householdId,
+      kind: "reply_only",
+      intent: args.decisionIntent,
+      modelId: args.modelId,
+      doctrineModules: [],
+    }));
+
+  let replyCommunicationId: string | null = null;
+  if (reply) {
+    replyCommunicationId = await deps.queueCommunication({
+      householdId: sender.householdId,
+      decisionId: replyDecisionId,
+      caseId: null,
+      toPersonId: sender.personId,
+      channel: args.channel,
+      purpose: "回复本人",
+      body: reply,
+    });
+    await deps.appendMessage({
+      conversationId: args.conversationId,
+      personId: sender.personId,
+      direction: "outbound",
+      channel: args.channel,
+      body: reply,
+      communicationId: replyCommunicationId,
+    });
+  }
+
+  /** 真的发出去的那条（收件人不可达时为 null → 零出站）。 */
+  const outbound: OutboundMessage[] = sentSms ? [sentSms] : [];
+
+  return {
+    reply,
+    replyReview: { mode: "generation-only", verified: false, pass: true, broke: "", why: "" },
+    scheduleFacts: [],
+    replyCommunicationId,
+    outbound,
+    allOutbound: outbound,
+    decisionId: replyDecisionId,
+    modules: [],
+    promptChars: 0,
+    promptComposition: null,
+    toolsUsed: [],
+    unknownSender: false,
+    usage: args.usage,
+    turnStartedAt: args.turnStartedAt,
+  };
+}
+
 export async function runColivingTurn(args: {
   /** 从哪个渠道来。合租房生产只有短信（`sms`），决定认人用哪种地址、回信走哪条路 */
   channel?: string;
@@ -1261,224 +1414,6 @@ export async function runColivingTurn(args: {
     channel,
   });
   const history = await repo.getRecentTurns(conversationId);
-
-  /**
-   * 不过模型、由代码直接收口的一轮：把回复作为一次 communication 落库，
-   * 结构固定。个人物品提醒的「发出」与「只给指引」两个早退分支共用它，
-   * 保证两条确定性路径的 TurnOutcome 逐字段一致（不会一条少字段一条多字段）。
-   */
-  const codeOnlyOutcome = (o: {
-    reply: string;
-    replyCommunicationId: string | null;
-    outbound: OutboundMessage[];
-    decisionId: string | null;
-    toolsUsed?: string[];
-  }): TurnOutcome => ({
-    reply: o.reply,
-    replyReview: { mode: "generation-only", verified: false, pass: true, broke: "", why: "" },
-    scheduleFacts: [],
-    replyCommunicationId: o.replyCommunicationId,
-    outbound: o.outbound,
-    allOutbound: o.outbound,
-    decisionId: o.decisionId,
-    modules: [],
-    promptChars: 0,
-    promptComposition: null,
-    toolsUsed: o.toolsUsed ?? [],
-    unknownSender: false,
-    usage: {
-      steps: 0,
-      inputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      outputTokens: 0,
-      costUsd: 0,
-    },
-    turnStartedAt,
-  });
-
-  /**
-   * **已开放的具体功能：受约束第三方出站的公共收口。**
-   *
-   * 严格口径下允许发给别的住户的出站只有两项固定功能——个人物品使用提醒
-   * （`personal-item-reminder.ts`）与夜间洗衣提醒（`night-laundry-reminder.ts`）。
-   * 两个模块各自做确定性识别、名册校验与写死正文（不调 LLM），这里只把它们的
-   * 结果落成一轮回复：
-   *
-   *   · `sent`   → 服务模块已写固定第三方出站，这里补一次给当前人的真话回执；
-   *   · `guidance` → 形式/收件人不合规，代码直接回短的结构化指引，
-   *     **零第三方出站**，不过模型；
-   *   · `none`   → 返回 null，落回下面的普通对话，当前说话人仍得到正常回复。
-   *
-   * 入站消息与回执各只写一次；第三方 communication 与 decision 由各自模块
-   * 写一次，这里绝不重复。
-   */
-  const finishConstrainedReminder = async (
-    result:
-      | { kind: "none" }
-      | { kind: "guidance"; reply: string }
-      | {
-          kind: "sent";
-          recipientName: string;
-          recipientPersonId: string;
-          to: string;
-          text: string;
-          communicationId: string;
-          decisionId: string;
-          receiptText: string;
-        },
-    labels: {
-      /** 命中无模型路径时报告的路径名 */
-      toolName: string;
-      receiptPurpose: string;
-      guidancePurpose: string;
-      guidanceIntent: string;
-      guidanceRationale: string;
-    }
-  ): Promise<TurnOutcome | null> => {
-    if (result.kind === "none") {
-      return null;
-    }
-
-    // 跟普通回合一致：先把住户这句话作为入站消息落库，再关联回正在回答的沟通。
-    const inboundId = await repo.appendMessage({
-      conversationId,
-      personId: sender.personId,
-      direction: "inbound",
-      channel,
-      body: args.text,
-    });
-    if (inboundId) {
-      await repo.linkResponse({ personId: sender.personId, messageId: inboundId });
-    }
-
-    if (result.kind === "sent") {
-      // 收据本身也算一次 communication（回复给发信人本人）。第三方 communication
-      // 已由服务模块写好，这里复用它的 decision，**不再新建 decision**。
-      const receiptCommunicationId = await repo.queueCommunication({
-        householdId: sender.householdId,
-        decisionId: result.decisionId,
-        caseId: null,
-        toPersonId: sender.personId,
-        channel,
-        purpose: labels.receiptPurpose,
-        body: result.receiptText,
-      });
-      await repo.appendMessage({
-        conversationId,
-        personId: sender.personId,
-        direction: "outbound",
-        channel,
-        body: result.receiptText,
-        communicationId: receiptCommunicationId,
-      });
-      const reminderOutbound: OutboundMessage = {
-        to: result.to,
-        personId: result.recipientPersonId,
-        text: result.text,
-        communicationId: result.communicationId,
-      };
-      return codeOnlyOutcome({
-        reply: result.receiptText,
-        replyCommunicationId: receiptCommunicationId,
-        outbound: [reminderOutbound],
-        decisionId: result.decisionId,
-        toolsUsed: [labels.toolName],
-      });
-    }
-
-    // 形式不合规或收件人校验不过：代码直接给短的结构化指引，零第三方出站，
-    // 不落回模型——否则模型可能自由发挥、也可能自称已经联系过对方。
-    const decisionId = await repo.recordDecision({
-      householdId: sender.householdId,
-      kind: "reply_only",
-      intent: labels.guidanceIntent,
-      rationale: labels.guidanceRationale,
-      modelId: null,
-    });
-    const receiptCommunicationId = await repo.queueCommunication({
-      householdId: sender.householdId,
-      decisionId,
-      caseId: null,
-      toPersonId: sender.personId,
-      channel,
-      purpose: labels.guidancePurpose,
-      body: result.reply,
-    });
-    await repo.appendMessage({
-      conversationId,
-      personId: sender.personId,
-      direction: "outbound",
-      channel,
-      body: result.reply,
-      communicationId: receiptCommunicationId,
-    });
-    return codeOnlyOutcome({
-      reply: result.reply,
-      replyCommunicationId: receiptCommunicationId,
-      outbound: [],
-      decisionId,
-    });
-  };
-
-  const personalItemLabels = {
-    toolName: "personalItemReminder",
-    receiptPurpose: "个人物品提醒回执",
-    guidancePurpose: "个人物品提醒指引",
-    guidanceIntent: "个人物品提醒指引（程序生成，未调用模型）",
-    guidanceRationale:
-      "像是个人物品提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
-  };
-  const nightLaundryLabels = {
-    toolName: "nightLaundryReminder",
-    receiptPurpose: "夜间洗衣提醒回执",
-    guidancePurpose: "夜间洗衣提醒指引",
-    guidanceIntent: "夜间洗衣提醒指引（程序生成，未调用模型）",
-    guidanceRationale:
-      "像是夜间洗衣提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
-  };
-  /**
-   * **已开放的具体功能（1）：个人物品使用提醒。**
-   * **已开放的具体功能（2）：夜间洗衣提醒。**
-   *
-   * 两者都必须在普通模型生成**之前**跑；命中即收工，不调 LLM。命令体夹带
-   * 任何额外诉求都整体不认，绝不外发（零第三方出站）。**合规的近似自然请求
-   * 直接走各自既有的受约束执行器**（固定正文 + 真话收据）——白名单是功能/
-   * 动作边界，不是每一次命中都要二次确认；只有不收口时才落回普通对话。
-   */
-  {
-    const delivered = await deliverPersonalItemReminder({
-      householdId: sender.householdId,
-      senderPersonId: sender.personId,
-      senderIsTest: sender.isTest,
-      channel,
-      text: args.text,
-    });
-    const outcome = await finishConstrainedReminder(
-      delivered,
-      personalItemLabels
-    );
-    if (outcome) {
-      return outcome;
-    }
-  }
-
-  {
-    const delivered = await deliverNightLaundryReminder({
-      householdId: sender.householdId,
-      senderPersonId: sender.personId,
-      senderIsTest: sender.isTest,
-      channel,
-      text: args.text,
-    });
-    const outcome = await finishConstrainedReminder(
-      delivered,
-      nightLaundryLabels
-    );
-    if (outcome) {
-      return outcome;
-    }
-  }
 
   /**
    * coordination 实时旁路（shadow，默认关闭）：真实短信照常由下面现有 AI 流程
@@ -1649,6 +1584,101 @@ export async function runColivingTurn(args: {
   });
 
   /**
+   * 前门里已经花掉的功能调用的真实用量。**无论命中与否、成功或失败**都要并进本轮
+   * 最终 `TurnUsage`/报告——不能因为"没命中"或"落回主生成"就把这笔钱当成没花。
+   * 默认全 0；`runApprovedFeature` 每次调用都会带回真实用量。
+   */
+  let frontDoorUsage: TurnUsage = {
+    steps: 0,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+  };
+
+  /**
+   * **已批准功能的前门——传统软件功能入口，不走 function-calling。**
+   *
+   * 老板 2026-09-13 定稿：主生成的工具表里**既没有短信工具、也没有功能工具**。
+   * 住户用自然语言交办时，先在这里对照**代码里写死的清单**
+   * （`APPROVED_FEATURES`，见 `features.ts`）：**一次**内部白名单路由调用回答
+   * 「是不是明确交办清单里的某一项」（不是每个功能各判一次，也不新增 tool schema）；
+   * 命中才调**被选中那一个功能自己**的抽取，只抽取**本功能获准的字段**交给模型写一句
+   * 自然正文，最后走纯代码的 `deliverSms` 落库——**生成阶段看不到原始混合请求**，
+   * 命中的这一轮到此为止，不进主生成。
+   *
+   * 路由除了"命中某一项 / none"，还有两个保留结果（都**不是功能、不是工具**，都走
+   * **无工具、无出站**的小回复生成、都只回当前住户、都由 `finalizeFeatureTurn` 早返回）：
+   *
+   * - `reply_only`：请求**明确围绕某项已批准功能**，但这一轮不能立即执行（否定 / 征询 /
+   *   附条件 / 同时交办两件）→ `reply-only.ts` 跟当前住户讨论 / 确认这一轮不动作。
+   * - `unsupported`：住户**明确要求联系被点名的室友办事，但主题不在清单里**（电视音量、
+   *   卫生、费用、规矩、去留等）→ `unsupported.ts` 用一句真话说明这件事没有发出去 /
+   *   目前没法替他发给对方。这样它不会掉进旧的冲突流程去 `proposeRule` /
+   *   `recordPosition`，更不会再由主生成编一句「已经跟他说了」。
+   *
+   * 唯一一条纯代码前置闸：**原话里点名了唯一一位同住人**（收件人绑定
+   * `resolveNamedRecipient`，不是主题分类）。绑不上就一个模型调用都不花，直接
+   * 落回普通对话；清单里没有的、路由 none 的，一律不执行、零出站。
+   */
+  if (resolveNamedRecipient(args.text, ctx.members, sender.personId).ok) {
+    const featureLlm = productionFeatureLlm(modelId);
+    const featureRun = await runApprovedFeature(
+      args.text,
+      {
+        text: args.text,
+        members: ctx.members,
+        senderPersonId: sender.personId,
+        householdId: sender.householdId,
+        channel,
+        senderIsTest: sender.isTest,
+      },
+      { llm: featureLlm, delivery: smsDeliveryDeps }
+    );
+    // 先把路由/抽取/生成已花的钱记进本轮，再决定是收工还是落回主生成。
+    frontDoorUsage = addFeatureUsage(frontDoorUsage, featureRun.usage);
+    if (featureRun.error) {
+      // 前门是机会性快路径：任何一步失败都不该毁掉这一轮普通对话。
+      console.log(
+        "[feature] 已批准功能前门失败（落回普通对话）：",
+        featureRun.error instanceof Error
+          ? featureRun.error.message
+          : String(featureRun.error)
+      );
+    }
+    if (featureRun.handling) {
+      /**
+       * **`unsupported` 保留轮的最后一道纯代码真相闸。** 它的正文由模型写，提示词已
+       * 要求如实说明没发出去；这里再复用普通轮同一条假完成判定兜一次——万一模型仍
+       * 写成「已经跟阿杰说了」，就换成那句短的、说真话的未发送说明。零出站轮绝不放
+       * 一句声称已联系的假话出去。
+       */
+      const handling =
+        featureRun.mode === "unsupported" &&
+        claimsUnsentThirdPartyContact(featureRun.handling.reply)
+          ? { ...featureRun.handling, reply: TRUTHFUL_UNSENT_REPLY }
+          : featureRun.handling;
+      return finalizeFeatureTurn({
+        text: args.text,
+        channel,
+        decisionIntent:
+          featureRun.mode === "reply_only"
+            ? "保留对话轮（reply_only）：请求围绕已批准功能但本轮不执行动作，只回当前住户一句讨论/确认"
+            : featureRun.mode === "unsupported"
+              ? "保留对话轮（unsupported）：明确要求联系点名室友办事但主题不在已批准功能清单，本轮零出站，只回当前住户一句真话"
+              : `已批准功能（${featureRun.featureId}）命中：功能入口直接办完并落库，回执由功能生成`,
+        handling,
+        usage: frontDoorUsage,
+        sender,
+        conversationId,
+        modelId,
+        turnStartedAt,
+      });
+    }
+  }
+
+  /**
    * 关键词永远会有漏网的（真实投诉说的是"做饭""挨饿""不公平"，
    * 不是"厨房""室友""吵"）。**提到同住人的名字，几乎必然是人际问题**——
    * 这个信号比任何词表都可靠，而名册本来就在手上。
@@ -1657,6 +1687,7 @@ export async function runColivingTurn(args: {
     (m) => m.personId !== sender.personId && args.text.includes(m.name)
   );
   const hasOpenConflictCase = ctx.openCases.some(isOpenConflictCase);
+
   // 结构信号交给路由引擎（router.ts 的 when 条件）判断要不要加载 conflict，
   // 不再手动构造 forcedModules——路由规则与装载理由只留在 brain 一处。
   const signals = {
@@ -3054,6 +3085,10 @@ export async function runColivingTurn(args: {
     activeTools.lookupHistory = tools.lookupHistory;
     activeTools.findSimilarCases = tools.findSimilarCases;
   }
+  // **主生成的工具表里没有短信工具、也没有功能工具。** 替住户联系别人的两件
+  // 已批准功能在 `buildContext` 之后、主生成之前由 `features.ts` 的前门直接办完
+  // （见上面「已批准功能的前门」）；走到这里的普通轮只是普通对话，没有任何出口
+  // 能替住户发消息出去。
 
   /**
    * 本轮**主生成**实际暴露给模型的工具名（只记名字，不记 schema 正文）。
@@ -3177,7 +3212,7 @@ export async function runColivingTurn(args: {
       raw = texts.at(-1) ?? "";
     }
   }
-  let reply = stripMarkdown(raw.trim());
+  let reply = stripMarkdown((raw ?? "").trim());
 
   /**
    * **落锤短回复：简单肯定 + 排班征询 → 代码直接给短确认，不让模型复述全屋方案。**
@@ -3391,9 +3426,14 @@ export async function runColivingTurn(args: {
    * **严格口径下的「假完成」收窄替换（普通回复）。** 现在普通对话没有任何
    * 第三方出站能力（只有个人物品提醒、夜间洗衣提醒两条受约束路径，命中时
    * 已经在上面提前收工）。模型若在自由文本里声称已经/正在联系别人，那件事没有发生——
-   * 只把这一句替换成短的、说真话的未发送说明，**不拦正常讨论**（判定要求
-   * 第一人称 + 完成/进行态，且整句不能是跟当前说话人讨论或建议，见
-   * `claimsUnsentThirdPartyContact`）。本轮真的发出去过出站时不动回复。
+   * 只把这一句替换成短的、说真话的未发送说明，**不拦正常讨论**（判定逐句进行，
+   * 整句含第二人称/建议语气的跳过，见 `claimsUnsentThirdPartyContact`，它同时复用
+   * 了 `claimsContactCompletion` 的**省略主语完成式**能力——029 的「已经跟阿杰说了」
+   * 就是这种没有主语的说法，旧判定整条漏过、`replyReview` 标红却仍把谎话发了出去）。
+   * 本轮真的发出去过出站时不动回复。
+   *
+   * 注意顺序：先替换、后 `checkFactFidelity(reply)` 复核——替换后的真话说明必须
+   * 重新过一次确定性核对，而不是只把 `replyReview` 标红。
    */
   if (
     outbound.filter((o) => !o.blocked).length === 0 &&
@@ -3505,7 +3545,8 @@ export async function runColivingTurn(args: {
     },
     toolsUsed,
     unknownSender: false,
-    usage: sumUsage(result.steps),
+    // 主生成用量 + 前门里已经花掉的功能调用用量（路由 none / 失败也不丢）。
+    usage: addFeatureUsage(frontDoorUsage, sumUsage(result.steps)),
     turnStartedAt,
   };
 }

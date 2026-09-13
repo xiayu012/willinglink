@@ -1,403 +1,221 @@
-import "server-only";
-
-import { assertCanWrite } from "./guard";
-import * as repo from "./repo";
+import { z } from "zod";
 import {
-  hasRelayedReminderAskSignal,
-  looksLikeRelayedReminderAsk,
-} from "./reminder-ask";
-import {
-  AMBIGUOUS_REMINDER_RECIPIENT_REPLY,
-  reminderExecutionDeps,
-  reminderTargetIneligibleReply,
-  type ReminderExecutionDeps,
-} from "./reminder-execution";
+  EMPTY_FEATURE_USAGE,
+  FEATURE_COMPOSE_MAX_OUTPUT_TOKENS,
+  FEATURE_EXTRACT_MAX_OUTPUT_TOKENS,
+  structuredCall,
+} from "./feature-llm";
+import type {
+  ApprovedFeature,
+  FeatureContext,
+  FeatureDeps,
+  FeatureExecution,
+  FeatureExtraction,
+} from "./feature-types";
+import { deliverSms, resolveNamedRecipient, smsRecipientIneligibleReply } from "./sms-delivery";
 
 /**
- * **已开放的具体功能：个人物品使用提醒（唯一允许发给别的住户的受约束出站）。**
+ * **已批准功能之一：个人物品使用提醒。**
  *
- * 老板 2026-09-12 拍板「具体功能逐项开放」，并选了严格口径：立刻收回所有
- * 自由文本的第三方出站能力，只保留这一个**程序化受约束**的功能。这个文件
- * 就是那唯一的实现，也是唯一一条「不是模型写话、要把消息发给另一个住户」
- * 的路径。通用 `contactPerson` 工具与 outreach / kickoff / cron / enroll
- * 的自由文本出站都已撤掉（见 `outreach.ts` 与 `turn.ts`）。
+ * 跟 `night-laundry-reminder.ts` 同构，但**各写各的朴素代码**（老板 2026-09-13：
+ * 功能是最小产品单位，允许重复、不强行抽象）：这个文件就是「用我的个人物品前先问我」
+ * 这一个功能的全部判据与入口。
  *
- * 老板 2026-09-13 再次明确：**白名单是功能/动作边界，不是每一次命中都要
- * 二次确认。** 合规的自然请求既然已经落在白名单功能内，就直接复用本功能
- * 既有的受约束执行器发出固定正文 + 固定回执；不设「预览 → 回复确认发送或
- * 取消」的状态机。**不许部分执行**：收件人不唯一、混入其它议题、讨论、否定
- * 或未点名时，一律不发送，落回普通对话或回一句既有真话说明。
+ *   1. `extract`：路由（`features.ts`，一次白名单调用）已确认这是明确交办本功能后，
+ *      由本功能自己的小 schema 只抽取获准字段（是哪件物品、用完有没有归位），
+ *      **不收任何原始细节文本**。
+ *   2. `execute`：代码从原话绑定唯一收件人；只把收窄字段交给模型写正文与短回执，
+ *      生成阶段看不到原始请求与夹带的其它诉求，也不会用第一人称冒充物品主人。
+ *   3. 纯代码 `deliverSms` 落库投递。
  *
- * 三条不可放宽的性质：
+ * 不做大正则分类，不写死正文模板。语气质量靠 doctrine + 人工阅读。
+ */
+
+export const PERSONAL_ITEM_FEATURE_ID = "personal_item";
+export const PERSONAL_ITEM_FEATURE_LABEL = "个人物品使用提醒";
+
+/**
+ * 抽取阶段的小 schema：只保留本功能获准字段，不再回答 match（路由已判定）。
  *
- * 1. **确定性识别，不过模型。** 认两种形态：①旧的窄命令
- *    （`提醒 阿川：使用我的个人物品前先问我` 的等价说法，允许标点和礼貌前缀
- *    的细微变体）；②**合规的近似自然请求**（点名了名册里唯一的室友、主题
- *    正好是这一项、明确要 AI 去执行、不是讨论/否定/混合）。识别纯靠正则，
- *    **不接受任意自由文本**——命令体里有任何多余内容（夹带、理由、物品名、
- *    别的诉求）就一律不认，**零第三方出站**，由 `runColivingTurn` 回一句短的
- *    结构化指引。
- * 2. **收件人文案是写死的常量**，不是从用户文本里抽的。里面没有来源、没有
- *    用户原话、没有物品名、没有理由、没有额外要求，避免用户借物品名或备注
- *    夹带未开放的要求（见 CONCRETE_FUNCTIONS「自由文本不能直接拼入受限消息」）。
- * 3. **校验必须全过才发。** 同一栋房子、名册里唯一、非本人、姓名已确认、
- *    当前渠道有地址；任一不满足就不发，回一句短的说明，第三方出站为空。
+ * **不放任意的 `detail` 原文**：只留「是哪件物品」与「用完有没有归位」两个中性字段，
+ * 生成阶段因此看不到「我搁在客厅」「他没跟我说一声」这类来源情境，也不会被写成
+ * 第一人称（老板 2026-09-13 返工要求：AI 是协调员，不能用第一人称冒充物品主人）。
  *
- * 写入沿用现有链路：decision → communication → appendMessage。不做任何 LLM
- * 生成（本模块不 import AI SDK）。所有写入都过 `assertCanWrite` 硬闸。
+ * `item` required + nullable（「没有」显式写 null）；`notPutBack` 是 required 布尔，
+ * 没有表达就填 false。缺字段会被 `safeParse` 拒绝，安全不发送。
  */
+export const personalItemExtractionSchema = z.object({
+  item: z
+    .string()
+    .nullable()
+    .describe(
+      "原话里指的是哪件个人物品，只写物品本身（如「充电器」「放在客厅的充电器」）；" +
+        "不要带「我的」「我搁在」这类第一人称；没有就填 null。必填"
+    ),
+  notPutBack: z
+    .boolean()
+    .describe("原话是否表达了用完没有放回原位；没有表达就填 false。必填"),
+});
 
-/** 发给被提醒住户的**唯一**正文。写死，不拼接任何用户输入。 */
-export const PERSONAL_ITEM_REMINDER_TEXT =
-  "使用室友的个人物品前，请先征得对方同意。";
+/** 生成阶段的 schema：发给收件人的正文 + 回给发起人的短回执。 */
+const personalItemComposeSchema = z.object({
+  message: z.string().describe("发给那位室友的短信正文"),
+  receipt: z.string().describe("回给托你办事的住户的一句短回执"),
+});
 
-/**
- * 旧版固定命令句式。**只为兼容既有断言保留，不再出现在任何发给住户的
- * 消息里**（老板已驳回「只支持这一种说法」的模板指引；合规自然请求现在
- * 直接执行，也不回模板）。
- */
-export const PERSONAL_ITEM_REMINDER_FORM =
-  "提醒 <室友名字>：使用我的个人物品前先问我";
-
-/** 回给发起人的真话收据：只说做成了什么，不复述内部过程。 */
-export function personalItemReminderReceipt(recipientName: string): string {
-  return `好，已经提醒${recipientName}了：用你的个人物品前先问你。`;
+function extractSystem(): string {
+  return [
+    "你是合租房短信系统的一个功能入口。这个功能只有一件事：",
+    "住户交办你去提醒某位同住人「用（这位住户的）个人物品之前先问一声」。",
+    "",
+    "系统已经确认这句话是在明确交办这一件，你只负责**抽取两个中性字段**，不要再判断是不是。",
+    "住户顺带提到的其它诉求（清理头发、分摊水费、立全屋规矩等）**一个字都不要写进任何字段**。",
+    "住户描述物品时带的「我的」「我搁在」这类第一人称，提取时去掉，只留物品本身。",
+    "本功能无关的内容（浴室头发、卫生清洁、水费、电视音量、深夜洗衣等）一律不要提取。",
+    "",
+    "最终**只输出一个 JSON 对象**，字段固定为 item 和 notPutBack（两个字段都必须出现）：",
+    '{"item": "放在客厅的充电器", "notPutBack": true}',
+    "item 是字符串或 null；notPutBack 只能是 true 或 false。",
+    "不要输出 JSON 以外的任何文字、解释或 markdown 代码块标记。",
+  ].join("\n");
 }
 
-export type PersonalItemReminderCommand = {
-  /** 命令里点名的收件人。后续仍要拿它去名册里核对，不能直接采信。 */
-  recipientName: string;
-};
-
-/** 命令前缀：允许常见礼貌说法与「私下」「一下」这类无意义填充。 */
-const COMMAND_PREFIX =
-  /^(?:麻烦你?|请你?|帮我|帮忙|劳驾|拜托你?|能帮我|可以帮我|能否帮我)?\s*(?:帮我\s*)?(?:私下\s*)?提醒\s*(?:一下\s*)?/;
-
-/** 只看「像不像在说个人物品」的宽松线索；不负责判断形式是否合规。 */
-const LOOSE_POLITE =
-  /^(?:麻烦你?|请你?|帮我|帮忙|劳驾|拜托你?|能帮我|可以帮我|能否帮我)?\s*/;
-const LOOSE_LEAD = /^(?:帮我\s*)?(?:私下\s*)?提醒/;
-const LOOSE_PERSONAL_ITEM =
-  /(?:我的|我)(?:的)?(?:个人)?(?:物品|东西|私人物品|私人物件)|个人物品|私人物品/;
-
-/**
- * 命令体归一化后必须**整体**命中的固定语义：用我的个人物品前先征得我同意。
- * 末尾 `$` 是关键——任何夹带都会让整条意图匹配失败。
- */
-const COMMAND_BODY =
-  /^(?:要|得|记得)?(?:使用|用|借用?|借|拿|动)(?:我的|我)(?:的)?(?:个人物品|私人物品|物品|东西)(?:之前|以前|前)?(?:(?:先|要|得|请))*?(?:问(?:一下|一声)?我|问我(?:一下|一声)?|跟我(?:说|讲)?(?:一声|一下)?|通知我(?:一声|一下)?|征求我(?:的)?同意|征得我(?:的)?同意|取得我(?:的)?同意)$/;
-
-/** 归一化：去掉空白与句读，再剥掉体首的礼貌/时间前缀。 */
-function normalizeBody(raw: string): string {
-  return raw
-    .replace(/\s+/g, "")
-    .replace(/[。.!！~～、,，;；:：]/g, "")
-    .replace(/^(?:麻烦|请|以后|下次|之后|将来|记得|千万|一定|拜托)+/, "");
+function composeSystem(): string {
+  return [
+    "你是这套合租房的 AI 协调员，替住户写一条发给室友的短信，只办一件事：",
+    "请他用**别人的个人物品**之前先问一声。",
+    "你只拿到几个**中立的字段**（收件人、是哪件物品、用完有没有归位），",
+    "没有原始请求，也不知道是谁提出来的。**不要猜、不要补任何原始细节。**",
+    "",
+    "message：发给那位室友的短信正文。短、自然、纯文本、不要 markdown。",
+    "  - 用**第三人称、中立的协调员口吻**：物品是这位室友的，不是你（AI）的，也不是收件人的。",
+    "    绝不能写「我的个人物品」「我的东西」——那会让人以为东西是发短信的协调员自己的。",
+    "    也不要点名是哪位室友（不披露是谁提出来的）。",
+    "  - 说清希望他怎么做：用之前先跟物品主人说一声。",
+    "  - 给一个**中立、不冒犯**的理由，例如「物品主人自己有时候也要用，先问一声能避免影响安排」；",
+    "    没有给你的具体事实就不要编。",
+    "  - 不要写别的事，不要说教。",
+    "receipt：回给托你办事那位住户的一句短回执，只交代联系了谁、在等谁回话，不复述正文。",
+    "",
+    "最终**只输出一个 JSON 对象**，字段固定为 message 和 receipt（两个字段都必须出现，都是字符串）：",
+    '{"message": "发给室友的短信正文", "receipt": "回给托你办事的住户的一句短回执"}',
+    "不要输出 JSON 以外的任何文字、解释或 markdown 代码块标记。",
+  ].join("\n");
 }
 
-/**
- * 这条消息是不是在请求「个人物品使用提醒」这一族功能（含形式不合规的
- * 尝试）。命中但它不合规时，调用方给一句短的下一步说明、**不发送**；
- * 不命中（例如深夜洗衣、清理地漏头发）就直接走普通对话，第三方出站为零。
- */
-export function looksLikePersonalItemReminder(text: string): boolean {
-  const t = text.trim().replace(LOOSE_POLITE, "");
-  return LOOSE_LEAD.test(t) && LOOSE_PERSONAL_ITEM.test(t);
+function composeUser(name: string, item: string, notPutBack: boolean): string {
+  return [
+    `收件人：${name}`,
+    `涉及的物品：${item.trim() || "（未指明，写「室友的个人物品」）"}`,
+    `用完是否归位：${notPutBack ? "没有归位" : "未提及"}`,
+  ].join("\n");
 }
 
-/**
- * 明确属于**其它未开放能力 / 混合议题**的信号。命中即不吞：深夜洗衣（另有
- * 模块）、卫生/头发、费用分摊、规则制定、去留协调、一般噪音等。
- */
-const PERSONAL_ITEM_APPROX_FOREIGN =
-  /(?:头发|地漏|卫生|水费|电费|分摊|摊钱|公用|公摊|规矩|规则|全屋|大家都|换住|搬走|退租|押金|深夜|半夜|大半夜|夜里|夜间|晚上|入夜|凌晨|洗衣机|烘干机|洗烘|洗衣服|烘衣服|洗衣|烘干|噪音|音乐|电视|外放|音量|清洁|打扫|垃圾|厨房|做饭|访客|过夜)/;
-
-/** 「用/借/拿我的个人物品」的动作词。 */
-const PERSONAL_ITEM_USE =
-  /(?:使用|用|借用?|借|拿|动|碰|翻|穿)/;
-/** 「先问我/打招呼/征得同意」的征询线索。 */
-const PERSONAL_ITEM_ASK =
-  /(?:问|打招呼|同意|先说|说一声|讲一声|告知|经过我|通过我|征得)/;
-
-/** 这一项功能的独有主题：用我的个人物品前先问我。 */
-function isPersonalItemTopic(t: string): boolean {
-  return (
-    LOOSE_PERSONAL_ITEM.test(t) &&
-    PERSONAL_ITEM_USE.test(t) &&
-    PERSONAL_ITEM_ASK.test(t)
-  );
+/** 模型回执不可用时的兜底短句（只在模型没写出安全短句时用）。 */
+export function personalItemFallbackReceipt(recipientName: string): string {
+  return `好，已经提醒${recipientName}了，让他用你的个人物品前先跟你说一声。`;
 }
 
-/**
- * 近似请求的**便宜预筛**（不查名册）：主题 + 请求语气 + 非讨论/非混合。
- * 先跑它，只有疑似才去读成员表。
- */
-export function hasPersonalItemAskSignal(text: string): boolean {
-  return hasRelayedReminderAskSignal(text, {
-    topicCue: isPersonalItemTopic,
-    foreignCue: PERSONAL_ITEM_APPROX_FOREIGN,
-  });
+/** 回执可用性：非空且不长；生成阶段只看到收窄字段，不做中文大正则。 */
+function safeReceipt(receipt: string, fallback: string): string {
+  const t = receipt.trim();
+  return t && t.length <= 80 ? t : fallback;
 }
 
-/**
- * 完整判定：见 `looksLikeRelayedReminderAsk`。`memberNames` 传的是**除当前
- * 说话人以外**的名册姓名（判定「指定室友」用）。
- */
-export function looksLikeApproximatePersonalItemAsk(
-  text: string,
-  memberNames: readonly string[]
-): boolean {
-  return looksLikeRelayedReminderAsk(text, memberNames, {
-    topicCue: isPersonalItemTopic,
-    foreignCue: PERSONAL_ITEM_APPROX_FOREIGN,
-  });
-}
+export const personalItemFeature: ApprovedFeature = {
+  id: PERSONAL_ITEM_FEATURE_ID,
+  label: PERSONAL_ITEM_FEATURE_LABEL,
+  routeDescription: "提醒某位同住人：用这位住户的个人物品之前先问一声",
 
-/**
- * 确定性识别这条命令。**认不出就返回 null**，调用方应当回一句结构化指引
- * （若 `looksLikePersonalItemReminder` 为真）或落回普通对话，不要猜。
- */
-export function recognizePersonalItemReminder(
-  text: string
-): PersonalItemReminderCommand | null {
-  const match = text
-    .trim()
-    .match(
-      new RegExp(
-        `${COMMAND_PREFIX.source}([^\\s：:，,，]{1,16})\\s*[：:，,]\\s*(.+)$`,
-        "s"
-      )
-    );
-  if (!match) {
-    return null;
-  }
-  const recipientName = match[1].trim();
-  const body = normalizeBody(match[2]);
-  if (!recipientName || !COMMAND_BODY.test(body)) {
-    return null;
-  }
-  return { recipientName };
-}
-
-/**
- * 没法安全受理时给发起人的短说明：**说人话、说真话**——没发出去 + 我能帮上
- * 的是哪一类事。**到此为止。**
- *
- * **不写「用平常的话再说一遍」这类反复重述的指令，也不承诺「只说个名字
- * 就行」。** 走到这一句时多半已经点了名（只是夹带了头发/水费、或被否定式
- * 交办），再问「谁」是睁眼说瞎话；而「只说个名字」也走不通——近似入口要求
- * 整句里既有请求语气又有这一项的主题。不再摆占位模板
- * （`PERSONAL_ITEM_REMINDER_FORM` 保留只为兼容既有断言，不再出现在任何
- * 发给住户的消息里）。
- */
-function unsupportedFormReply(): string {
-  return "这条我没有发出去。我能帮住户做的是「个人物品使用提醒」这一类：用你的个人物品前先问你。";
-}
-
-export type PersonalItemReminderOutcome =
-  | {
-      /** 这条消息根本不是个人物品提醒，普通对话照常处理。 */
-      kind: "none";
-    }
-  | {
-      /** 像个人物品提醒但形式/校验不通过：回一句短指引，**零第三方出站**。 */
-      kind: "guidance";
-      reply: string;
-    }
-  | {
-      /** 校验全过，已写入固定第三方出站。 */
-      kind: "sent";
-      recipientName: string;
-      recipientPersonId: string;
-      /** 当前渠道里的地址，调用方据此投递 */
-      to: string;
-      /** 固定正文常量，调用方据此投递 */
-      text: string;
-      /** 第三方 communication（不是回执） */
-      communicationId: string;
-      decisionId: string;
-      /** 给当前说话人的真话回执正文 */
-      receiptText: string;
+  async extract(text, llm): Promise<FeatureExtraction> {
+    const { value, usage } = await structuredCall(llm, {
+      stage: `feature:${PERSONAL_ITEM_FEATURE_ID}:extract`,
+      name: "personal_item_extract",
+      schema: personalItemExtractionSchema,
+      system: extractSystem(),
+      user: text,
+      // 推理 token 计入上限：给足「推理 + 两个短字段的 JSON」。
+      maxOutputTokens: FEATURE_EXTRACT_MAX_OUTPUT_TOKENS,
+    });
+    const fields = value as z.infer<typeof personalItemExtractionSchema>;
+    return {
+      usage,
+      payload: {
+        item: (fields.item ?? "").trim(),
+        notPutBack: fields.notPutBack,
+      },
     };
-
-/** 窄命令路径与合规近似请求路径共用的「发送给某位已核对成员」。 */
-async function executePersonalItemReminder(
-  deps: ReminderExecutionDeps,
-  args: { householdId: string; senderIsTest: boolean; channel: string },
-  target: repo.Member
-): Promise<Extract<PersonalItemReminderOutcome, { kind: "sent" }>> {
-  // 跟其它写入入口同一条硬闸：本地进程不许写真人住的房子（见 guard.ts）。
-  assertCanWrite({
-    isTestHousehold: args.senderIsTest,
-    what: "发送个人物品使用提醒",
-  });
-
-  const decisionId = await deps.recordDecision({
-    householdId: args.householdId,
-    kind: "contact_one",
-    targetPersonIds: [target.personId],
-    intent: "个人物品使用提醒",
-    rationale:
-      "已开放功能：按固定文案发送个人物品使用提醒；正文不含来源、用户原话或物品名。",
-    modelId: null,
-  });
-  const communicationId = await deps.queueCommunication({
-    householdId: args.householdId,
-    decisionId,
-    caseId: null,
-    toPersonId: target.personId,
-    channel: args.channel,
-    purpose: "个人物品使用提醒",
-    body: PERSONAL_ITEM_REMINDER_TEXT,
-    act: "remind",
-    expectsReply: true,
-  });
-  const theirConversation = await deps.getOrCreateConversation({
-    personId: target.personId,
-    householdId: args.householdId,
-    channel: args.channel,
-  });
-  await deps.appendMessage({
-    conversationId: theirConversation,
-    personId: target.personId,
-    direction: "outbound",
-    channel: args.channel,
-    body: PERSONAL_ITEM_REMINDER_TEXT,
-    communicationId,
-  });
-
-  return {
-    kind: "sent",
-    recipientName: target.name,
-    recipientPersonId: target.personId,
-    to: target.address ?? "",
-    text: PERSONAL_ITEM_REMINDER_TEXT,
-    communicationId,
-    decisionId,
-    receiptText: personalItemReminderReceipt(target.name),
-  };
-}
-
-/**
- * 合规的近似自然语言请求入口（不过模型）：判定自带主题 / 请求语气 / 非讨论 /
- * 非否定 / 非混合的闸，且点名了**名册里唯一**的室友——命中就复用本功能的
- * 受约束执行器，直接发那条写死的固定正文、回一句真话收据（`sent`）。返回
- * `null` 表示「不是可受理的近似请求」，由调用方决定回一句真话指引还是走普通
- * 对话。
- *
- * **不许部分执行**：点了不止一位人名（歧义）或收件人不可达时，只回一句真话
- * 说明、零写入；混合议题在信号层就被挡掉，绝不拆成半边发送。
- *
- * **刻意不拿「像不像这一族」当前置条件。** 出过事（2026-09-12 Codex 实测）：
- * 住户说「帮我提醒阿川用我的个人物品前先问我」——点了名、意思也对，只是没按
- * 固定格式写——旧写法先要求 `looksLikePersonalItemReminder` 再进近似分支，
- * 结果它被挡在门外，回一句「你说清楚要提醒谁」，明明已经点名了。现在只要
- * 近似判定通过就收口到受约束执行器，**不**再看窄命令的宽松线索。
- */
-async function tryPersonalItemApproxRequest(
-  args: {
-    householdId: string;
-    senderPersonId: string;
-    /** 透传自 deliver 入参的**真实**测试屋标记，发送前过 assertCanWrite。 */
-    senderIsTest: boolean;
-    channel: string;
-    text: string;
   },
-  deps: ReminderExecutionDeps
-): Promise<PersonalItemReminderOutcome | null> {
-  // 先做不查名册的预筛，只有疑似才读成员表，避免每条无关消息都查一次。
-  if (!hasPersonalItemAskSignal(args.text)) {
-    return null;
-  }
-  const others = (await deps.getMembers(args.householdId, args.channel)).filter(
-    (m) => m.personId !== args.senderPersonId
-  );
-  if (
-    !looksLikeApproximatePersonalItemAsk(
-      args.text,
-      others.map((m) => m.name)
-    )
-  ) {
-    return null;
-  }
-  // 收件人必须由**稳定 ID 唯一确定**：消息里点了不止一个人名就是歧义，
-  // 给真话澄清、不发送（否则会变成对某个人的误发）。
-  const matched = others.filter(
-    (m) => m.name.trim().length >= 2 && args.text.includes(m.name)
-  );
-  if (matched.length > 1) {
-    return { kind: "guidance", reply: AMBIGUOUS_REMINDER_RECIPIENT_REPLY };
-  }
-  const target = matched[0];
-  if (!target) {
-    return null;
-  }
-  const ineligible = reminderTargetIneligibleReply(target);
-  if (ineligible) {
-    return { kind: "guidance", reply: ineligible };
-  }
-  return await executePersonalItemReminder(deps, args, target);
-}
 
-/**
- * 识别 + 校验 + 发送一条个人物品使用提醒。
- *
- * **不调用任何模型**，也不接受自由正文。判定顺序：
- *   ① 先试**原有窄命令**（`recognizePersonalItemReminder`）：命中就走老路径
- *      （名册校验 → 固定正文发送），行为与开放时一致；
- *   ② 不是窄命令，再试**合规的近似自然语言请求**：点名声册里唯一的室友、主题
- *      正好是这一项、明确要 AI 去执行时，**直接复用同一个受约束执行器**发送
- *      （固定正文 + 真话收据），不需要二次确认；
- *   ③ 仍像这一族但没法安全受理（夹带 / 没点名 / 被否定）：回一句真话短说明，
- *      零第三方出站；不像就走普通对话。
- */
-export async function deliverPersonalItemReminder(
-  args: {
-    householdId: string;
-    senderPersonId: string;
-    senderIsTest: boolean;
-    channel: string;
-    text: string;
-  },
-  deps: ReminderExecutionDeps = reminderExecutionDeps
-): Promise<PersonalItemReminderOutcome> {
-  // ① 原有窄命令：命中即走老路径。
-  const command = recognizePersonalItemReminder(args.text);
-  if (command) {
-    const members = await deps.getMembers(args.householdId, args.channel);
-    const matches = members.filter((m) => m.name === command.recipientName);
-    if (matches.length === 0) {
-      return {
-        kind: "guidance",
-        reply: `房子里没有找到叫「${command.recipientName}」的人。我没发任何消息。`,
-      };
-    }
-    if (matches.length > 1) {
-      return {
-        kind: "guidance",
-        reply: `「${command.recipientName}」对应不止一个人，请写清楚要提醒谁。`,
-      };
-    }
-    const target = matches[0];
-    if (target.personId === args.senderPersonId) {
-      return { kind: "guidance", reply: "这是你自己，不用提醒。" };
-    }
-    const ineligible = reminderTargetIneligibleReply(target);
+  async execute(
+    extraction: FeatureExtraction,
+    ctx: FeatureContext,
+    deps: FeatureDeps
+  ): Promise<FeatureExecution> {
+    // 收件人只由代码从原话绑定；模型没有机会改人。
+    const resolved = resolveNamedRecipient(
+      ctx.text,
+      ctx.members,
+      ctx.senderPersonId
+    );
+    if (!resolved.ok) return { handling: null, usage: EMPTY_FEATURE_USAGE };
+    const { recipient } = resolved;
+
+    const ineligible = smsRecipientIneligibleReply(recipient);
     if (ineligible) {
-      return { kind: "guidance", reply: ineligible };
+      return {
+        handling: {
+          status: "handled",
+          reply: ineligible,
+          sms: null,
+          decisionId: null,
+        },
+        usage: EMPTY_FEATURE_USAGE,
+      };
     }
-    return await executePersonalItemReminder(deps, args, target);
-  }
 
-  // ② 合规的近似自然请求：直接走同一个受约束执行器，不需要二次确认。
-  const approx = await tryPersonalItemApproxRequest(args, deps);
-  if (approx) {
-    return approx;
-  }
+    const fields = (extraction.payload ?? {}) as {
+      item?: string;
+      notPutBack?: boolean;
+    };
+    const composed = await structuredCall(deps.llm, {
+      stage: `feature:${PERSONAL_ITEM_FEATURE_ID}:compose`,
+      name: "personal_item_message",
+      schema: personalItemComposeSchema,
+      system: composeSystem(),
+      user: composeUser(recipient.name, fields.item ?? "", fields.notPutBack ?? false),
+      // 推理 token 计入上限：给足「推理 + 一条短信正文 + 一句回执」。
+      maxOutputTokens: FEATURE_COMPOSE_MAX_OUTPUT_TOKENS,
+    });
+    const out = composed.value as z.infer<typeof personalItemComposeSchema>;
+    const message = (out.message ?? "").trim();
+    if (!message) return { handling: null, usage: composed.usage };
 
-  // ③ 像这一族但受理不了：真话说明，零第三方出站。
-  if (looksLikePersonalItemReminder(args.text)) {
-    return { kind: "guidance", reply: unsupportedFormReply() };
-  }
-  return { kind: "none" };
-}
+    const sent = await deliverSms(
+      {
+        householdId: ctx.householdId,
+        channel: ctx.channel,
+        senderIsTest: ctx.senderIsTest,
+        purposeLabel: PERSONAL_ITEM_FEATURE_LABEL,
+        recipient,
+        text: message,
+      },
+      deps.delivery
+    );
+
+    return {
+      handling: {
+        status: "handled",
+        reply: safeReceipt(out.receipt ?? "", personalItemFallbackReceipt(recipient.name)),
+        sms: {
+          to: sent.to,
+          personId: recipient.personId,
+          text: sent.text,
+          communicationId: sent.communicationId,
+        },
+        decisionId: sent.decisionId,
+      },
+      usage: composed.usage,
+    };
+  },
+};
