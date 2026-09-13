@@ -17,7 +17,8 @@
  *
  * 设计取向（老板要求）：**宁可漏掉自然表达，也不吞掉普通谈话。** 下列情形一律
  * 不命中，落回现有普通对话：纯抱怨、评理、讨论/征询、未点名对象、一般噪音、
- * 卫生/头发、费用、规则、混合议题。判定只用字符串/正则，不做语义分类，也不
+ * 卫生/头发、费用、规则、混合议题、以及**否定式交办**（「别提醒他」这类拦着
+ * AI 的指令，见 `isNegatedRequest`）。判定只用字符串/正则，不做语义分类，也不
  * 试图穷举自然语言。
  */
 
@@ -43,6 +44,21 @@ const IMPERATIVE_RELAY_CLAUSE =
  */
 const DELIBERATIVE =
   /(?:要不要|该不该|是不是该|是否该|有没有必要|有没有需要|你觉得|你认为|我在考虑|考虑要不要|我该不该|过吗|了吗|了没|了没有|有没有(?:跟|和|向|提醒|告诉|通知|联系))/;
+
+/**
+ * **否定式交办「不要去做」**——住户明确拦着 AI，不是让 AI 去做
+ * （「别提醒他」「不要跟他说」「不用通知他」「没让你转告」）。
+ * 命中即不命中近似请求，落回普通对话；否则会把一句阻止指令读成发送提案。
+ *
+ * 只看否定词**紧贴转达动词之前**：像「提醒他别在深夜洗」里的「别」修饰的是
+ * 收件人的行为、出现在动词之后，不受影响——所以不会误伤正常请求。
+ */
+const NEGATED_REQUEST =
+  /(?:别|不要|不用|不需要|不许|不准|无需|没必要|不是要你|不是让你|没让你)(?:再|去|帮我|帮忙|私下|主动)?\s*(?:提醒|跟|和|向|告诉|转达|转告|通知|叫|让)/;
+
+export function isNegatedRequest(text: string): boolean {
+  return NEGATED_REQUEST.test(text);
+}
 
 /** 名册里可作为收件人的名字（≥2 字，避免单字误匹配）。 */
 function usableNames(names: readonly string[]): string[] {
@@ -131,6 +147,7 @@ export function hasRelayedReminderAskSignal(
   if (!cues.topicCue(t)) return false;
   if (cues.foreignCue.test(t)) return false;
   if (isDeliberative(t)) return false;
+  if (isNegatedRequest(t)) return false;
   return hasAiRequestMarker(t) || isImperativeRelayStart(t);
 }
 

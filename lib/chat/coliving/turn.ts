@@ -17,8 +17,22 @@ import {
 import { assertCanWrite } from "./guard";
 import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
-import { deliverNightLaundryReminder } from "./night-laundry-reminder";
-import { deliverPersonalItemReminder } from "./personal-item-reminder";
+import {
+  confirmNightLaundryReminder,
+  deliverNightLaundryReminder,
+  NIGHT_LAUNDRY_PREVIEW_TOOL,
+} from "./night-laundry-reminder";
+import {
+  confirmPersonalItemReminder,
+  deliverPersonalItemReminder,
+  PERSONAL_ITEM_PREVIEW_TOOL,
+} from "./personal-item-reminder";
+import {
+  cancelPendingReminderProposals,
+  parseReminderConfirmation,
+  REMINDER_PROPOSAL_CANCELLED_REPLY,
+  reminderProposalDeps,
+} from "./reminder-proposal";
 import * as repo from "./repo";
 import {
   bestSchedulePlans,
@@ -1421,30 +1435,150 @@ export async function runColivingTurn(args: {
     });
   };
 
+  const personalItemLabels = {
+    toolName: "personalItemReminder",
+    receiptPurpose: "个人物品提醒回执",
+    guidancePurpose: "个人物品提醒指引",
+    guidanceIntent: "个人物品提醒指引（程序生成，未调用模型）",
+    guidanceRationale:
+      "像是个人物品提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
+  };
+  const nightLaundryLabels = {
+    toolName: "nightLaundryReminder",
+    receiptPurpose: "夜间洗衣提醒回执",
+    guidancePurpose: "夜间洗衣提醒指引",
+    guidanceIntent: "夜间洗衣提醒指引（程序生成，未调用模型）",
+    guidanceRationale:
+      "像是夜间洗衣提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
+  };
+  const cancelLabels = {
+    toolName: "reminderProposalCancel",
+    receiptPurpose: "待确认提醒取消",
+    guidancePurpose: "待确认提醒取消",
+    guidanceIntent: "待确认提醒取消（程序生成，未调用模型）",
+    guidanceRationale:
+      "住户回复取消：作废还没回应的待确认提醒提案，不发第三方。",
+  };
+
+  /**
+   * `proposal` 分支的收口：近似请求只产生一条发给**发起人本人**的预览。
+   * 功能模块已经自行落好「住户请求 → AI 预览」两条消息，这里只把预览作为
+   * 本轮回复返回（`replyCommunicationId` 指向预览那条 communication，好让
+   * 投递层发送后把它标记成 `sent`）。**零第三方出站。**
+   */
+  const proposalOutcome = (o: {
+    reply: string;
+    communicationId: string;
+    decisionId: string;
+    toolName: string;
+  }): TurnOutcome =>
+    codeOnlyOutcome({
+      reply: o.reply,
+      replyCommunicationId: o.communicationId,
+      outbound: [],
+      decisionId: o.decisionId,
+      toolsUsed: [o.toolName],
+    });
+
+  /**
+   * **受约束提醒的确认 / 取消收口（两项共用）。**
+   *
+   * 只有整条消息就是「确认」或「取消」时才走这里（混合指令一律不算）：
+   *   · 确认 → 由各功能模块认领**上一条**持久化提案；认领不到（没有 / 过期 /
+   *     已取消 / 已发过 / 属另一项功能）就落回普通对话，**绝不发送**；
+   *   · 取消 → 作废所有还没回应的待确认提案，回一句真话；
+   *   · 其它任何话（新话题 / 讨论 / 混合指令）→ 静默作废旧提案，避免住户后来
+   *     一句「确认」把一条已经过期的旧提案翻出来发掉。
+   */
+  {
+    const token = parseReminderConfirmation(args.text);
+    if (token === "confirm") {
+      const personal = await finishConstrainedReminder(
+        await confirmPersonalItemReminder({
+          householdId: sender.householdId,
+          senderPersonId: sender.personId,
+          senderIsTest: sender.isTest,
+          channel,
+          conversationId,
+          text: args.text,
+        }),
+        personalItemLabels
+      );
+      if (personal) {
+        return personal;
+      }
+      const laundry = await finishConstrainedReminder(
+        await confirmNightLaundryReminder({
+          householdId: sender.householdId,
+          senderPersonId: sender.personId,
+          senderIsTest: sender.isTest,
+          channel,
+          conversationId,
+          text: args.text,
+        }),
+        nightLaundryLabels
+      );
+      if (laundry) {
+        return laundry;
+      }
+      // 没有可认领的提案：作废任何残留，落回普通对话（不发送、不接管）。
+      await cancelPendingReminderProposals(reminderProposalDeps, {
+        householdId: sender.householdId,
+        requesterPersonId: sender.personId,
+        channel,
+      });
+    } else if (token === "cancel") {
+      const voided = await cancelPendingReminderProposals(reminderProposalDeps, {
+        householdId: sender.householdId,
+        requesterPersonId: sender.personId,
+        channel,
+      });
+      if (voided > 0) {
+        const cancelled = await finishConstrainedReminder(
+          { kind: "guidance", reply: REMINDER_PROPOSAL_CANCELLED_REPLY },
+          cancelLabels
+        );
+        if (cancelled) {
+          return cancelled;
+        }
+      }
+    } else {
+      await cancelPendingReminderProposals(reminderProposalDeps, {
+        householdId: sender.householdId,
+        requesterPersonId: sender.personId,
+        channel,
+      });
+    }
+  }
+
   /**
    * **已开放的具体功能（1）：个人物品使用提醒。**
    * **已开放的具体功能（2）：夜间洗衣提醒。**
    *
    * 两者都必须在普通模型生成**之前**跑；命中即收工，不调 LLM。命令体夹带
-   * 任何额外诉求都整体不认，绝不外发（零第三方出站）。
+   * 任何额外诉求都整体不认，绝不外发（零第三方出站）。近似自然语言请求只落
+   * 一条发给发起人本人的待确认预览（`proposal`），由上面的确认收口才发送。
    */
   {
+    const delivered = await deliverPersonalItemReminder({
+      householdId: sender.householdId,
+      senderPersonId: sender.personId,
+      senderIsTest: sender.isTest,
+      channel,
+      conversationId,
+      text: args.text,
+    });
+    if (delivered.kind === "proposal") {
+      return proposalOutcome({
+        reply: delivered.reply,
+        communicationId: delivered.communicationId,
+        decisionId: delivered.decisionId,
+        toolName: PERSONAL_ITEM_PREVIEW_TOOL,
+      });
+    }
     const outcome = await finishConstrainedReminder(
-      await deliverPersonalItemReminder({
-        householdId: sender.householdId,
-        senderPersonId: sender.personId,
-        senderIsTest: sender.isTest,
-        channel,
-        text: args.text,
-      }),
-      {
-        toolName: "personalItemReminder",
-        receiptPurpose: "个人物品提醒回执",
-        guidancePurpose: "个人物品提醒指引",
-        guidanceIntent: "个人物品提醒指引（程序生成，未调用模型）",
-        guidanceRationale:
-          "像是个人物品提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
-      }
+      delivered,
+      personalItemLabels
     );
     if (outcome) {
       return outcome;
@@ -1452,22 +1586,25 @@ export async function runColivingTurn(args: {
   }
 
   {
+    const delivered = await deliverNightLaundryReminder({
+      householdId: sender.householdId,
+      senderPersonId: sender.personId,
+      senderIsTest: sender.isTest,
+      channel,
+      conversationId,
+      text: args.text,
+    });
+    if (delivered.kind === "proposal") {
+      return proposalOutcome({
+        reply: delivered.reply,
+        communicationId: delivered.communicationId,
+        decisionId: delivered.decisionId,
+        toolName: NIGHT_LAUNDRY_PREVIEW_TOOL,
+      });
+    }
     const outcome = await finishConstrainedReminder(
-      await deliverNightLaundryReminder({
-        householdId: sender.householdId,
-        senderPersonId: sender.personId,
-        senderIsTest: sender.isTest,
-        channel,
-        text: args.text,
-      }),
-      {
-        toolName: "nightLaundryReminder",
-        receiptPurpose: "夜间洗衣提醒回执",
-        guidancePurpose: "夜间洗衣提醒指引",
-        guidanceIntent: "夜间洗衣提醒指引（程序生成，未调用模型）",
-        guidanceRationale:
-          "像是夜间洗衣提醒但形式或收件人校验不通过：只回一句结构化指引，不发第三方。",
-      }
+      delivered,
+      nightLaundryLabels
     );
     if (outcome) {
       return outcome;

@@ -829,6 +829,189 @@ export async function findRecentOpenCommunication(args: {
   return rows[0] ?? null;
 }
 
+/**
+ * **待确认提醒提案（两项受约束提醒共用）的持久化原语。**
+ *
+ * 一个提案 = 一条发给**发起人本人**的预览 communication（`to_person_id` =
+ * 发起人、`purpose` 以 `待确认提醒：` 开头、`act='confirm'`、
+ * `expects_reply=true`）＋ 一条 `decision`（`target_person_ids` 里恰好一个
+ * 收件人稳定 ID）。这里只放确定性的读 / 认领 / 作废；「是不是提案、该不该发」
+ * 的判定在 `reminder-proposal.ts` 与各功能模块里。
+ *
+ * 四条不可放宽的性质：
+ *
+ * 1. **候选永远是「会话里最近一条出站」，不是「最近一条提案」。** 若先按
+ *    purpose 筛出提案再取最新，一条**更旧的、已送达的**提案会在一条更新的
+ *    普通消息（或 queued / failed 的预览）之后被重新捞出来当候选——那样一句
+ *    后来的「确认」就能把一条早就过期的旧提案发掉。
+ * 2. **候选必须真的送达。** 只认 `status='sent'`；`queued`（还没发出去 /
+ *    发失败）不算数——不能凭一条没送达的预览就去发第三方。
+ * 3. **认领原子、且认领那一刻重新校验新鲜度。** `claimReminderProposal` 在
+ *    同一条 UPDATE 里要求：这一行仍是**该会话最近一条出站**、`status='sent'`、
+ *    `responded_at is null`、仍在时间窗内。并发 / 重复的「确认」在 READ
+ *    COMMITTED 下也只有一个能更新到行（第二个被行锁挡住、重算 `where` 后落空），
+ *    而且不会认领一条在读取之后被新消息顶掉的旧提案。
+ * 4. **认领即消耗，没有回头路。** 认领后若第三方写入失败，**不退回**认领
+ *    （退回会造成「队列里已有一条、重试再入一条」的重复外呼），调用方只能如实
+ *    报「没发出去」，绝不谎报成功。
+ */
+
+export type LatestOutboundCommunication = {
+  communicationId: string | null;
+  conversationId: string;
+  decisionId: string | null;
+  purpose: string | null;
+  body: string;
+  status: string | null;
+  act: string | null;
+  respondedAt: Date | null;
+  sentAt: Date | null;
+  createdAt: Date | null;
+};
+
+/**
+ * 只读：该住户在**这条会话线**里**最近一条出站消息**（不分 purpose、不分
+ * 状态；绑定 `conversationId` 由调用方核对）。刻意不做「先筛提案」——
+ * 见本段开头第 1 条。
+ *
+ * `communicationId` 可能为 null（那条出站消息不属于任何 communication）；
+ * 这种候选一律不认。
+ */
+export async function findLatestOutboundCommunication(args: {
+  householdId: string;
+  personId: string;
+  channel: string;
+}): Promise<LatestOutboundCommunication | null> {
+  const rows = await db()<LatestOutboundCommunication[]>`
+    select m.communication_id as "communicationId",
+           c.id as "conversationId",
+           cm.decision_id as "decisionId",
+           cm.purpose as purpose,
+           m.body as body,
+           cm.status as status,
+           cm.act as act,
+           cm.responded_at as "respondedAt",
+           cm.sent_at as "sentAt",
+           cm.created_at as "createdAt"
+    from coliving.message m
+    join coliving.conversation c on c.id = m.conversation_id
+    left join coliving.communication cm on cm.id = m.communication_id
+    where c.person_id = ${args.personId}
+      and c.channel = ${args.channel}
+      and c.household_id = ${args.householdId}
+      and m.direction = 'outbound'
+    order by m.sent_at desc
+    limit 1
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * 原子认领**指定 id** 的那条提案（标记已回应）。同一条 UPDATE 里重新校验：
+ *   · 身份绑定（`to_person_id` / `household_id` / `channel`）；
+ *   · 仍是该会话**最近一条出站**（读取之后被新消息顶掉的旧提案认领不到）；
+ *   · `status='sent'`（预览真的送达）且 `responded_at is null`（没被认领/作废）；
+ *   · 仍在时间窗内。
+ * 拿不到行 → null → 调用方绝不发送。
+ */
+export async function claimReminderProposal(args: {
+  communicationId: string;
+  householdId: string;
+  personId: string;
+  channel: string;
+  withinHours?: number;
+}): Promise<{ communicationId: string; decisionId: string | null } | null> {
+  const rows = await db()<
+    { communicationId: string; decisionId: string | null }[]
+  >`
+    update coliving.communication c
+    set responded_at = now()
+    where c.id = ${args.communicationId}
+      and c.to_person_id = ${args.personId}
+      and c.household_id = ${args.householdId}
+      and c.channel = ${args.channel}
+      and c.status = 'sent'
+      and c.responded_at is null
+      and c.id = (
+        select m.communication_id
+        from coliving.message m
+        join coliving.conversation cv on cv.id = m.conversation_id
+        where cv.person_id = ${args.personId}
+          and cv.channel = ${args.channel}
+          and cv.household_id = ${args.householdId}
+          and m.direction = 'outbound'
+        order by m.sent_at desc
+        limit 1
+      )
+      and coalesce(c.sent_at, c.created_at) > now() - (${args.withinHours ?? 24} || ' hours')::interval
+    returning c.id as "communicationId", c.decision_id as "decisionId"
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * 一次作废该发起人 / 渠道 / 房子里**所有**还没回应的待确认提案——**包括
+ * `queued`**（还没送达或发失败的预览也必须作废，否则它会在稍后被送达/重试后
+ * 变成可确认，或永远吊着）。三种情形共用：住户回「取消」、住户抛出新话题 /
+ * 讨论 / 混合指令、以及新提案落库前先清掉旧的。只标记 `responded_at`，不改
+ * status——预览本身是已经送达的历史，不能被抹掉。外层 `responded_at is null`
+ * 同样防并发重复作废。
+ */
+export async function consumeReminderProposalsByPrefix(args: {
+  householdId: string;
+  requesterPersonId: string;
+  channel: string;
+  purposePrefix: string;
+  withinHours?: number;
+}): Promise<number> {
+  const rows = await db()<{ id: string }[]>`
+    update coliving.communication c
+    set responded_at = now()
+    where c.responded_at is null
+      and c.id in (
+        select id from coliving.communication
+        where to_person_id = ${args.requesterPersonId}
+          and household_id = ${args.householdId}
+          and channel = ${args.channel}
+          and purpose like ${args.purposePrefix + "%"}
+          and status in ('queued', 'sent')
+          and responded_at is null
+          and coalesce(sent_at, created_at) > now() - (${args.withinHours ?? 24} || ' hours')::interval
+      )
+    returning c.id as id
+  `;
+  return rows.length;
+}
+
+/**
+ * 提案绑定的 decision，确认前用来核对：本屋、`contact_one`、`intent` 与
+ * `purpose` 逐字一致、`model_id` 为空（纯程序生成）、`target_person_ids`
+ * 恰好一个收件人。任一条不符就不认这条提案。
+ */
+export async function getReminderProposalDecision(decisionId: string): Promise<{
+  householdId: string;
+  kind: string;
+  intent: string | null;
+  modelId: string | null;
+  targetPersonIds: string[];
+} | null> {
+  const rows = await db()<
+    {
+      householdId: string;
+      kind: string;
+      intent: string | null;
+      modelId: string | null;
+      targetPersonIds: string[];
+    }[]
+  >`
+    select household_id as "householdId", kind, intent,
+           model_id as "modelId",
+           coalesce(target_person_ids, '{}') as "targetPersonIds"
+    from coliving.decision where id = ${decisionId}
+  `;
+  return rows[0] ?? null;
+}
+
 export type BlockedComm = {
   toName: string;
   purpose: string | null;

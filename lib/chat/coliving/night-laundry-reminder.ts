@@ -6,6 +6,18 @@ import {
   hasRelayedReminderAskSignal,
   looksLikeRelayedReminderAsk,
 } from "./reminder-ask";
+import {
+  createReminderProposal,
+  parseReminderConfirmation,
+  REMINDER_PROPOSAL_FAILED_REPLY,
+  REMINDER_PROPOSAL_PURPOSE,
+  REMINDER_PROPOSAL_RECIPIENT_GONE_REPLY,
+  REMINDER_PROPOSAL_STALE_REPLY,
+  reminderProposalDeps,
+  reminderTargetIneligibleReply,
+  takeReminderProposal,
+  type ReminderProposalDeps,
+} from "./reminder-proposal";
 
 /**
  * **已开放的具体功能：夜间洗衣提醒（第二项受约束第三方出站）。**
@@ -23,6 +35,8 @@ import {
  *    的细微变体）。识别纯靠正则，**不接受任意自由文本**——命令体里有任何
  *    多余内容（清理头发、分摊费用、全屋规矩、人身攻击等）就一律不认，
  *    **零第三方出站**，由 `runColivingTurn` 回一句短的结构化指引。
+ *    住户用自然语言表达同一件事时，**不直接发送**，只落一条发给**发起人
+ *    本人**的待确认预览（`proposal`，零第三方出站），回「确认」才发。
  * 2. **收件人文案是写死的常量**，不是从用户文本里抽的。里面没有来源、没有
  *    用户原话、没有具体钟点、没有自由理由、没有附带命令。
  * 3. **校验必须全过才发。** 同一栋房子、名册里唯一、非本人、姓名已确认、
@@ -37,18 +51,33 @@ export const NIGHT_LAUNDRY_REMINDER_TEXT =
   "深夜使用洗衣机或烘干机容易影响他人休息，请尽量避开深夜时段。";
 
 /**
- * 这条功能支持的**唯一**句式，写在给住户的指引里，让他知道该怎么发。
- * 用占位符而不是某个真实姓名，避免把模板读成"必须提醒这个人"。
+ * 旧版固定命令句式。**只为兼容既有断言保留，不再出现在任何发给住户的
+ * 消息里**（老板已驳回「只支持这一种说法」的模板指引）。
  */
 export const NIGHT_LAUNDRY_REMINDER_FORM =
   "提醒 <室友名字>：深夜别开洗衣机或烘干机";
 
 /**
- * 近似请求（不是窄命令形态，但明确让 AI 提醒某位指定室友、主题是深夜洗衣）
- * 统一回这句短指引：如实说**没有发送**，并给出这唯一一种固定说法。零第三方
- * 出站、不过模型。见 `hasNightLaundryAskSignal` / `looksLikeApproximateNightLaundryAsk`。
+ * 预览轮报告的工具名。**与真正的发送（`nightLaundryReminder`）区分开**，
+ * 这样「这一轮只出了预览、零第三方出站」可以被行为测试直接断言，而不必把
+ * 零出站断言放宽到允许真正的发送工具。
  */
-export const NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE = `我没有把这条发给对方。夜间洗衣提醒只能按固定说法发：「${NIGHT_LAUNDRY_REMINDER_FORM}」。`;
+export const NIGHT_LAUNDRY_PREVIEW_TOOL = "nightLaundryReminderPreview";
+
+/** 提案在库里的 purpose 标记（也用于取消时按前缀作废）。 */
+export const NIGHT_LAUNDRY_PROPOSAL_PURPOSE =
+  REMINDER_PROPOSAL_PURPOSE.nightLaundry;
+
+/**
+ * 近似请求的**可执行预览**（发给发起人本人，零第三方出站）：
+ * 如实说明还没发、点名收件人、把**将要发出的那句固定正文原样摆出来**、
+ * 给出「确认 / 取消」。**只摆那一句、不承诺带上住户说的原因或条件**
+ * （带上就该写成另一条消息了——混合/附加诉求一律不落提案，见下）。
+ * 住户回「确认」才真的发，回「取消」就不发。
+ */
+export function nightLaundryProposalPreview(recipientName: string): string {
+  return `还没发送。给${recipientName}的短信是：「${NIGHT_LAUNDRY_REMINDER_TEXT}」回复「确认」发送，或「取消」。`;
+}
 
 /** 回给发起人的真话收据：只说做成了什么，不复述内部过程。 */
 export function nightLaundryReminderReceipt(recipientName: string): string {
@@ -183,9 +212,19 @@ export function recognizeNightLaundryReminder(
   return { recipientName };
 }
 
-/** 给发起人的短的结构化指引（形式不对 / 校验不过时统一用它收口）。 */
-function formGuidance(prefix: string): string {
-  return `${prefix}夜间洗衣提醒只支持这一种说法：「${NIGHT_LAUNDRY_REMINDER_FORM}」。`;
+/**
+ * 没法安全受理时给发起人的短说明：**说人话、说真话**——没发出去 + 我能帮上
+ * 的是哪一类事。**到此为止。**
+ *
+ * **不写「用平常的话再说一遍」这类反复重述的指令，也不承诺「只说个名字
+ * 就行」。** 走到这一句时多半已经点了名（只是夹带了水费/头发、或被否定式
+ * 交办），再问「谁」是睁眼说瞎话；而「只说个名字」也走不通——近似入口要求
+ * 整句里既有请求语气又有这一项的主题。不再摆占位模板
+ * （`NIGHT_LAUNDRY_REMINDER_FORM` 保留只为兼容既有断言，不再出现在任何
+ * 发给住户的消息里）。
+ */
+function unsupportedFormReply(): string {
+  return "这条我没有发出去。我能帮住户做的是「夜间洗衣提醒」这一类：深夜用洗衣机或烘干机影响别人休息。";
 }
 
 export type NightLaundryReminderOutcome =
@@ -197,6 +236,19 @@ export type NightLaundryReminderOutcome =
       /** 像夜间洗衣提醒但形式/校验不通过：回一句短指引，**零第三方出站**。 */
       kind: "guidance";
       reply: string;
+    }
+  | {
+      /**
+       * 近似请求：已落一条**发给发起人本人**的待确认预览，**零第三方出站**。
+       * 住户回「确认」后由 `confirmNightLaundryReminder` 才真的发。
+       */
+      kind: "proposal";
+      reply: string;
+      recipientName: string;
+      recipientPersonId: string;
+      /** 预览 communication（发给发起人，不是第三方） */
+      communicationId: string;
+      decisionId: string;
     }
   | {
       /** 校验全过，已写入固定第三方出站。 */
@@ -214,88 +266,19 @@ export type NightLaundryReminderOutcome =
       receiptText: string;
     };
 
-/**
- * 识别 + 校验 + 发送一条夜间洗衣提醒。
- *
- * **不调用任何模型**，也不接受自由正文：命令不合规或校验不过就返回
- * `guidance`，绝不外发。命中的成功路径由本函数落库（decision →
- * communication → appendMessage），调用方只需再补一条给当前人的回执。
- */
-export async function deliverNightLaundryReminder(args: {
-  householdId: string;
-  senderPersonId: string;
-  senderIsTest: boolean;
-  channel: string;
-  text: string;
-}): Promise<NightLaundryReminderOutcome> {
-  if (!looksLikeNightLaundryReminder(args.text)) {
-    // 不是窄命令形态，但可能是「明确让 AI 提醒某位指定室友」的近似自然语言
-    // 请求：只回一句未发送指引，零第三方出站、不过模型。先做不查名册的预筛，
-    // 只有疑似才读成员表，避免每条无关消息都查一次。
-    if (hasNightLaundryAskSignal(args.text)) {
-      const others = (
-        await repo.getMembers(args.householdId, args.channel)
-      )
-        .filter((m) => m.personId !== args.senderPersonId)
-        .map((m) => m.name);
-      if (looksLikeApproximateNightLaundryAsk(args.text, others)) {
-        return {
-          kind: "guidance",
-          reply: NIGHT_LAUNDRY_APPROXIMATE_GUIDANCE,
-        };
-      }
-    }
-    return { kind: "none" };
-  }
-
-  const command = recognizeNightLaundryReminder(args.text);
-  if (!command) {
-    return {
-      kind: "guidance",
-      reply: formGuidance("这条我还没法照发。"),
-    };
-  }
-
-  const members = await repo.getMembers(args.householdId, args.channel);
-  const matches = members.filter((m) => m.name === command.recipientName);
-  if (matches.length === 0) {
-    return {
-      kind: "guidance",
-      reply: formGuidance(
-        `房子里没有找到叫「${command.recipientName}」的人。`
-      ),
-    };
-  }
-  if (matches.length > 1) {
-    return {
-      kind: "guidance",
-      reply: `「${command.recipientName}」对应不止一个人，请写清楚要提醒谁。`,
-    };
-  }
-  const target = matches[0];
-  if (target.personId === args.senderPersonId) {
-    return { kind: "guidance", reply: "这是你自己，不用提醒。" };
-  }
-  if (!target.nameConfirmed) {
-    return {
-      kind: "guidance",
-      reply: `${target.name} 的姓名还没确认，我暂时没法把提醒发给他。`,
-    };
-  }
-  if (!target.address) {
-    return {
-      kind: "guidance",
-      reply: `${target.name} 在当前渠道还没有登记地址，我暂时联系不上。`,
-    };
-  }
-
+/** 只有 narrow 命令路径与确认路径共用的「发送给某位已核对成员」。 */
+async function executeNightLaundryReminder(
+  deps: ReminderProposalDeps,
+  args: { householdId: string; senderIsTest: boolean; channel: string },
+  target: repo.Member
+): Promise<Extract<NightLaundryReminderOutcome, { kind: "sent" }>> {
   // 跟其它写入入口同一条硬闸：本地进程不许写真人住的房子（见 guard.ts）。
   assertCanWrite({
     isTestHousehold: args.senderIsTest,
     what: "发送夜间洗衣提醒",
   });
 
-  const decisionId = await repo.recordDecision({
+  const decisionId = await deps.recordDecision({
     householdId: args.householdId,
     kind: "contact_one",
     targetPersonIds: [target.personId],
@@ -304,7 +287,7 @@ export async function deliverNightLaundryReminder(args: {
       "已开放功能：按固定文案发送夜间洗衣提醒；正文不含来源、用户原话或具体钟点。",
     modelId: null,
   });
-  const communicationId = await repo.queueCommunication({
+  const communicationId = await deps.queueCommunication({
     householdId: args.householdId,
     decisionId,
     caseId: null,
@@ -315,12 +298,12 @@ export async function deliverNightLaundryReminder(args: {
     act: "remind",
     expectsReply: true,
   });
-  const theirConversation = await repo.getOrCreateConversation({
+  const theirConversation = await deps.getOrCreateConversation({
     personId: target.personId,
     householdId: args.householdId,
     channel: args.channel,
   });
-  await repo.appendMessage({
+  await deps.appendMessage({
     conversationId: theirConversation,
     personId: target.personId,
     direction: "outbound",
@@ -333,10 +316,216 @@ export async function deliverNightLaundryReminder(args: {
     kind: "sent",
     recipientName: target.name,
     recipientPersonId: target.personId,
-    to: target.address,
+    to: target.address ?? "",
     text: NIGHT_LAUNDRY_REMINDER_TEXT,
     communicationId,
     decisionId,
     receiptText: nightLaundryReminderReceipt(target.name),
   };
+}
+
+/**
+ * 近似自然语言请求入口（不过模型、**零第三方出站**）：判定自带主题 / 请求
+ * 语气 / 非讨论 / 非否定 / 非混合的闸，命中就落一条发给**发起人本人**的
+ * 待确认预览。返回 `null` 表示「不是可受理的近似请求」，由调用方决定回一句
+ * 真话指引还是走普通对话。
+ *
+ * **刻意不拿「像不像这一族」当前置条件。** 出过事（2026-09-12 Codex 实测）：
+ * 住户说「帮我提醒阿川深夜别开洗衣机」——点了名、意思也对，只是没按固定格式
+ * 写——旧写法先要求 `looksLikeNightLaundryReminder` 再进近似分支，结果它被
+ * 挡在门外，回一句「你说清楚要提醒谁」，明明已经点名了。现在只要近似判定
+ * 通过就收口成预览，**不**再看窄命令的宽松线索。
+ */
+async function tryNightLaundryProposal(
+  args: {
+    householdId: string;
+    senderPersonId: string;
+    /** 透传自 deliver 入参的**真实**测试屋标记，落提案前过 assertCanWrite。 */
+    senderIsTest: boolean;
+    channel: string;
+    conversationId: string;
+    text: string;
+  },
+  deps: ReminderProposalDeps
+): Promise<NightLaundryReminderOutcome | null> {
+  // 先做不查名册的预筛，只有疑似才读成员表，避免每条无关消息都查一次。
+  if (!hasNightLaundryAskSignal(args.text)) {
+    return null;
+  }
+  const others = (await deps.getMembers(args.householdId, args.channel)).filter(
+    (m) => m.personId !== args.senderPersonId
+  );
+  if (
+    !looksLikeApproximateNightLaundryAsk(
+      args.text,
+      others.map((m) => m.name)
+    )
+  ) {
+    return null;
+  }
+  // 收件人必须由**稳定 ID 唯一确定**：消息里点了不止一个人名就是歧义，
+  // 给真话澄清、不落任何待确认状态（否则会变成对某个人的误发）。
+  const matched = others.filter(
+    (m) => m.name.trim().length >= 2 && args.text.includes(m.name)
+  );
+  if (matched.length > 1) {
+    return {
+      kind: "guidance",
+      reply: "这条消息里提到了不止一位室友，请写清楚要提醒谁。",
+    };
+  }
+  const target = matched[0];
+  if (!target) {
+    return null;
+  }
+  const ineligible = reminderTargetIneligibleReply(target);
+  if (ineligible) {
+    return { kind: "guidance", reply: ineligible };
+  }
+  const preview = nightLaundryProposalPreview(target.name);
+  const proposal = await createReminderProposal(deps, {
+    householdId: args.householdId,
+    senderIsTest: args.senderIsTest,
+    requesterPersonId: args.senderPersonId,
+    conversationId: args.conversationId,
+    channel: args.channel,
+    recipientPersonId: target.personId,
+    purpose: NIGHT_LAUNDRY_PROPOSAL_PURPOSE,
+    label: "夜间洗衣提醒",
+    previewText: preview,
+    inboundText: args.text,
+  });
+  return {
+    kind: "proposal",
+    reply: preview,
+    recipientName: target.name,
+    recipientPersonId: target.personId,
+    communicationId: proposal.communicationId,
+    decisionId: proposal.decisionId,
+  };
+}
+
+/**
+ * 识别 + 校验 + 发送一条夜间洗衣提醒。
+ *
+ * **不调用任何模型**，也不接受自由正文。判定顺序：
+ *   ① 先试**原有窄命令**（`recognizeNightLaundryReminder`）：命中就走老路径
+ *      （名册校验 → 固定正文发送），行为与开放时一致；
+ *   ② 不是窄命令，再试**近似自然语言请求**：只落一条发给发起人本人的待确认
+ *      预览（`proposal`，零第三方出站），等住户回「确认」才由
+ *      `confirmNightLaundryReminder` 发；
+ *   ③ 仍像这一族但没法安全受理（夹带 / 没点名 / 被否定）：回一句真话短说明，
+ *      零第三方出站；不像就走普通对话。
+ */
+export async function deliverNightLaundryReminder(
+  args: {
+    householdId: string;
+    senderPersonId: string;
+    senderIsTest: boolean;
+    channel: string;
+    /** 发起人自己的会话线，用于落「住户请求 → AI 预览」两条消息。 */
+    conversationId: string;
+    text: string;
+  },
+  deps: ReminderProposalDeps = reminderProposalDeps
+): Promise<NightLaundryReminderOutcome> {
+  // ① 原有窄命令：命中即走老路径。
+  const command = recognizeNightLaundryReminder(args.text);
+  if (command) {
+    const members = await deps.getMembers(args.householdId, args.channel);
+    const matches = members.filter((m) => m.name === command.recipientName);
+    if (matches.length === 0) {
+      return {
+        kind: "guidance",
+        reply: `房子里没有找到叫「${command.recipientName}」的人。我没发任何消息。`,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        kind: "guidance",
+        reply: `「${command.recipientName}」对应不止一个人，请写清楚要提醒谁。`,
+      };
+    }
+    const target = matches[0];
+    if (target.personId === args.senderPersonId) {
+      return { kind: "guidance", reply: "这是你自己，不用提醒。" };
+    }
+    const ineligible = reminderTargetIneligibleReply(target);
+    if (ineligible) {
+      return { kind: "guidance", reply: ineligible };
+    }
+    return await executeNightLaundryReminder(deps, args, target);
+  }
+
+  // ② 近似自然语言请求：只落本地待确认预览，不直接发送。
+  const proposal = await tryNightLaundryProposal(args, deps);
+  if (proposal) {
+    return proposal;
+  }
+
+  // ③ 像这一族但受理不了：真话说明，零第三方出站。
+  if (looksLikeNightLaundryReminder(args.text)) {
+    return { kind: "guidance", reply: unsupportedFormReply() };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * 住户回「确认」后，认领上一轮的待确认提案并**只发那条固定正文**。
+ *
+ * 拿不到提案（没有 / 过期 / 已取消 / 属另一项功能 / 已被别的确认抢走）就返回
+ * `none`，**绝不发送**——「确认」两个字本身不是发送授权，持久化的提案才是。
+ * 收件人按提案里绑定的**稳定 ID** 回到**当前**同屋名册里重新核对，正文也必须
+ * 与当前固定文案逐字一致；任一不符就不发（提案作废）。
+ */
+export async function confirmNightLaundryReminder(
+  args: {
+    householdId: string;
+    senderPersonId: string;
+    senderIsTest: boolean;
+    channel: string;
+    /** 发起人当前会话线；候选提案必须绑定在它上面。 */
+    conversationId: string;
+    text: string;
+  },
+  deps: ReminderProposalDeps = reminderProposalDeps
+): Promise<Exclude<NightLaundryReminderOutcome, { kind: "proposal" }>> {
+  if (parseReminderConfirmation(args.text) !== "confirm") {
+    return { kind: "none" };
+  }
+  const taken = await takeReminderProposal(deps, {
+    householdId: args.householdId,
+    requesterPersonId: args.senderPersonId,
+    channel: args.channel,
+    conversationId: args.conversationId,
+    purpose: NIGHT_LAUNDRY_PROPOSAL_PURPOSE,
+  });
+  if (taken.kind === "none") {
+    return { kind: "none" };
+  }
+
+  // 收件人必须重新回到**当前**同屋名册里核对（不新建会话、不发送）。
+  const members = await deps.getMembers(args.householdId, args.channel);
+  const target = members.find((m) => m.personId === taken.recipientPersonId);
+  if (!target || target.personId === args.senderPersonId) {
+    return { kind: "guidance", reply: REMINDER_PROPOSAL_RECIPIENT_GONE_REPLY };
+  }
+  const ineligible = reminderTargetIneligibleReply(target);
+  if (ineligible) {
+    return { kind: "guidance", reply: ineligible };
+  }
+  // 预览正文必须与**当前**固定文案逐字一致（防代码/姓名变动后照旧文案发）。
+  if (taken.body !== nightLaundryProposalPreview(target.name)) {
+    return { kind: "guidance", reply: REMINDER_PROPOSAL_STALE_REPLY };
+  }
+
+  try {
+    return await executeNightLaundryReminder(deps, args, target);
+  } catch {
+    // 认领后写入失败：**不退回认领**（退回会造成重复入队/重复外呼）。失败可能
+    // 落在 `queueCommunication` **之后**（写会话/消息那一步抛错）——那时外呼其实
+    // 已经入队、即将发出，所以不能断言「没发出去」，只报发送状态无法确认、且不会
+    // 自动重发，避免住户重说一遍造成重复。
+    return { kind: "guidance", reply: REMINDER_PROPOSAL_FAILED_REPLY };
+  }
 }
