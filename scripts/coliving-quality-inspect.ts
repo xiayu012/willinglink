@@ -2619,8 +2619,16 @@ async function main() {
       "功能问答必须在已批准功能前门之后、主生成之前"
     );
     assert(
-      turnSrcQa.includes("runFeatureQa(") && turnSrcQa.includes("repo.latestDecision("),
-      "turn.ts 必须接线功能问答入口并读取上一轮结构化 decision"
+      turnSrcQa.includes("runFeatureQa(") &&
+        turnSrcQa.includes("repo.latestUnsupportedReference("),
+      "turn.ts 必须接线功能问答入口，并只读本人结构化 unsupported 参考"
+    );
+    // 收窄必须发生在**读取时**：调用要带上本人 personId，不能再先取全屋最新一条。
+    assert(
+      /repo\.latestUnsupportedReference\(\{[\s\S]*?personId:\s*sender\.personId/.test(
+        turnSrcQa
+      ),
+      "turn.ts 读取结构化引用时必须按 sender.personId 收窄（不是取完全屋再比）"
     );
   });
 
@@ -2765,7 +2773,7 @@ async function main() {
       return repo.slice(i, j > 0 ? j : undefined);
     };
     const recordBody = sliceFn("export async function recordDecision(");
-    const latestBody = sliceFn("export async function latestDecision(");
+    const refBody = sliceFn("export async function latestUnsupportedReference(");
     assert(
       /\.json\(\s*args\.payload\b/.test(recordBody),
       "recordDecision 的 payload 必须走 postgres.js 的 json()（显式 jsonb 参数）"
@@ -2777,9 +2785,9 @@ async function main() {
       "recordDecision 不得再用 JSON.stringify(...)::jsonb——缓存预处理语句上会被驱动双重编码"
     );
     assert(
-      latestBody.includes("payload->>'capabilityId'") &&
-        latestBody.includes("payload->>'personId'"),
-      "latestDecision 继续用通用 payload->> 读结构化事实"
+      refBody.includes("payload->>'capabilityId'") &&
+        refBody.includes("payload->>'personId'"),
+      "latestUnsupportedReference 继续用通用 payload->> 读结构化事实"
     );
   });
 
@@ -2802,6 +2810,38 @@ async function main() {
     );
     // 新写法：对象直接交给 json() → 顶层是对象 → 读回 id。
     assert.equal(capabilityIdOf(boundToStoredText(payload)), "hygiene");
+  });
+
+  // ── 会话引用「刚才」：读取时就按发起人 + 「紧接着本人上一条入站」收窄（源码闸，不连库） ──
+  //
+  // 真实缺陷：旧 `latestDecision(householdId)` 先取**全屋**最新一条 decision 再由调用方比
+  // personId，别的住户插一条就顶掉本人「刚才」。更隐蔽的反例：本人被拒后**自己**又发了别的
+  // （已批准的事 / 普通问句），若只按 personId + 72h 取最近一条 `unsupported`，会把早已翻篇
+  // 的旧拒绝重新翻出来。修法全在 SQL 里：按 personId 收窄 + 只认结构化条目 + 72h 窗口 +
+  // 「本人同屋之后没有更新的入站消息」。此闸只查 SQL 是否具备这四件事，不重复实现选择语义。
+  check("会话引用「刚才」：按发起人收窄 + 结构化条目 + 72h + 本人之后无更新入站", () => {
+    const repoStr = readFileSync("lib/chat/coliving/repo.ts", "utf8");
+    const start = repoStr.indexOf("export async function latestUnsupportedReference(");
+    assert(start >= 0, "repo 必须有 latestUnsupportedReference");
+    const end = repoStr.indexOf("\nexport ", start + 1);
+    const body = repoStr.slice(start, end > 0 ? end : undefined);
+    assert(
+      /d\.payload->>'personId'\s*=\s*\$\{args\.personId\}/.test(body),
+      "SQL 必须按发起人收窄（不是先取全屋最新再在调用方比）"
+    );
+    assert(
+      body.includes("d.payload->>'capabilityId' is not null"),
+      "只认结构化 unsupported 条目（capabilityId 非空）"
+    );
+    assert(
+      body.includes("args.withinHours ?? 72") && body.includes("interval"),
+      "必须有与既有对话关联（linkResponse / pendingCommunication）一致的 72h 新鲜度窗口"
+    );
+    assert(
+      body.includes("c.household_id = ${args.householdId}") &&
+        /not exists[\s\S]*m\.direction = 'inbound'[\s\S]*m\.sent_at > d\.decided_at/.test(body),
+      "必须排除本人**同一栋房子**里这条 decision 之后更新的入站消息（旧拒绝翻篇后不得再当「刚才」）"
+    );
   });
 
   check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {

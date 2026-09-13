@@ -314,7 +314,12 @@ export async function generateFeatureQaReply(
 export async function runFeatureQa(args: {
   text: string;
   senderPersonId: string;
-  /** `repo.latestDecision(householdId)` 的结果（同 household 最近一条 decision） */
+  /**
+   * `repo.latestUnsupportedReference({ householdId, personId })` 的结果：**本人**、且是
+   * 本人**上一条入站话题**的那条结构化 `unsupported`（按 personId 收窄 + 72h 新鲜度 +
+   * 本人之后没有更新的入站消息）；本人后来发过别的（已批准的事 / 普通问句）就不再是
+   * 「刚才」，返回 null。
+   */
   latestDecision: FeatureQaDecisionState | null;
   openFeatures: readonly { id: string; label: string }[];
   llm: FeatureLlm;

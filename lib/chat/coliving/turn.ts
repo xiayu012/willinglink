@@ -1708,14 +1708,20 @@ export async function runColivingTurn(args: {
    * 当唯一入口。
    */
   if (isFeatureQaQuestion(args.text)) {
-    const latest = await repo.latestDecision(sender.householdId);
+    // 只读**本人**、且是本人上一条入站话题的结构化 `unsupported` 参考（按 personId 收窄 +
+    // 72h 新鲜度 + 本人之后没有更新的入站消息）。别的住户中间发了什么都不会顶掉这条引用，
+    // 也不会把别人的引用拿来给本人用；本人后来发过别的（已批准的事 / 普通问句）就不再是
+    // 「刚才」，本轮照常答功能边界问题，只是不套用那条旧拒绝。
+    const ref = await repo.latestUnsupportedReference({
+      householdId: sender.householdId,
+      personId: sender.personId,
+    });
     const qa = await runFeatureQa({
       text: args.text,
       senderPersonId: sender.personId,
-      latestDecision: {
-        rejectedCapabilityId: latest?.capabilityId ?? null,
-        personId: latest?.personId ?? null,
-      },
+      latestDecision: ref
+        ? { rejectedCapabilityId: ref.capabilityId, personId: sender.personId }
+        : null,
       openFeatures: APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label })),
       llm: productionFeatureLlm(modelId),
     });
