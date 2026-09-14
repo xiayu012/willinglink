@@ -231,10 +231,24 @@ export type ApprovedFeatureRun = {
   error?: unknown;
 };
 
+/**
+ * `runApprovedFeature` 的可选入参（**第四参数，缺省 = 空**）。
+ *
+ * `grantedFeatureIds`：**已经就某几个精确 id 取得授权的功能 / 黑名单条目**。目前只用于
+ * 黑名单——被授权的那一条不再走"纯代码真话拒绝"，而是返回标准 `none` 让调用方落回主流程。
+ * 缺省为空集：既有调用一行不改，默认拒绝行为逐字不变。**纯内存入参**：不读磁盘、不加模型
+ * 调用、不写进 `APPROVED_FEATURES`（它仍只是那两条快路径的清单）。
+ */
+export type ApprovedFeatureRunOptions = {
+  /** 精确 id 集合（只接受只读数组）。只做**精确相等**匹配，不做前缀 / 邻近 id 放行。 */
+  grantedFeatureIds?: readonly string[];
+};
+
 export async function runApprovedFeature(
   text: string,
   ctx: FeatureContext,
-  deps: FeatureDeps
+  deps: FeatureDeps,
+  options: ApprovedFeatureRunOptions = {}
 ): Promise<ApprovedFeatureRun> {
   let usage = EMPTY_FEATURE_USAGE;
   const failed = (error: unknown): ApprovedFeatureRun => ({
@@ -269,6 +283,18 @@ export async function runApprovedFeature(
     // 叫 / 让 / 请对方清理；点名收件人已由前门保证）。不通过就当作 `none` 落回完整流程——
     // **宁可漏判，不得误杀相邻行为**（墙面头发 / 疏通地漏 / 一般卫生 / 异味 / 讨论）。
     if (!blacklisted.qualifier(text)) {
+      return {
+        mode: "none",
+        handling: null,
+        featureId: null,
+        blacklistedCapabilityId: null,
+        usage,
+      };
+    }
+    // **已获准的这一条例外（exact grant）**：资格复核已通过 ⇒ 原话确实在交办这一条，但
+    // 该 id 已被精确授权，于是只**撤销黑名单拒绝**、按标准 `none` 落回**完整主流程**去执行；
+    // 它**不**走 `APPROVED_FEATURES` 快路径（这份清单仍只是那两条快路径）。只认精确 id。
+    if (options.grantedFeatureIds?.includes(blacklisted.id)) {
       return {
         mode: "none",
         handling: null,
