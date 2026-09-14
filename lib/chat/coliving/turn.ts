@@ -247,6 +247,32 @@ export function checkSourcePrivacy(
 export const TRUTHFUL_UNSENT_REPLY =
   "这件事我还没发出去——我没有替你把话转给对方。";
 
+/**
+ * **假完成替换的上下文选择（纯函数，可离线断言）。**
+ *
+ * 默认一律用 `TRUTHFUL_UNSENT_REPLY`。唯一例外：这一轮**真的为当前发信人本人
+ * 记下了他对一条既有规则的立场**（`recordStance` 的回执可证），此时那句泛化的
+ * "我没有替你把话转给对方"对刚刚表态的住户答非所问——他本来就没要求你去联系
+ * 别人，只是说了句"我同意"（corpus-044 第 2 轮）。改成一句只说"你的表态已记下"
+ * 的短确认：**不声称联系过任何人，也不宣称规则已经定案**——定不定这一轮没有
+ * 可证的依据（recordStance 的收口只证明谁表过态，证不了规则是否成立），就不说。
+ *
+ * 保护边界不变：它只在**原有**假完成替换的位置被调用——只有
+ * `claimsUnsentThirdPartyContact(reply)` 命中、也就是模型确实假称联系过第三方时
+ * 才轮到它，所以不会放过任何假称，也不是给正常回复兜底的通用文案。
+ */
+export function selectUnsentContactFallback(args: {
+  /**
+   * 本轮 `recordStance` 是否真的为**当前发信人本人**记下了立场。
+   * 只有工具回执为真才算，模型口头说记了不算。
+   */
+  recordedOwnStance: boolean;
+}): string {
+  return args.recordedOwnStance
+    ? "好，你的表态我已经记下了。"
+    : TRUTHFUL_UNSENT_REPLY;
+}
+
 /** case.kind 是开放文本；只有明确属于同住人或共享资源争用的未结事项才算。 */
 export function isOpenConflictCase(c: { kind: string; title: string }): boolean {
   return (
@@ -2228,6 +2254,21 @@ export async function runColivingTurn(args: {
   /** 只在本轮 pickSchedule 明确返回无候选时成立；口头说”排不开”不算证据。 */
   let scheduleProvenInfeasible = false;
 
+  /**
+   * 本轮 `recordStance` 是否**真的为当前发信人本人**记下了他对一条规则的立场——
+   * 只认工具回执（写库成功），模型口头说"记下了"不算。
+   *
+   * 只服务假完成替换那一处：模型假称联系了别人、这句话被替换时，如果住户本人
+   * 这轮的立场确实记下了，就回一句说"已记下你的表态"的短确认，而不是泛化的
+   * 「我没替你转话」（corpus-044 第 2 轮：住户说同意，模型调 recordStance 却
+   * 谎称问过其他人）。**只记"记下了没有"这一位**，不记同意/异议、不记规则是否
+   * 定案——那两样都不是这一轮能证的事实，确认句也就不说。
+   *
+   * 用持有对象而不是裸的 `let`：赋值点在工具闭包里、读取点在生成之后，
+   * 读属性不会被 TS 的控制流分析收窄。
+   */
+  const ownRuleStance = { recorded: false };
+
   /** 没调 decide 就直接说话时，兜底补一条，保证链路完整（设计稿第十四点） */
   const ensureDecision = async (
     kind: string,
@@ -2782,6 +2823,11 @@ export async function runColivingTurn(args: {
         const { done, objectedCount } = await repo.closeConsultationIfComplete(
           target
         );
+        // **工具回执**：这一轮真的为**当前发信人本人**记下了立场（写库成功）。
+        // 只给假完成替换用——那条泛化的「我没替你转话」对刚表过态的住户答非所问。
+        if (m.personId === sender.personId) {
+          ownRuleStance.recorded = true;
+        }
         return {
           ok: true,
           note: done
@@ -4188,7 +4234,11 @@ export async function runColivingTurn(args: {
     claimsUnsentThirdPartyContact(reply)
   ) {
     console.log("[turn] 命中假完成收窄替换：回复声称已联系第三方，但本轮无第三方出站");
-    reply = TRUTHFUL_UNSENT_REPLY;
+    // 只有**这一轮真的为当前发信人本人记下了立场**（recordStance 回执）时，才换成
+    // 对他那句表态的短确认；其余一律保留泛化的未发送真话。
+    reply = selectUnsentContactFallback({
+      recordedOwnStance: ownRuleStance.recorded,
+    });
   }
 
   const factFidelityHit = checkFactFidelity(reply);

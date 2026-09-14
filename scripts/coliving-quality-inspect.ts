@@ -45,6 +45,7 @@ import {
   isUnsolicitedContactClaim,
   uncoveredBlockedPersonIds,
   scheduleInquiryConfirmation,
+  selectUnsentContactFallback,
   TRUTHFUL_UNSENT_REPLY,
   type FeatureFinalizeDeps,
 } from "../lib/chat/coliving/turn";
@@ -890,6 +891,44 @@ async function main() {
       "将来时（回头跟他说）不是假完成，不得误伤"
     );
   });
+  check("假完成替换按上下文选文案：本人立场已记账才回短确认，其余仍是未发送真话", () => {
+    // corpus-044 第 2 轮：住户对既有规则说"我同意"，模型调 recordStance 记下、
+    // 却在回信里谎称问过其他人；本轮零出站，reply 被换成泛化的「我没替你转话」，
+    // 对刚表态的住户答非所问。这里断言选择器在**有本人立场回执**时给准确确认。
+    const ack = selectUnsentContactFallback({ recordedOwnStance: true });
+    assert.match(ack, /你的表态我已经记下了/);
+    // 确认句本身不能再被判成"假称已联系"，否则替换后复核又会红灯。
+    assert.equal(claimsUnsentThirdPartyContact(ack), false);
+    // 也不得借机声称联系过任何人、或宣称规则已定案（这轮零出站，定案也无回执可证）。
+    assert.equal(
+      /联系|转给|转告|发给|生效|定下来|定了|通过|全员|都说好了/.test(ack),
+      false,
+      `确认句不得声称联系或规则定案：${ack}`
+    );
+
+    // **029 保护不变**：没有本人立场回执（模型口头说记了不算）时，一律退回泛化未发送真话。
+    assert.equal(
+      selectUnsentContactFallback({ recordedOwnStance: false }),
+      TRUTHFUL_UNSENT_REPLY,
+      "本人立场没记下就不得给确认"
+    );
+
+    // 接线：假完成替换仍然先过 claimsUnsentThirdPartyContact（判定不被绕过），
+    // 只是把文案交给这个纯选择器；且只在**本轮没有任何合格出站**时才触发。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const idx = turnSrc.indexOf("outbound.filter((o) => !o.blocked).length === 0 &&");
+    assert(idx > 0, "假完成替换必须仍以「本轮无合格出站」为前提");
+    const block = turnSrc.slice(idx, idx + 1200);
+    assert(
+      block.includes("claimsUnsentThirdPartyContact(reply)"),
+      "假完成替换必须仍复用 claimsUnsentThirdPartyContact"
+    );
+    assert(
+      block.includes("selectUnsentContactFallback({") &&
+        block.includes("recordedOwnStance: ownRuleStance.recorded"),
+      "假完成替换的文案必须走 selectUnsentContactFallback，且只传本人立场是否记账"
+    );
+  });
   // 029 模型验收抓到的真实隐私缺陷：电视音量那轮真实出站写成了
   // 「阿杰，小婷在房间补觉……她想请你现在把音量调小一点。」——来源姓名、来源人私人状况、
   // 归因句三样都泄露。generation-only 下没有 critic，靠 contactPerson 里这条纯代码闸拦。
@@ -1441,8 +1480,10 @@ async function main() {
       "contactPerson 恢复后必须保留发送前竞态门禁"
     );
     // 替换必须先于 checkFactFidelity 复核：换掉的那句真话要重新核对，而不是只标红。
+    // 文案现在由 `selectUnsentContactFallback` 选（本人立场已记账时给准确确认，
+    // 否则仍是 `TRUTHFUL_UNSENT_REPLY`），但**必须仍在同一个替换点、仍先于复核**。
     assert(
-      turnSrc.indexOf("reply = TRUTHFUL_UNSENT_REPLY") <
+      turnSrc.indexOf("reply = selectUnsentContactFallback({") <
         turnSrc.indexOf("const factFidelityHit = checkFactFidelity(reply)"),
       "假完成替换必须先于事实核对，替换后的真话要重新过一遍"
     );
