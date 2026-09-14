@@ -134,6 +134,11 @@ export function isUnsolicitedContactClaim(args: {
  *     `replyReview` 标红却仍把这句谎话发出去；这里把它纳入替换。
  *     `claimsContactCompletion` 内部 `(?!我|您|你)` 保证「阿杰跟我说了」这类
  *     **对方对我说**的反方向事实不被误伤。
+ *
+ * 第 1 支还补一个**明确第三方 + 第一人称完成式**子形态（见下
+ * `THIRD_PARTY_ALSO_SAID_PATTERN`）：corpus-044 第 2 轮真实事故里模型写
+ * 「宁宁那边我也说了，等她回」——本轮零出站，却把「我已经跟宁宁说了」说成完成。
+ * 「也」不在第 1 支的时间标记表里，无主语完成式又要求介词，两支都会漏。
  */
 function firstPersonUnsentContact(clause: string): boolean {
   if (
@@ -145,10 +150,31 @@ function firstPersonUnsentContact(clause: string): boolean {
   ) {
     return true;
   }
-  return /(?:我|这边|我们)[^。！？!?\n]{0,8}(?:联系|通知|提醒|转达|传达|告诉|问|催|发给)[^。！？!?\n]{0,4}(?:了|过)/.test(
-    clause
-  );
+  if (
+    /(?:我|这边|我们)[^。！？!?\n]{0,8}(?:联系|通知|提醒|转达|传达|告诉|问|催|发给)[^。！？!?\n]{0,4}(?:了|过)/.test(
+      clause
+    )
+  ) {
+    return true;
+  }
+  return THIRD_PARTY_ALSO_SAID_PATTERN.test(clause);
 }
+
+/**
+ * **明确第三方 + 第一人称完成式「我也说了」。**
+ *
+ * corpus-044 第 2 轮真实事故：本轮只调了 `recordStance`/`decide`/`sendReply`、零出站，
+ * 回复却写「宁宁那边我也说了，等她回」——没有任何联系工具或出站记录，却把「我已经
+ * 跟宁宁说了」说成已完成。旧判定两支都漏：「我也说了」的「也」不在时间标记表里，
+ * 无主语完成式又要求「跟/和/向/对」这类介词。
+ *
+ * 只抓**明确第三方语境（姓名/称谓 + 那边/那头）紧跟第一人称完成式「我也…了/过」**：
+ * `那边/那头` 把前面的名词锚成第三方（区别于「我这边」），`了/过` 要求完成态。
+ * 不抓没有第三方指向的「我也说了」「我这边也说了」，也不抓「X跟我说了」这类
+ * **对方对我说**的反方向事实。
+ */
+const THIRD_PARTY_ALSO_SAID_PATTERN =
+  /[一-鿿A-Za-z]{2,4}(?:那边|那头)[^。！？!?\n]{0,3}我也(?:说|讲|提|问|联系|通知|告诉|沟通|确认|催|提醒|发)(?:了|过)/;
 
 export function claimsUnsentThirdPartyContact(text: string): boolean {
   return text.split(/[。！？!?\n]/).some((clause) => {

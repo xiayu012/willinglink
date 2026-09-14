@@ -890,6 +890,31 @@ async function main() {
       false,
       "将来时（回头跟他说）不是假完成，不得误伤"
     );
+
+    // corpus-044 第 2 轮真实事故：本轮 recordStance/decide/sendReply、零出站，
+    // 回复却写「宁宁那边我也说了，等她回」——旧判定漏过（「也」不在时间标记表、
+    // 无主语完成式又要求介词）。明确第三方（姓名 + 那边）+「我也说了」必须命中。
+    assert.equal(
+      claimsUnsentThirdPartyContact(
+        "好，记下了。宁宁那边我也说了，等她回。这条先这么走。"
+      ),
+      true,
+      "「NAME那边我也说了」必须判为假称已联系第三方"
+    );
+    // 面向当前住户的正常直接回复不得误伤。
+    assert.equal(
+      claimsUnsentThirdPartyContact(
+        "好，记下了，这条先这么走，你想清楚了再跟我说。"
+      ),
+      false,
+      "面向当前住户的直接回复不得误伤"
+    );
+    // 也不能放宽到没有第三方指向的「我也说了」：「我这边」才是自己这边，不是第三方。
+    assert.equal(
+      claimsUnsentThirdPartyContact("好，我这边也说了，这条先这么走。"),
+      false,
+      "无第三方指向的「我也说了」不得误伤"
+    );
   });
   check("假完成替换按上下文选文案：本人立场已记账才回短确认，其余仍是未发送真话", () => {
     // corpus-044 第 2 轮：住户对既有规则说"我同意"，模型调 recordStance 记下、
