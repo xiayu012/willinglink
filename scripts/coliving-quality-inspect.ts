@@ -2491,9 +2491,63 @@ async function main() {
       src.includes("resolveRuleActionRecipients"),
       "turn.ts 收件人必须按 personId 解析（不能按 display name）"
     );
+    // 名单接线必须同时证明两件事：先排除已搬离者（resides===false），再映射 personId。
+    // 只认这条具体形状，不放宽为「任意含 personId 的文本」。
     assert.ok(
-      src.includes("members.map((m) => m.personId)"),
-      "共同规则参与者名单必须用 personId，不是 display name"
+      /const participants = members\s*\.filter\(\(m\) => m\.resides !== false\)\s*\.map\(\(m\) => m\.personId\)/.test(
+        src
+      ),
+      "共同规则参与者名单必须排除 resides===false 且仍映射 personId（不是 display name）"
+    );
+
+    // 定案授权接线：settled 分支里先落本户精确授权，再生成文案——顺序不能反。
+    const settleGrantIdx = src.indexOf("settleSharedRuleGrant({");
+    const composeNoticesIdx = src.indexOf("await composeRuleNotices(");
+    assert.ok(
+      /if \(settled\) \{\s*const settlement = settleSharedRuleGrant\(/.test(src),
+      "settled 时必须以 settleSharedRuleGrant 落本户精确授权"
+    );
+    assert.ok(
+      settleGrantIdx !== -1 && composeNoticesIdx !== -1 && settleGrantIdx < composeNoticesIdx,
+      "settleSharedRuleGrant 必须在 composeRuleNotices 之前（授权先于文案）"
+    );
+    assert.ok(
+      /settleSharedRuleGrant\(\{\s*dir: resolveRuleSessionDir\(sessionDir\),\s*householdId: sender\.householdId,\s*projection: res\.projection,?\s*\}\)/.test(
+        src
+      ),
+      "settleSharedRuleGrant 必须用 resolveRuleSessionDir(sessionDir) + sender.householdId + res.projection"
+    );
+
+    // 前门只在本户功能授权开关打开时读盘；grantedFeatureIds 只作为 runApprovedFeature
+    // 第四参数传入，不并进静态 APPROVED_FEATURES 清单。
+    assert.ok(
+      /if \(process\.env\.COLIVING_COORDINATION_SHARED_RULE === "1"\) \{\s*try \{\s*grantedFeatureIds = activeHouseholdFeatureIds\(/.test(
+        src
+      ),
+      "只有 shared-rule flag === '1' 才读 activeHouseholdFeatureIds"
+    );
+    assert.equal(
+      (src.match(/activeHouseholdFeatureIds\(/g) ?? []).length,
+      1,
+      "activeHouseholdFeatureIds 只能出现在 flag 闸内这一处，不能绕过开关读授权"
+    );
+    assert.ok(
+      /runApprovedFeature\(\s*args\.text,[\s\S]*?\{ llm: featureLlm, delivery: smsDeliveryDeps \},\s*\{ grantedFeatureIds \}\s*\)/.test(
+        src
+      ),
+      "grantedFeatureIds 必须作为 runApprovedFeature 第四参数传入"
+    );
+    assert.ok(
+      src
+        .split("\n")
+        .filter((line) => line.includes("APPROVED_FEATURES"))
+        .every((line) => !line.includes("grantedFeatureIds")),
+      "不得把本户授权 grantedFeatureIds 并进静态 APPROVED_FEATURES"
+    );
+    assert.equal(
+      /APPROVED_FEATURES\s*(?:\.push|\.unshift|\.splice|\.concat)\b/.test(src),
+      false,
+      "APPROVED_FEATURES 是静态清单，不得在 turn.ts 里被追加 / 合并授权"
     );
   });
 

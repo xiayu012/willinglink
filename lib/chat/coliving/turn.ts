@@ -23,11 +23,13 @@ import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./fe
 import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
 import { deliverSms, resolveNamedRecipient, smsDeliveryDeps } from "./sms-delivery";
+import { activeHouseholdFeatureIds } from "./household-feature-grants";
 import {
   advanceRuleConsultationSession,
   deliverRuleActions,
   recordRuleReceipt,
   resolveRuleActionRecipients,
+  resolveRuleSessionDir,
   type RuleAction,
 } from "./rule-consultation-session";
 import { composeRuleNotices, type RuleNotices } from "./rule-consultation-notice";
@@ -40,6 +42,7 @@ import {
   selectScheduleCandidate,
   type ScheduleSelection,
 } from "./scheduling";
+import { settleSharedRuleGrant } from "./shared-rule-grant-settlement";
 
 /**
  * 一轮对话最多几步工具。比以前长：现在一轮里可能要
@@ -1284,7 +1287,9 @@ async function maybeSharedRuleReply(args: {
   }
   // **身份一律用 personId**（不是 display name）：参与者 / 发起人都是稳定 id，显示名只
   // 用于给住户看的文案。否则两位同名住户会被合并或互相串收。
-  const participants = members.map((m) => m.personId);
+  const participants = members
+    .filter((m) => m.resides !== false)
+    .map((m) => m.personId);
   const sessionDir = process.env.COLIVING_COORDINATION_SESSION_DIR;
   const sessionOpts = sessionDir ? { participants, dir: sessionDir } : { participants };
 
@@ -1315,6 +1320,22 @@ async function maybeSharedRuleReply(args: {
   };
 
   try {
+    // 0) 已定案 → 把这条规则落成**本户**的精确功能授权（幂等）。非 granted /
+    //    already-granted 一律抛错，交给外层 catch 安全收口（不回退旧主流程）。
+    if (settled) {
+      const settlement = settleSharedRuleGrant({
+        dir: resolveRuleSessionDir(sessionDir),
+        householdId: sender.householdId,
+        projection: res.projection,
+      });
+      if (
+        settlement.status !== "granted" &&
+        settlement.status !== "already-granted"
+      ) {
+        throw new Error(`共同规则定案授权失败：${settlement.status}`);
+      }
+    }
+
     // 1) 文案由模型按**收窄后的字段**（这条规则 + 这一步是什么）写；代码只绑定收件人。
     let notices: RuleNotices | null = null;
     try {
@@ -1999,6 +2020,22 @@ export async function runColivingTurn(args: {
    * 某个功能"这一类**请求（和两条快路径同一类），不假装覆盖别的形态。
    */
   if (resolveNamedRecipient(args.text, ctx.members, sender.personId).ok) {
+    // 本户已定案共同规则落成的精确授权：只在共同规则路径开启时读盘（关闭时完全不读
+    // 文件）；读取异常只记日志并当作未授权，保持黑名单拒绝，不让整轮失败。
+    let grantedFeatureIds: readonly string[] = [];
+    if (process.env.COLIVING_COORDINATION_SHARED_RULE === "1") {
+      try {
+        grantedFeatureIds = activeHouseholdFeatureIds(
+          resolveRuleSessionDir(process.env.COLIVING_COORDINATION_SESSION_DIR),
+          sender.householdId
+        );
+      } catch (error) {
+        console.log(
+          "[shared-rule] 读取本户功能授权失败（当作未授权）：",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
     const featureLlm = productionFeatureLlm(modelId);
     const featureRun = await runApprovedFeature(
       args.text,
@@ -2010,7 +2047,8 @@ export async function runColivingTurn(args: {
         channel,
         senderIsTest: sender.isTest,
       },
-      { llm: featureLlm, delivery: smsDeliveryDeps }
+      { llm: featureLlm, delivery: smsDeliveryDeps },
+      { grantedFeatureIds }
     );
     // 先把路由/抽取/生成已花的钱记进本轮，再决定是收工还是落回主生成。
     frontDoorUsage = addFeatureUsage(frontDoorUsage, featureRun.usage);
