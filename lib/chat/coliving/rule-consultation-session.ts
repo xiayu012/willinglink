@@ -169,9 +169,23 @@ export function ruleSessionEventsFile(dir: string, householdId: string): string 
   return path.join(dir, `${safeFileStem(householdId)}.rule.events.jsonl`);
 }
 
-/** 缺省落盘目录：本地临时目录下固定子目录（跨调用稳定）。 */
-function defaultRuleDir(): string {
-  return path.join(os.tmpdir(), "coliving-rule-consultation-sessions");
+/** 缺省落盘目录名：本地临时目录下的固定子目录（跨调用稳定）。 */
+const DEFAULT_RULE_SESSION_DIRNAME = "coliving-rule-consultation-sessions";
+
+/**
+ * **解析共同规则事件日志的实际存储目录**（本模块**唯一**的默认目录入口）。
+ *
+ * - 显式传入**非空** `dir` → **原样返回**（不规范化、不拼接）；
+ * - 缺省 / `undefined` / 空串 → 本地临时目录下的固定子目录
+ *   （`os.tmpdir()/coliving-rule-consultation-sessions`）。
+ *
+ * `advanceRuleConsultationSession` / `recordRuleReceipt`（及经它们落盘的
+ * `deliverRuleActions`）都**只**经这里取默认目录：调用方（含 `turn.ts`）要指目录就传
+ * `opts.dir`，**不要**各自复制临时目录字符串，否则会与状态机读到的事件日志分叉。
+ */
+export function resolveRuleSessionDir(dir?: string): string {
+  if (dir && dir.trim()) return dir;
+  return path.join(os.tmpdir(), DEFAULT_RULE_SESSION_DIRNAME);
 }
 
 /** 读整个 JSONL（坏行跳过、不存在返回空数组）。 */
@@ -214,7 +228,7 @@ function appendRuleEvents(filePath: string, events: readonly RuleEvent[]): void 
 export interface RuleSessionOptions {
   /** 参与这条共同规则的全部成员 display_name（由调用方显式传入；本文件不查 DB）。 */
   participants: readonly PersonId[];
-  /** 事件日志落盘目录（缺省为本地临时目录）。 */
+  /** 事件日志落盘目录；缺省走 `resolveRuleSessionDir`（本地临时目录下固定子目录）。 */
   dir?: string;
 }
 
@@ -249,7 +263,7 @@ export function advanceRuleConsultationSession(
   text: string,
   opts: RuleSessionOptions
 ): RuleSessionAdvance | null {
-  const dir = opts.dir ?? defaultRuleDir();
+  const dir = resolveRuleSessionDir(opts.dir);
   const eventsFile = ruleSessionEventsFile(dir, householdId);
   const events = loadRuleEvents(eventsFile);
   const snap = foldRule(events);
@@ -307,7 +321,7 @@ export function recordRuleReceipt(
 ): RuleEvent | null {
   const event = receiptEventFor(action);
   if (!event) return null;
-  const dir = opts.dir ?? defaultRuleDir();
+  const dir = resolveRuleSessionDir(opts.dir);
   appendRuleEvents(ruleSessionEventsFile(dir, householdId), [event]);
   return event;
 }

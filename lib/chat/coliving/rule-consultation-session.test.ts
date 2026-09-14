@@ -13,7 +13,9 @@
  * - 相邻卫生话题（墙面头发 / 地漏疏通 / 一般打扫 / 异味 / 抱怨）也都不进入；
  * - 投影里没有发起人身份；
  * - **失败注入**：征询短信发失败不得记成 `consulted`、宣布短信发失败不得记成 `announced`，
- *   且失败者会在之后问进度时被重新征询 / 补发（可重试）。
+ *   且失败者会在之后问进度时被重新征询 / 补发（可重试）；
+ * - **默认目录入口唯一**：`resolveRuleSessionDir` 显式非空目录原样返回、缺省回落固定临时
+ *   目录，且 `advance` / `recordRuleReceipt` 缺省时都落在**同一**默认目录（不各写一份）。
  */
 
 import assert from "node:assert/strict";
@@ -25,7 +27,9 @@ import {
   deliverRuleActions,
   parseOpenRuleSessionIntent,
   recognizeSharedShowerDrainHairRule,
+  recordRuleReceipt,
   resolveRuleActionRecipients,
+  resolveRuleSessionDir,
   ruleSessionEventsFile,
   SHARED_SHOWER_DRAIN_HAIR_RULE_FACT,
 } from "./rule-consultation-session";
@@ -53,6 +57,8 @@ const C: PersonId = "阿凯";
 const PARTICIPANTS = [A, B, C];
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rule-consultation-session-"));
+/** 缺省目录的**当前固定位置**：独立写成字面量，作为「默认目录被改走」的哨兵。 */
+const DEFAULT_RULE_SESSION_DIR = path.join(os.tmpdir(), "coliving-rule-consultation-sessions");
 const HOUSE = "eval-house-043";
 const eventsFile = ruleSessionEventsFile(tmpDir, HOUSE);
 const PROPOSAL = "咱们能不能定一个规则，每个人洗完澡后把地漏里的头发清掉。";
@@ -476,6 +482,45 @@ test("session 复用 registry guard：否定 / 相邻语义不建日志；旧式
     false,
     "不得把 ruleDefinitionId 回填进旧式日志"
   );
+});
+
+test("resolveRuleSessionDir：显式非空目录原样返回，缺省回落到当前固定临时目录", () => {
+  const explicit = path.join(tmpDir, "explicit-rule-dir");
+  assert.equal(resolveRuleSessionDir(explicit), explicit, "显式目录必须原样返回");
+  assert.equal(
+    resolveRuleSessionDir("relative/rule-dir"),
+    "relative/rule-dir",
+    "原样返回，不规范化、不拼接"
+  );
+  assert.equal(resolveRuleSessionDir(undefined), DEFAULT_RULE_SESSION_DIR, "缺省用固定临时目录");
+  assert.equal(resolveRuleSessionDir(""), DEFAULT_RULE_SESSION_DIR, "空串视为缺省（非空才算显式）");
+});
+
+test("advance / recordRuleReceipt 缺省都落在同一个默认目录（不各写一份）", () => {
+  const house = "eval-house-043-default-dir";
+  const defaultFile = ruleSessionEventsFile(DEFAULT_RULE_SESSION_DIR, house);
+  const dirExisted = fs.existsSync(DEFAULT_RULE_SESSION_DIR);
+  fs.rmSync(defaultFile, { force: true }); // 清掉上一次异常中断可能留下的同户日志
+  try {
+    // 不传 dir：advance 必须落到本模块唯一的默认目录。
+    const r = advanceRuleConsultationSession(house, A, PROPOSAL, { participants: PARTICIPANTS });
+    assert.ok(r, "提案必须进入本路径");
+    assert.equal(fs.existsSync(defaultFile), true, "缺省必须落到固定默认目录");
+
+    // 不传 dir：receipt 也落到**同一个**默认目录（而不是别处的新副本）。
+    const receipt = recordRuleReceipt(house, { type: "consult", person: B }, {
+      participants: PARTICIPANTS,
+    });
+    assert.deepEqual(receipt, { type: "consulted", person: B });
+    assert.deepEqual(
+      readEvents(defaultFile).map((e) => e.type),
+      ["rule_proposed", "consulted"],
+      "receipt 追加在同一默认目录的事件日志里"
+    );
+  } finally {
+    fs.rmSync(defaultFile, { force: true });
+    if (!dirExisted) fs.rmSync(DEFAULT_RULE_SESSION_DIR, { recursive: true, force: true });
+  }
 });
 
 /* ------------------------------------------------------------------ *
