@@ -72,36 +72,22 @@ import type {
   RuleState,
 } from "../../coordination/rule-consultation";
 import type { PersonId } from "../../coordination/types";
+import {
+  recognizeSharedRuleDefinition,
+  recognizeSharedShowerDrainHairRule as registryRecognizeSharedShowerDrainHairRule,
+  SHARED_SHOWER_DRAIN_HAIR_RULE_FACT,
+} from "./shared-rule-definitions";
 
 export type { RuleAction } from "../../coordination/rule-consultation";
 
+// 中性规则事实的**唯一事实源**在 `shared-rule-definitions.ts` 的登记册；本文件**直接
+// re-export**（不另写一份），保持旧导入路径兼容，且两处**逐字同一**、不会各写一份而漂移。
+export { SHARED_SHOWER_DRAIN_HAIR_RULE_FACT };
+
 /* ------------------------------------------------------------------ *
  * 窄识别：只有这一条「洗完澡后清理地漏头发」的共同规则
+ * （判据的唯一事实源在 `shared-rule-definitions.ts`，本文件只做薄适配）
  * ------------------------------------------------------------------ */
-
-/** 共同范围信号：一条**全屋**规则必须面向所有人，而不是点名某一个人。 */
-const ALL_MEMBERS_SIGNAL =
-  /每个人|每人|人人|大家|咱们|所有人|全员|全体|各位|每个住户|都该|都要/;
-/** 立规则框架信号：住户在**立一条规则 / 约定**，不是在交办一次具体整改。 */
-const RULE_FRAMING_SIGNAL =
-  /规则|规矩|约定|统一|说好|商量好|定个|定一个|定一条|立个|立一条|以后都|以后大家/;
-/** 洗澡语境。 */
-const SHOWER_SIGNAL = /洗澡|淋浴|洗浴|洗完澡/;
-/** 地漏。 */
-const DRAIN_SIGNAL = /地漏/;
-/** 头发。 */
-const HAIR_SIGNAL = /头发|毛发|发丝/;
-/** 清走动作（两字以上明确动作短语，避免「洗」这类单字假信号）。 */
-const CLEAN_AWAY_SIGNAL =
-  /清掉|清理|清干净|清走|清一下|清一清|清光|清出去|弄掉|弄走|弄干净|弄出去|捡掉|捡走|捡起来|捡干净|拿走|拿掉|拿出去|收走|收拾|扫掉|扫走|掏掉|掏出来|掏干净|处理掉|处理干净|除掉|去除|去掉|冲掉/;
-/** 局部分句分隔：地漏 + 头发 + 清走动作要落在同一分句。 */
-const CLAUSE_SPLIT = /[。．.！!？?；;，,、\n\r]+|\s{2,}/;
-
-/**
- * **这条共同规则的中性事实文本（固定语义）**：所有日志 / 措辞都只基于它，绝不携带
- * 发起人原句里的姓名、指责或私人理由（来源隐私）。措辞层据此自然生成短信。
- */
-export const SHARED_SHOWER_DRAIN_HAIR_RULE_FACT = "每个人洗完澡后清理地漏里的头发";
 
 /** 识别结果：命中时**只**带回固定的中性规则事实，绝不携带发起人原句。 */
 export type SharedRuleRecognition =
@@ -109,40 +95,27 @@ export type SharedRuleRecognition =
   | { ok: false };
 
 /**
- * 原句里是否有一处「地漏 + 头发 + 清走动作」同处一个分句——**只作命中的必要条件**：
- * 返回布尔，**不留用哪个分句**。规则事实一律收敛为 `SHARED_SHOWER_DRAIN_HAIR_RULE_FACT`，
- * 不把发起人原句片段（可能带姓名、指责、私人理由）带进日志 / 措辞层（来源隐私）。
- */
-function hasLocalDrainHairCleanupClause(text: string): boolean {
-  return text.split(CLAUSE_SPLIT).some((clause) => {
-    const c = clause.trim();
-    return !!c && DRAIN_SIGNAL.test(c) && HAIR_SIGNAL.test(c) && CLEAN_AWAY_SIGNAL.test(c);
-  });
-}
-
-/**
- * **唯一的窄识别入口**：这句话是不是「大家立一条『洗完澡后清理地漏头发』的共同规则」。
+ * **唯一的窄识别入口（薄适配，不自有识别逻辑）**：这句话是不是「大家立一条『洗完澡后清理
+ * 地漏头发』的共同规则」。
  *
- * 需要**同时**满足：① 有共同范围信号（每个人 / 大家 / 咱们 / 所有人 …）；② 有立规则
- * 框架（规则 / 规矩 / 约定 / 定一个 …）；③ 有洗澡语境；④ 「地漏 + 头发 + 清走动作」
- * 落在同一分句。缺一即 `{ ok: false }`。
+ * 判据**不在本文件**：共同范围 / 立规则 / 洗澡 /「地漏 + 头发 + 清走动作同处一分句」这些
+ * 正则与纯函数，以及「复述后的否定 / 引用 / 举例 / 设想不算提案、只问看法不算提案」的复核，
+ * 全部收敛在**唯一事实源** `shared-rule-definitions.ts` 的登记册里
+ * （`recognizeSharedShowerDrainHairRule`）。本函数只是**调用登记册的薄适配**：把登记册的
+ * 布尔结果包成旧的 `{ ok, rule }` 形状，**保持导入兼容**，**不再重复实现**任何识别判据。
  *
  * 命中后**只**返回固定的中性事实 `SHARED_SHOWER_DRAIN_HAIR_RULE_FACT`——**不是**发起人
  * 原句片段：即使住户原话里点名了某人、带了指责或私人理由，也不会被当作规则文本外传。
  *
- * 因此**单方面点名要求**（「请叫阿川把地漏的头发清干净」）没有 ① 和 ② → 不命中，
- * 仍走原黑名单；墙面头发 / 地漏疏通 / 一般打扫 / 异味 / 抱怨 / 征询也都不命中。
+ * 因此**单方面点名要求**（「请叫阿川把地漏的头发清干净」）没有共同范围 / 立规则框架 →
+ * 不命中，仍走原黑名单；墙面头发 / 地漏疏通 / 一般打扫 / 异味 / 抱怨 / 征询也都不命中。
  */
 export function recognizeSharedShowerDrainHairRule(
   text: string
 ): SharedRuleRecognition {
-  const t = (text ?? "").trim();
-  if (!t) return { ok: false };
-  if (!ALL_MEMBERS_SIGNAL.test(t)) return { ok: false };
-  if (!RULE_FRAMING_SIGNAL.test(t)) return { ok: false };
-  if (!SHOWER_SIGNAL.test(t)) return { ok: false };
-  if (!hasLocalDrainHairCleanupClause(t)) return { ok: false };
-  return { ok: true, rule: SHARED_SHOWER_DRAIN_HAIR_RULE_FACT };
+  return registryRecognizeSharedShowerDrainHairRule(text)
+    ? { ok: true, rule: SHARED_SHOWER_DRAIN_HAIR_RULE_FACT }
+    : { ok: false };
 }
 
 /* ------------------------------------------------------------------ *
@@ -290,9 +263,12 @@ export function advanceRuleConsultationSession(
     if (!parsed || parsed.type !== "ask_status") return null;
     intent = parsed;
   } else if (!snap.proposed) {
-    // 还没提出这条规则：只有窄识别命中才进入本路径。
-    const rec = recognizeSharedShowerDrainHairRule(text);
-    intent = rec.ok ? { type: "propose_rule", rule: rec.rule } : null;
+    // 还没提出这条规则：只有窄识别命中才进入本路径。命中时带上登记册给的稳定
+    // `ruleDefinitionId`（与中性事实同源），绝不从已有 snap.rule 文本反推 id。
+    const def = recognizeSharedRuleDefinition(text);
+    intent = def
+      ? { type: "propose_rule", rule: def.canonicalFact, ruleDefinitionId: def.id }
+      : null;
   } else {
     // 会话已开启：只有明确表态 / 问进度才进入本路径，其余交给普通流程。
     intent = parseOpenRuleSessionIntent(text);

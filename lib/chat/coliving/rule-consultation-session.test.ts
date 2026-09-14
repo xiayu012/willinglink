@@ -32,6 +32,7 @@ import {
 import { projectRule } from "../../coordination/rule-consultation";
 import type { RuleEvent, RuleProjection } from "../../coordination/rule-consultation";
 import type { PersonId } from "../../coordination/types";
+import { SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID } from "./shared-rule-definitions";
 
 /* ------------------------------------------------------------------ *
  * 极简测试骨架（避免引入任何框架，`tsx 文件` 直接跑；支持 async 用例）
@@ -397,6 +398,84 @@ test("定案后问进度：仍回当前发言人、零第三方出站，不重�
   // 非「问进度」的消息（普通表态 / 闲聊）仍交回普通流程。
   assert.equal(op(A, "好的"), null);
   assert.equal(op(A, "我今天下班挺晚的"), null);
+});
+
+test("首次提案落盘 / 回投影带稳定 ruleDefinitionId，且从 JSONL 再推进仍保持", () => {
+  const house = "eval-house-043-definition-id";
+  const file = ruleSessionEventsFile(tmpDir, house);
+
+  // 第 1 轮：首次共同规则提案 → 落盘第一条 rule_proposed 带上稳定 id，返回投影同值。
+  const r1 = advance(A, PROPOSAL, house);
+  assert.ok(r1, "提案必须进入本路径");
+  assert.equal(
+    r1.projection.ruleDefinitionId,
+    SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+    "返回投影必须带登记册给的稳定 ruleDefinitionId"
+  );
+
+  const proposed = readEvents(file).filter((e) => e.type === "rule_proposed");
+  assert.equal(proposed.length, 1, "只落一条 rule_proposed");
+  assert.equal(
+    (proposed[0] as Extract<RuleEvent, { type: "rule_proposed" }>).ruleDefinitionId,
+    SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+    "落盘的第一条 rule_proposed 必须带稳定 ruleDefinitionId"
+  );
+
+  // 从同一份 JSONL 再推进一轮（小周同意）：重放恢复绝不丢失 ruleDefinitionId。
+  const r2 = advance(B, "可以啊", house);
+  assert.ok(r2);
+  assert.equal(
+    r2.projection.ruleDefinitionId,
+    SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+    "从 JSONL 恢复后仍保持同一 ruleDefinitionId"
+  );
+  assert.equal(
+    (readEvents(file).find((e) => e.type === "rule_proposed") as Extract<
+      RuleEvent,
+      { type: "rule_proposed" }
+    >).ruleDefinitionId,
+    SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+    "日志里的 ruleDefinitionId 不因再推进而改变"
+  );
+});
+
+test("session 复用 registry guard：否定 / 相邻语义不建日志；旧式日志不补写 ruleDefinitionId", () => {
+  // (1) 否定完整提案 + 相邻语义：经 session 入口都返回 null，且各自新 household 不创建事件日志。
+  const guarded: Array<[string, string]> = [
+    ["eval-house-043-negated", "咱们不要定规则每个人洗完澡后清理地漏里的头发，别定。"],
+    ["eval-house-043-adjacent", "咱们把浴室墙面的头发清掉吧。"],
+  ];
+  for (const [house, text] of guarded) {
+    const file = ruleSessionEventsFile(tmpDir, house);
+    assert.equal(advance(A, text, house), null, `不得进入本路径：${text}`);
+    assert.equal(fs.existsSync(file), false, `不得写下任何事件：${text}`);
+  }
+
+  // (2) 手工旧式 rule_proposed JSONL（不含 ruleDefinitionId）：重放安全落 null，且不得回填字段。
+  const house = "eval-house-043-legacy";
+  const file = ruleSessionEventsFile(tmpDir, house);
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      type: "rule_proposed",
+      rule: SHARED_SHOWER_DRAIN_HAIR_RULE_FACT,
+      initiator: A,
+    }) + "\n",
+    "utf8"
+  );
+
+  const r = advance(B, "我同意", house);
+  assert.ok(r, "旧式日志仍应能推进");
+  assert.equal(
+    r.projection.ruleDefinitionId,
+    null,
+    "旧日志缺字段必须严格落 null，绝不猜 ID"
+  );
+  assert.equal(
+    fs.readFileSync(file, "utf8").includes("ruleDefinitionId"),
+    false,
+    "不得把 ruleDefinitionId 回填进旧式日志"
+  );
 });
 
 /* ------------------------------------------------------------------ *
