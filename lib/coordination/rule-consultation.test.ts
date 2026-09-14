@@ -12,14 +12,18 @@
  * - 有人不同意 → 永不定案（objected），后续同意也不翻转；
  * - 全员同意 → 定案 + 向全员宣布，每人不重复宣布；定案后是终态；
  * - 投影里**没有发起人身份**（来源隐私）；
+ * - 首次提议携带稳定 `ruleDefinitionId`，fold/project 重放保留、重复提议不覆盖、
+ *   非提议路径不生成、旧日志缺字段安全落 null；
  * - checkRuleInvariants 对机器产出的日志通过，对「少一人同意就定案」的手工日志报错。
  */
 
 import assert from "node:assert/strict";
 import {
   checkRuleInvariants,
+  emptyRuleSnap,
   foldRule,
   projectRule,
+  projectRuleFromSnap,
   receiptEventFor,
   reduceRule,
   stepRule,
@@ -47,7 +51,12 @@ const C: PersonId = "阿凯";
 const PARTICIPANTS = [A, B, C];
 
 const RULE = "每个人洗完澡后把地漏里的头发清掉";
-const propose = (rule = RULE): RuleIntent => ({ type: "propose_rule", rule });
+const RULE_ID = "rule:drain-hair";
+const propose = (rule = RULE, ruleDefinitionId = RULE_ID): RuleIntent => ({
+  type: "propose_rule",
+  rule,
+  ruleDefinitionId,
+});
 const agree = (): RuleIntent => ({ type: "state_position", position: "agree" });
 const disagree = (): RuleIntent => ({ type: "state_position", position: "disagree" });
 const askStatus = (): RuleIntent => ({ type: "ask_status" });
@@ -91,7 +100,9 @@ function run(steps: Array<{ intent: RuleIntent; sender: PersonId }>): RuleEvent[
 test("提出：只向尚未表态的其他人征询；发起人视为同意、不被征询", () => {
   const r = step([], propose(), A);
   // 只有「事实」立即产出；consulted 是**送达回执**，不在这一步（等短信真发出去才记）。
-  assert.deepEqual(r.events, [{ type: "rule_proposed", rule: RULE, initiator: A }]);
+  assert.deepEqual(r.events, [
+    { type: "rule_proposed", rule: RULE, initiator: A, ruleDefinitionId: RULE_ID },
+  ]);
   assert.deepEqual(r.actions, [
     { type: "consult", person: B },
     { type: "consult", person: C },
@@ -239,7 +250,7 @@ test("单成员房子：提出即全员同意、直接定案", () => {
   const r = step([], propose(), solo, [solo]);
   // 事实：提出 + 定案；announced 是送达回执，不在事实里。
   assert.deepEqual(r.events, [
-    { type: "rule_proposed", rule: RULE, initiator: solo },
+    { type: "rule_proposed", rule: RULE, initiator: solo, ruleDefinitionId: RULE_ID },
     { type: "rule_settled" },
   ]);
   assert.deepEqual(r.actions, [{ type: "announce", person: solo }]);
@@ -338,6 +349,66 @@ test("checkRuleInvariants：机器产出的日志通过；少一人同意就定�
     checkRuleInvariants(objectThenSettle).some((v) => v.includes(B)),
     "有人反对却定案必须报错"
   );
+});
+
+/* ------------------------------------------------------------------ *
+ * ruleDefinitionId：首次提议携带、重放保留、非提议路径不生成
+ * ------------------------------------------------------------------ */
+
+test("首次 step 事件携带 ruleDefinitionId；fold/project 重放后仍保留", () => {
+  const r = step([], propose(), A);
+  assert.deepEqual(r.events, [
+    { type: "rule_proposed", rule: RULE, initiator: A, ruleDefinitionId: RULE_ID },
+  ]);
+  const snap = foldRule(r.events);
+  assert.equal(snap.ruleDefinitionId, RULE_ID);
+  assert.equal(
+    projectRuleFromSnap(snap, { participants: PARTICIPANTS }).ruleDefinitionId,
+    RULE_ID,
+    "从快照投影也携带首次 ID"
+  );
+  const proj = projectRule(r.events, { participants: PARTICIPANTS });
+  assert.equal(proj.ruleDefinitionId, RULE_ID, "投影里带上首次事件的定义 id");
+});
+
+test("emptyRuleSnap / 空投影为 null；旧日志缺字段重放为 null（不猜）", () => {
+  assert.equal(emptyRuleSnap().ruleDefinitionId, null);
+  assert.equal(projectRule([]).ruleDefinitionId, null);
+
+  // 旧持久化日志没有这个字段：重放安全得到 null，不猜 ID。
+  const legacy: RuleEvent[] = [{ type: "rule_proposed", rule: RULE, initiator: A }];
+  assert.equal(foldRule(legacy).ruleDefinitionId, null);
+  assert.equal(projectRule(legacy).ruleDefinitionId, null);
+});
+
+test("重复提议用不同 ID：不追加第二条 rule_proposed，首次 ID 不变", () => {
+  const afterPropose = run([{ intent: propose(), sender: A }]);
+  // B 用不同 ID 再说同一条：只记「同意」，绝不追加第二条 rule_proposed。
+  const again = step(afterPropose, propose(RULE, "rule:other"), B);
+  assert.equal(again.events.some((e) => e.type === "rule_proposed"), false);
+  assert.deepEqual(again.events, [{ type: "position_recorded", person: B, position: "agree" }]);
+  assert.equal(
+    foldRule([...afterPropose, ...again.events]).ruleDefinitionId,
+    RULE_ID,
+    "重复提议不覆盖首次 ID"
+  );
+
+  // 即便日志里真混进第二条带不同 ID 的 rule_proposed，fold 也只认第一次。
+  const dirty: RuleEvent[] = [
+    { type: "rule_proposed", rule: RULE, initiator: A, ruleDefinitionId: RULE_ID },
+    { type: "rule_proposed", rule: RULE, initiator: B, ruleDefinitionId: "rule:other" },
+  ];
+  assert.equal(foldRule(dirty).ruleDefinitionId, RULE_ID);
+});
+
+test("ask_status / state_position / other 不生成 ruleDefinitionId（无 rule_proposed）", () => {
+  const afterPropose = run([{ intent: propose(), sender: A }]);
+  const noProposal = (r: ReturnType<typeof step>): void => {
+    assert.equal(r.events.some((e) => e.type === "rule_proposed"), false);
+  };
+  noProposal(step(afterPropose, askStatus(), A));
+  noProposal(step(afterPropose, agree(), B));
+  noProposal(step(afterPropose, { type: "other" }, C));
 });
 
 /* ------------------------------------------------------------------ *

@@ -53,6 +53,8 @@ export type RuleState = "none" | "proposed" | "objected" | "settled";
  *
  * - `rule_proposed` —— 某人提出这条共同规则。`rule` 是**发起人消息里导出的事实文本**，
  *   本模块不改写它。`initiator` **只供内部审计，绝不投影 / 出站**（来源隐私）。
+ *   `ruleDefinitionId` 是**上层在首次提议时给出的稳定规则定义 id**，只记在首次事件上、
+ *   供后续精确映射；旧持久化日志可能没有这个字段，重放时安全得到 `null`（不猜 ID）。
  * - `consulted` —— **送达回执**：向某人的征询短信真的发出去过（「同意过的人不重复征询」的
  *   去重依据）。**只在送达成功后追加**，失败不记、可重试。
  * - `position_recorded` —— 某人明确表态同意 / 不同意。
@@ -61,7 +63,13 @@ export type RuleState = "none" | "proposed" | "objected" | "settled";
  *   同样只在送达成功后追加。
  */
 export type RuleEvent =
-  | { type: "rule_proposed"; rule: string; initiator: PersonId }
+  | {
+      type: "rule_proposed";
+      rule: string;
+      initiator: PersonId;
+      /** 上层给的稳定规则定义 id；**旧日志可能缺失**，缺失即视为未知（`null`），不猜。 */
+      ruleDefinitionId?: string;
+    }
   | { type: "consulted"; person: PersonId }
   | { type: "position_recorded"; person: PersonId; position: RulePosition }
   | { type: "rule_settled" }
@@ -72,7 +80,12 @@ export type RuleEvent =
  * 本模块只按结构化意图走转移。
  */
 export type RuleIntent =
-  | { type: "propose_rule"; rule: string }
+  | {
+      type: "propose_rule";
+      rule: string;
+      /** 上层在**首次提议**时必须提供的稳定规则定义 id（新建调用不可省略）。 */
+      ruleDefinitionId: string;
+    }
   | { type: "state_position"; position: RulePosition }
   | { type: "ask_status" }
   | { type: "other" };
@@ -100,6 +113,8 @@ export interface RuleSnap {
   proposed: boolean;
   /** 发起人提出的规则事实文本；没提出就是 null。 */
   rule: string | null;
+  /** **首次** `rule_proposed` 携带的稳定规则定义 id；没提出或旧日志缺字段时为 null。 */
+  ruleDefinitionId: string | null;
   /** 发起人身份：**内部审计用，绝不外传**（来源隐私）。 */
   initiator: PersonId | null;
   /** 每人的表态（首次表态后不再改）。 */
@@ -119,6 +134,7 @@ export function emptyRuleSnap(): RuleSnap {
   return {
     proposed: false,
     rule: null,
+    ruleDefinitionId: null,
     initiator: null,
     positions: new Map(),
     consulted: new Set(),
@@ -152,9 +168,11 @@ export function foldRule(events: readonly RuleEvent[]): RuleSnap {
   for (const e of events) {
     switch (e.type) {
       case "rule_proposed": {
-        if (snap.proposed) break; // 同一条规则只认第一次提出
+        if (snap.proposed) break; // 同一条规则只认第一次提出（ID 也以首次为准）
         snap.proposed = true;
         snap.rule = e.rule;
+        // 旧日志可能没有这个字段：缺失就是未知，安全落 null，不猜 ID。
+        snap.ruleDefinitionId = e.ruleDefinitionId ?? null;
         snap.initiator = e.initiator;
         visit(e.initiator);
         snap.positions.set(e.initiator, "agree");
@@ -221,6 +239,8 @@ export interface RuleProjection {
   settled: boolean;
   /** 发起人提出的规则事实文本；没提出就是 null。 */
   rule: string | null;
+  /** **首次**事件携带的稳定规则定义 id；没提出或旧日志缺字段时为 null（不猜）。 */
+  ruleDefinitionId: string | null;
   /** 参与全员（`ctx.participants`；缺省为事件里出现过的人）。 */
   participants: PersonId[];
   /** 当前说话人；不知道为 null。 */
@@ -279,6 +299,7 @@ export function projectRuleFromSnap(
     state: ruleStateFromSnap(s),
     settled: s.settled,
     rule: s.rule,
+    ruleDefinitionId: s.ruleDefinitionId,
     participants,
     sender: ctx.sender ?? null,
     agreed,
@@ -406,7 +427,14 @@ export function stepRule(
       }
       const rule = intent.rule.trim();
       if (!rule) return noopRule();
-      const facts: RuleEvent[] = [{ type: "rule_proposed", rule, initiator: ctx.sender }];
+      const facts: RuleEvent[] = [
+        {
+          type: "rule_proposed",
+          rule,
+          initiator: ctx.sender,
+          ruleDefinitionId: intent.ruleDefinitionId,
+        },
+      ];
       const afterPropose = foldRule([...events, ...facts]);
       if (allAgree(afterPropose, ctx.participants)) {
         // 只有发起人一人（单成员房子）：提出即全员同意。
