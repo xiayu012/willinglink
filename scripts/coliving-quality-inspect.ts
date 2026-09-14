@@ -130,6 +130,8 @@ import {
   ruleSessionEventsFile,
   SHARED_SHOWER_DRAIN_HAIR_RULE_FACT,
 } from "../lib/chat/coliving/rule-consultation-session";
+// 共同规则的稳定定义 id：唯一事实源在登记册里，这里只 import 常量、**不复制魔法字符串**。
+import { SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID } from "../lib/chat/coliving/shared-rule-definitions";
 import {
   checkRuleInvariants,
   foldRule,
@@ -2283,7 +2285,11 @@ async function main() {
     const C = "阿凯";
     const P = [A, B, C];
     const RULE = "每个人洗完澡后把地漏里的头发清掉";
-    const propose: RuleIntent = { type: "propose_rule", rule: RULE };
+    const propose: RuleIntent = {
+      type: "propose_rule",
+      rule: RULE,
+      ruleDefinitionId: SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+    };
     const agree: RuleIntent = { type: "state_position", position: "agree" };
     const disagree: RuleIntent = { type: "state_position", position: "disagree" };
     const step = (events: readonly RuleEvent[], intent: RuleIntent, sender: string) =>
@@ -2312,6 +2318,13 @@ async function main() {
       p.events.some((e) => e.type === "consulted" || e.type === "announced"),
       false,
       "stepRule 只产出事实事件；consulted / announced 必须由送达成功后的调用方另记"
+    );
+    // 首次 rule_proposed 事实事件必须携带上层给出的稳定规则定义 id（不是从自由文本重猜）。
+    const firstEvent = p.events[0];
+    assert.equal(
+      firstEvent.type === "rule_proposed" ? firstEvent.ruleDefinitionId : null,
+      SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+      "首次事实事件必须携带稳定规则定义 id"
     );
     // 模拟两条征询都送达成功 → 才追加回执。
     let events: RuleEvent[] = withReceipts(p.events, p.actions);
@@ -2377,6 +2390,11 @@ async function main() {
     // 投影不含任何来源身份字段（发起人只是参与者之一，不被打来源标签）。
     const proj = projectRule(ev2, { participants: P, sender: C });
     assert.equal(JSON.stringify(proj).includes("initiator"), false, "投影不得带来源身份字段");
+    assert.equal(
+      proj.ruleDefinitionId,
+      SHOWER_DRAIN_HAIR_AFTER_USE_RULE_ID,
+      "投影必须携带首次事件的稳定规则定义 id（按 id 查表，不从自由文本重猜）"
+    );
     assert.equal(foldRule(ev2).initiator, A, "发起人只在内部快照里，供审计");
 
     // 窄识别：这条共同规则命中；单方面点名要求 / 相邻话题都不命中。
