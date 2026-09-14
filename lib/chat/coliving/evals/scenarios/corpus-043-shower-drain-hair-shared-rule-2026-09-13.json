@@ -1,0 +1,64 @@
+{
+  "id": "corpus-043-shower-drain-hair-shared-rule-2026-09-13",
+  "source": "2026-09-13 Claude 编写的纯虚构多轮语料：三位住户（阿菲、小周、阿凯）一起协商一条全屋共同规则「每个人洗完澡后清理地漏里的头发」。第一人提出，另外两人分别明确同意，用于观察**默认关闭**的共同规则协商状态机（`COLIVING_COORDINATION_SHARED_RULE=1`，见 `lib/coordination/rule-consultation.ts` 与 `lib/chat/coliving/rule-consultation-session.ts`）的定案与全员通知。它不在 APPROVED_FEATURES 快路径清单里、也不走主生成；写进状态机与措辞层的规则事实是中性固定语义，不保留发起人原句里的姓名 / 指责 / 理由。运行前须设 `COLIVING_COORDINATION_SHARED_RULE=1`；三人姓名在 setup 里确认（姓名未确认时可达性闸会拒绝一切对外出站，评测会因此失败而不是假通过）。逐轮机器断言只查结构化事实（这一轮有没有通过审稿的出站、发给谁、出站有没有泄露姓名），不写死整句文案；状态机不变量另在免费单测里覆盖。",
+  "household": { "label": "评测-043 共同规则协商" },
+  "people": [
+    { "phone": "+15550430001", "name": "阿菲", "role": "tenant" },
+    { "phone": "+15550430002", "name": "小周", "role": "tenant" },
+    { "phone": "+15550430003", "name": "阿凯", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["阿菲", "小周", "阿凯"],
+    "priorMessages": [
+      { "person": "阿菲", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" },
+      { "person": "小周", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" },
+      { "person": "阿凯", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550430001",
+      "text": "咱们能不能定一个规则，每个人洗完澡后把地漏里的头发清掉。",
+      "expect": {
+        "minAcceptedOutbound": 2,
+        "mustContactNames": ["小周", "阿凯"],
+        "mustNotContactNames": ["阿菲"],
+        "mustNotUseTools": ["contactPerson", "proposeRule"],
+        "outboundMustMatch": ["地漏|头发"],
+        "outboundMustNotMatch": ["阿菲", "小周", "阿凯"],
+        "replyMustNotMatch": ["已经生效", "正式生效"]
+      }
+    },
+    {
+      "from": "+15550430002",
+      "text": "这条规则我没意见，卫生间也能干净点。",
+      "expect": {
+        "minAcceptedOutbound": 0,
+        "mustNotContactNames": ["阿菲", "小周", "阿凯"],
+        "mustNotUseTools": ["contactPerson", "proposeRule"],
+        "replyMustNotMatch": ["已经生效", "正式生效"]
+      }
+    },
+    {
+      "from": "+15550430003",
+      "text": "我同意，我洗澡的时候顺手就清了。",
+      "expect": {
+        "minAcceptedOutbound": 2,
+        "mustContactNames": ["阿菲", "小周"],
+        "mustNotContactNames": ["阿凯"],
+        "mustNotUseTools": ["contactPerson", "proposeRule"],
+        "outboundMustMatch": ["地漏|头发"],
+        "outboundMustNotMatch": ["阿菲", "小周", "阿凯"]
+      }
+    },
+    {
+      "from": "+15550430001",
+      "text": "那咱们现在都同意了吗？",
+      "expect": {
+        "minAcceptedOutbound": 0,
+        "mustNotContactNames": ["阿菲", "小周", "阿凯"],
+        "mustNotUseTools": ["contactPerson", "proposeRule"]
+      }
+    }
+  ]
+}

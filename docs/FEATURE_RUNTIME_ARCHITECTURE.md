@@ -233,6 +233,58 @@
   同住人**时才启动——所以现在的黑名单定义面是**「对点名的同住人执行某个功能」这一类**
   请求（和两条已批准快路径同一类）。要覆盖别的形态得先扩展前门。
 
+### 4. 共同规则协商（默认关闭的实验接线，只处理一条具体规则）
+
+**这一条与上面第 3 条的黑名单不是同一件事，必须分清**（见 `.claude/CONCRETE_FUNCTIONS.md`
+与 `docs/USER_FACING_CAPABILITY_TRUTH.md`）：
+
+- 黑名单「单方面叫别人在洗完澡后清理地漏头发」= 一位住户**单方面**交办 AI 去要求**点名
+  的一位室友**清理；**精确不变**。
+- 共同规则协商 = **全屋住户一起**把「每个人洗完澡后都把地漏里的头发清掉」定成一条**对每个
+  人都适用**的规则，**全员同意才生效**。它不是「谁要求谁」，不需要判断现场严重程度，因此
+  **不属于**那条黑名单，也不得被它拦下；反过来它也**不得**替单方面整改放行。
+
+**状态机（纯函数，零耦合）**：`lib/coordination/rule-consultation.ts`。只做「收集全员表态」
+这一件事，不算方案、不判断规则内容是否合理、**不自己发明规则、不做任何现场卫生判断**。
+事件 / 状态 / 不变量见 `lib/coordination/README.md` 的「第二条机器」一节。关键保证（全部由
+代码强制，不靠模型自觉）：
+
+- **未全员同意绝不定案**：`rule_settled` 生成时，日志里所有已知参与者必须都是 agree；
+- **同意过 / 已征询过的人不重复征询**；
+- **有人明确反对则原规则永不定案**（`objected` 终态，其余人同意也不翻转）；
+- **来源隐私由类型保证**：投影 / 出站动作里没有 `initiator` 字段，措辞层拿不到是谁发起的；
+- **不写死短信文案、不自己发送**：状态机只产出结构化动作（consult / announce），正文交给
+  措辞层按 doctrine 生成；
+- **身份一律用 `personId`**：参与者 / 发起人 / 收件人都按稳定 id，显示名只用于文案；收件人由
+  `resolveRuleActionRecipients` **按 id** 解析。两位**同名**住户各有各的 id，会分别征询 /
+  宣布，不会合并、也不会互相串收；
+- **规则事实是中性固定语义**：写进状态机与措辞层的规则文本恒为
+  `SHARED_SHOWER_DRAIN_HAIR_RULE_FACT`（「每个人洗完澡后清理地漏里的头发」），**不是**发起人
+  原句片段——原句里的姓名 / 指责 / 私人理由都不会外传。最终短信措辞仍由措辞层自然生成，不写死
+  完整短信；
+- **事实与送达回执分开（回执必须等于真的送达）**：`rule_proposed` / `position_recorded` /
+  `rule_settled` 是**事实**，推进时立即落库；`consulted` / `announced` 是**动作成功的回执**，
+  只在对应短信（或本人回复）确实落账后由 `deliverRuleActions` / `recordRuleReceipt` 追加。
+  发送失败**不记回执**，失败者留在待办里、下次问进度（`ask_status`）重新征询 / 补发；
+- **推进之后绝不回落旧主流程**：`turn.ts` 的 `maybeSharedRuleReply` 只有在「确认属于本路径
+  之前」（读名册失败 / 状态机推进抛错 / 不是这条规则）才返回 `null` 交回旧流程；一旦事实已
+  推进，后续任何异常都返回一个「零出站、中性兜底」的安全结果，避免同一条入站消息被处理两次。
+
+**接线（默认关闭）**：`lib/chat/coliving/rule-consultation-session.ts` 是唯一可测试运行路径
+——一个**窄识别器**只认这**一条**具体规则（必须同时出现「全屋 / 每个人」范围信号 + 「定规则 /
+约定」框架信号 + 「洗澡」「地漏」「头发」且同一分句里有清走动作），**不把"卫生 / 地漏 / 头发"
+扩大成一类主题**，单方面点名要求**不进入**本路径（仍走原黑名单）。命中后才用
+`parseOpenRuleSessionIntent`（不同意优先于同意；仅短回复或含规则字眼时才当表态，防劫持）解析
+表态，按 household 落 JSONL 事件日志，再由 `advanceRuleConsultationSession` 推进状态机。
+
+`turn.ts` 里的接线由环境变量 **`COLIVING_COORDINATION_SHARED_RULE=1`** 控制，**默认关闭**，
+且仅在住户明确要求时才开启；开启后也**必须先过 doctrine + 真实语料人工阅读**才算语气验收
+（见下节「机械检查证明不了什么」）。未开启时这条路径完全不参与，行为与现在一致。措辞层
+`lib/chat/coliving/rule-consultation-notice.ts` 只拿到规则事实文本，**看不到发起人 / 投诉人 /
+任何私人处境**；生成失败时回退到一句中性的「收到，我记下了。」，**绝不用兜底文案假称规则已经
+生效**。另有纯代码的 `claimsSharedRuleSettled` 闸：未定案那一轮，住户回复里若出现「已经生效 /
+定案 / 全员同意」这类措辞会被降级，避免假完成。
+
 ## 保留轮 `reply_only` 与两道保护
 
 **保留结果 `reply_only`（不是功能、不是工具）**：请求明确围绕某项已批准功能，但这一轮
@@ -395,7 +447,19 @@ schema 与工具选择仪式），又让「能不能发」变成事后把关。�
   前门——黑名单**也在这一次路由里**判定，不再有按关键词的前置拦截；命中 / `reply_only` /
   `blacklisted` 都由 `finalizeFeatureTurn` 收尾早返回，`toolsUsed` 为空、`promptComposition`
   为 `null`；前门 `none` 则继续走 doctrine + 主生成）
-- 真话保护：`claimsUnsentThirdPartyContact` / `TRUTHFUL_UNSENT_REPLY`（同文件）
+- **共同规则协商（默认关闭的实验接线；与黑名单是两件事）**：
+  - 状态机（纯函数、零耦合）：`lib/coordination/rule-consultation.ts`（事件 / 状态 / 不变量见
+    `lib/coordination/README.md`「第二条机器」；投影不含发起人身份）
+  - 纯函数单测：`lib/coordination/rule-consultation.test.ts`
+  - 窄识别 + 表态解析 + household 级 JSONL 持久化 + 运行入口：
+    `lib/chat/coliving/rule-consultation-session.ts`（单方面点名要求**不进入**本路径）
+  - 运行路径单测：`lib/chat/coliving/rule-consultation-session.test.ts`
+  - 措辞层（只拿规则事实、看不到来源）：`lib/chat/coliving/rule-consultation-notice.ts`
+  - 接线开关：`lib/chat/coliving/turn.ts` 的 `COLIVING_COORDINATION_SHARED_RULE`（**默认关闭**）
+  - 隔离场景：`lib/chat/coliving/evals/scenarios/corpus-043-shower-drain-hair-shared-rule-2026-09-13.json`
+    （纯虚构、三位住户、多轮：提出 → 两人分别同意 → 定案并向全员宣布；不写死机器 `expect`）
+- 真话保护：`claimsUnsentThirdPartyContact` / `TRUTHFUL_UNSENT_REPLY`（同文件）；
+  共同规则另有 `claimsSharedRuleSettled`（未定案不得声称已生效）
 - 已停用的自由文本出站：`lib/chat/coliving/outreach.ts`（入口返回空，不调模型、不入队）
 - 运行时上下文对模型的表述：`lib/chat/coliving/context.ts`
 - 免费结构闸：`scripts/coliving-quality-inspect.ts`

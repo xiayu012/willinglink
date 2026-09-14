@@ -22,6 +22,7 @@ import {
   evaluateTurnExpectation,
   evaluateTurnReplyReviews,
   validateScenario,
+  type TurnOutcome,
 } from "../lib/chat/coliving/evals/schema";
 import {
   buildGeneratorSystemMessages,
@@ -122,6 +123,22 @@ import type {
   FeatureDeps,
   FeatureHandling,
 } from "../lib/chat/coliving/feature-types";
+import {
+  parseOpenRuleSessionIntent,
+  recognizeSharedShowerDrainHairRule,
+  resolveRuleActionRecipients,
+  ruleSessionEventsFile,
+  SHARED_SHOWER_DRAIN_HAIR_RULE_FACT,
+} from "../lib/chat/coliving/rule-consultation-session";
+import {
+  checkRuleInvariants,
+  foldRule,
+  projectRule,
+  receiptEventFor,
+  reduceRule,
+  stepRule,
+} from "../lib/coordination/rule-consultation";
+import type { RuleEvent, RuleIntent } from "../lib/coordination/rule-consultation";
 import {
   AMBIGUOUS_SMS_RECIPIENT_REPLY,
   deliverSms,
@@ -2259,6 +2276,285 @@ async function main() {
       }
     }
   );
+
+  check("共同规则协商状态机：全员同意才定案、单方面整改不进入；接线默认关闭", () => {
+    const A = "阿菲";
+    const B = "小周";
+    const C = "阿凯";
+    const P = [A, B, C];
+    const RULE = "每个人洗完澡后把地漏里的头发清掉";
+    const propose: RuleIntent = { type: "propose_rule", rule: RULE };
+    const agree: RuleIntent = { type: "state_position", position: "agree" };
+    const disagree: RuleIntent = { type: "state_position", position: "disagree" };
+    const step = (events: readonly RuleEvent[], intent: RuleIntent, sender: string) =>
+      stepRule(events, intent, { participants: P, sender });
+    // 模拟「动作都送达成功」：追加对应回执事件（真机上由投递成功后的 deliverRuleActions 写）。
+    const withReceipts = (
+      evs: RuleEvent[],
+      actions: ReturnType<typeof stepRule>["actions"]
+    ): RuleEvent[] => {
+      const out = [...evs];
+      for (const a of actions) {
+        const r = receiptEventFor(a);
+        if (r) out.push(r);
+      }
+      return out;
+    };
+
+    // 提出 → 只向尚未表态的人征询；发起人视为同意、不被征询。
+    const p = step([], propose, A);
+    assert.deepEqual(p.actions, [
+      { type: "consult", person: B },
+      { type: "consult", person: C },
+    ]);
+    // **事实事件**里绝不出现 consulted / announced——那两个是送达回执，必须先发成功。
+    assert.equal(
+      p.events.some((e) => e.type === "consulted" || e.type === "announced"),
+      false,
+      "stepRule 只产出事实事件；consulted / announced 必须由送达成功后的调用方另记"
+    );
+    // 模拟两条征询都送达成功 → 才追加回执。
+    let events: RuleEvent[] = withReceipts(p.events, p.actions);
+
+    // 未全员同意前绝不定案。
+    const b = step(events, agree, B);
+    events = [...events, ...b.events];
+    assert.equal(reduceRule(events), "proposed", "少一人同意绝不能定案");
+    assert.equal(b.actions.every((a) => a.type !== "announce"), true, "未定案不得宣布");
+
+    // 同意过的人不被重复征询。
+    const ask = step(events, { type: "ask_status" }, A);
+    assert.deepEqual(ask.actions, [{ type: "none" }], "已征询的人不重复问");
+
+    // 全员同意 → 定案 + 向全员宣布；再模拟宣布都送达、不变量通过。
+    const c = step(events, agree, C);
+    events = [...events, ...c.events];
+    assert.equal(reduceRule(events), "settled");
+    assert.deepEqual(c.actions, [
+      { type: "announce", person: A },
+      { type: "announce", person: B },
+      { type: "announce", person: C },
+    ]);
+    events = withReceipts(events, c.actions);
+    assert.deepEqual(checkRuleInvariants(events), []);
+
+    // 失败可重试：宣布只送达了 A（没记 B、C 的 announced）→ 问进度会补发 B、C。
+    const partial: RuleEvent[] = [
+      ...events.filter((e) => e.type !== "announced"),
+      { type: "announced", person: A },
+    ];
+    assert.deepEqual(
+      step(partial, { type: "ask_status" }, A).actions,
+      [
+        { type: "announce", person: B },
+        { type: "announce", person: C },
+      ],
+      "没送达的宣布必须能在问进度时补发"
+    );
+
+    // 有人不同意 → 绝不定案，其余人同意也不翻转。
+    let ev2: RuleEvent[] = step([], propose, A).events;
+    const no = step(ev2, disagree, B);
+    ev2 = [...ev2, ...no.events];
+    assert.equal(reduceRule(ev2), "objected");
+    const yes = step(ev2, agree, C);
+    ev2 = [...ev2, ...yes.events];
+    assert.equal(reduceRule(ev2), "objected", "有人反对后其余同意也不定案");
+    assert.equal(yes.actions.every((a) => a.type !== "announce"), true);
+
+    // 少一人同意就定案的手工日志必须被不变量挡下（C 已被征询却还没表态）。
+    assert.ok(
+      checkRuleInvariants([
+        { type: "rule_proposed", rule: RULE, initiator: A },
+        { type: "consulted", person: B },
+        { type: "consulted", person: C },
+        { type: "position_recorded", person: B, position: "agree" },
+        { type: "rule_settled" },
+      ]).length > 0,
+      "少一人同意就定案必须报错"
+    );
+
+    // 投影不含任何来源身份字段（发起人只是参与者之一，不被打来源标签）。
+    const proj = projectRule(ev2, { participants: P, sender: C });
+    assert.equal(JSON.stringify(proj).includes("initiator"), false, "投影不得带来源身份字段");
+    assert.equal(foldRule(ev2).initiator, A, "发起人只在内部快照里，供审计");
+
+    // 窄识别：这条共同规则命中；单方面点名要求 / 相邻话题都不命中。
+    assert.equal(
+      recognizeSharedShowerDrainHairRule(
+        "咱们能不能定一个规则，每个人洗完澡后把地漏里的头发清掉。"
+      ).ok,
+      true
+    );
+    for (const notIt of [
+      "请叫阿川把地漏的头发清干净。",
+      "你让阿川把地漏里的头发弄掉。",
+      "咱们把浴室墙面的头发清掉吧。",
+      "大家说地漏堵了要疏通，我们定个规则吧。",
+      "咱们定个规则，大家轮流打扫客厅卫生。",
+    ]) {
+      assert.equal(
+        recognizeSharedShowerDrainHairRule(notIt).ok,
+        false,
+        `不得进入共同规则状态机：${notIt}`
+      );
+    }
+
+    // 来源隐私：规则事实是中性固定语义，不保留原句里的姓名 / 指责 / 私人理由。
+    const accusatory =
+      "阿川总不清理地漏的头发，烦死了，所以咱们定个规则，每个人洗完澡后把地漏里的头发清掉。";
+    const recPrivacy = recognizeSharedShowerDrainHairRule(accusatory);
+    assert.equal(recPrivacy.ok, true, "共同规则提案仍应被识别");
+    assert.equal(
+      recPrivacy.ok && recPrivacy.rule,
+      SHARED_SHOWER_DRAIN_HAIR_RULE_FACT,
+      "规则事实必须是中性固定语义事实"
+    );
+    assert.equal(
+      recPrivacy.ok && /阿川|烦|总不/.test(recPrivacy.rule),
+      false,
+      "规则事实不得保留姓名 / 指责 / 理由"
+    );
+
+    // 身份按 personId：同名住户不合并，收件人按 id 解析。
+    const roster = [
+      { personId: "id-阿川-1", name: "阿川" },
+      { personId: "id-阿川-2", name: "阿川" },
+      { personId: "id-阿川-3", name: "阿川" },
+    ];
+    const recipients = resolveRuleActionRecipients(
+      [
+        { type: "consult", person: "id-阿川-2" },
+        { type: "consult", person: "id-阿川-3" },
+      ],
+      roster
+    );
+    assert.deepEqual(
+      recipients.map((r) => r.member.personId),
+      ["id-阿川-2", "id-阿川-3"],
+      "收件人必须按 personId 解析（同名也分得开、不串收）"
+    );
+
+    // 表态解析：不同意优先于同意；无关长句不被劫持。
+    assert.deepEqual(parseOpenRuleSessionIntent("我不同意"), {
+      type: "state_position",
+      position: "disagree",
+    });
+    assert.equal(parseOpenRuleSessionIntent("我今天下班挺晚的还要去买菜"), null);
+
+    // 会话文件按 household 分文件（同一 id 两侧换算一致）。
+    assert.ok(
+      ruleSessionEventsFile("/tmp/x", "h/hh").endsWith("h_hh.rule.events.jsonl"),
+      "会话事件文件名必须按 household 安全化"
+    );
+
+    // 默认关闭的接线：env 闸 + 「未定案不得说生效」纯代码真话闸 + 会话入口。
+    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert.ok(src.includes("COLIVING_COORDINATION_SHARED_RULE"), "turn.ts 必须有默认关闭的 env 闸");
+    assert.ok(src.includes("claimsSharedRuleSettled"), "turn.ts 必须有未定案不得说生效的真话闸");
+    assert.ok(src.includes("advanceRuleConsultationSession"), "turn.ts 必须调用共同规则会话入口");
+    assert.ok(
+      src.includes("deliverRuleActions"),
+      "turn.ts 投递必须走 deliverRuleActions（送达成功才记回执）"
+    );
+    assert.ok(
+      src.includes("recordRuleReceipt"),
+      "turn.ts 必须在本人回复落库之后才记回执"
+    );
+    // 回执只能由 receiptEventFor 映射产出；且 deliverRuleActions 必须先 send 成功、再记回执。
+    const sessionSrc = readFileSync("lib/chat/coliving/rule-consultation-session.ts", "utf8");
+    assert.ok(sessionSrc.includes("receiptEventFor"), "回执事件只能由 receiptEventFor 映射产出");
+    assert.ok(
+      sessionSrc.indexOf("await send(action)") < sessionSrc.indexOf("recordRuleReceipt(householdId, action"),
+      "deliverRuleActions 必须先 send 成功、再记回执（顺序不能反）"
+    );
+    // 身份一律 personId：参与者名单不能用 display name，收件人按 id 解析。
+    assert.ok(
+      src.includes("resolveRuleActionRecipients"),
+      "turn.ts 收件人必须按 personId 解析（不能按 display name）"
+    );
+    assert.ok(
+      src.includes("members.map((m) => m.personId)"),
+      "共同规则参与者名单必须用 personId，不是 display name"
+    );
+  });
+
+  check("corpus-043 共同规则协商：姓名已确认，逐轮断言能在“对外出站为空”时失败", () => {
+    const file =
+      "lib/chat/coliving/evals/scenarios/corpus-043-shower-drain-hair-shared-rule-2026-09-13.json";
+    const scenario = validateScenario(JSON.parse(readFileSync(file, "utf8")), file);
+
+    // 前提：三位住户姓名都已确认。姓名未确认时可达性闸会拒绝一切对外出站，
+    // 这正是付费跑出“outbound 全空却结构通过”的根因，必须在这里钉住。
+    const names = (scenario.people ?? []).map((p) => p.name);
+    assert.ok(names.length >= 3, "必须是至少三位住户的多人场景");
+    for (const n of names) {
+      assert.ok(
+        (scenario.setup?.confirmedNames ?? []).includes(n),
+        `住户「${n}」必须在 setup.confirmedNames 里确认姓名（否则对外出站会被闸掉）`
+      );
+    }
+
+    // 每一轮都必须有机器断言——不能再出现 expect={} 的空场景靠“没断言”假通过。
+    assert.ok(
+      scenario.turns.every((t) => !!t.expect),
+      "每一轮都必须带机器断言（不接受空 expect 假通过）"
+    );
+
+    const empty = (): TurnOutcome => ({ toolsUsed: [], reply: "", outbound: [] });
+    const outTo = (toName: string, text: string): TurnOutcome["outbound"][number] => ({
+      toName,
+      text,
+    });
+
+    // 第 1 轮：分别征询另外两人。对外出站为空 → 必须判失败（这条断言就是防回归的）。
+    const t1 = scenario.turns[0].expect!;
+    assert.ok(
+      evaluateTurnExpectation(t1, empty()).length > 0,
+      "第1轮对外出站为空时必须判失败（不能结构假通过）"
+    );
+    assert.deepEqual(
+      evaluateTurnExpectation(t1, {
+        toolsUsed: [],
+        reply: "",
+        outbound: [outTo("小周", "地漏里的头发"), outTo("阿凯", "地漏里的头发")],
+      }),
+      []
+    );
+
+    // 第 3 轮：全员同意后向另外两人宣布。对外出站为空 → 必须判失败。
+    const t3 = scenario.turns[2].expect!;
+    assert.ok(
+      evaluateTurnExpectation(t3, empty()).length > 0,
+      "第3轮对外出站为空时必须判失败"
+    );
+    assert.deepEqual(
+      evaluateTurnExpectation(t3, {
+        toolsUsed: [],
+        reply: "",
+        outbound: [outTo("阿菲", "地漏头发"), outTo("小周", "地漏头发")],
+      }),
+      []
+    );
+
+    // 第 2 / 4 轮：只回当前发言人、不重复广播 / 通知——空出站应通过，一旦对外发就失败。
+    for (const idx of [1, 3]) {
+      const ex = scenario.turns[idx].expect!;
+      assert.deepEqual(
+        evaluateTurnExpectation(ex, empty()),
+        [],
+        `第${idx + 1}轮零第三方出站应通过`
+      );
+      assert.ok(
+        evaluateTurnExpectation(ex, {
+          toolsUsed: [],
+          reply: "",
+          outbound: [outTo("阿凯", "重复广播")],
+        }).length > 0,
+        `第${idx + 1}轮不该产生第三方出站`
+      );
+    }
+  });
 
   check("收件人绑定：只能绑住户原话里点名且唯一的那位同住人（模型改不了人）", () => {
     const text =
@@ -7078,14 +7374,18 @@ async function main() {
       turnSrc.includes("promptComposition: PromptComposition | null;"),
       "TurnOutcome 必须带可空观测字段（null=本轮没走模型）"
     );
-    // TurnOutcome 返回点都要显式给出：四条不调主模型的路径显式 null
-    // （未知号码 / 接管 / 短路 / 已批准功能前门命中，不是 0），主生成路径给真实长度/名称。
+    // TurnOutcome 返回点都要显式给出：不调主模型的路径显式 null
+    // （未知号码 / 厨房排班接管 / 短路 / 已批准功能前门命中 / 共同规则协商接管，
+    // 不是 0），主生成路径给真实长度/名称。
     // 已批准功能现在在 `buildContext` 之后、主生成之前由功能前门直接办完并早返回
-    // （`finalizeFeatureTurn`），这是一条新的不调主模型的路径，所以这里回到四条。
+    // （`finalizeFeatureTurn`），这是一条新的不调主模型的路径。
+    // 共同规则协商接管（`maybeSharedRuleReply`，默认关闭）同样不构建主提示词，只是另调
+    // 一次收窄的文案生成；它**有两个**显式 null 的返回点：正常返回，以及「事实已推进后
+    // 出错、绝不回落旧流程」的安全返回。因此这里比之前多一条。
     assert.equal(
       turnSrc.split("promptComposition: null,").length - 1,
-      4,
-      "四条不走主模型的返回路径（未知号码/接管/短路/功能前门）都要显式 null"
+      6,
+      "六条不走主模型的返回点（未知号码/接管/短路/功能前门/共同规则正常/共同规则安全兜底）都要显式 null"
     );
     assert(
       turnSrc.includes("doctrineChars: doctrine.length") &&

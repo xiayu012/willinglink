@@ -19,10 +19,18 @@ import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
 import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
-import { addFeatureUsage, productionFeatureLlm } from "./feature-llm";
+import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
 import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
-import { resolveNamedRecipient, smsDeliveryDeps } from "./sms-delivery";
+import { deliverSms, resolveNamedRecipient, smsDeliveryDeps } from "./sms-delivery";
+import {
+  advanceRuleConsultationSession,
+  deliverRuleActions,
+  recordRuleReceipt,
+  resolveRuleActionRecipients,
+  type RuleAction,
+} from "./rule-consultation-session";
+import { composeRuleNotices, type RuleNotices } from "./rule-consultation-notice";
 import {
   bestSchedulePlans,
   checkScheduleSlotConsistency,
@@ -1213,6 +1221,259 @@ function coordinationReplyForSender(
 }
 
 /**
+ * 文案生成失败时的**兜底短句**（模型根本没被调成功，硬编码只留给不过大脑的路径）。
+ * 中性、简短、不多说一个字，**绝不**声称规则已经生效。
+ */
+const RULE_NOTICE_FALLBACK = "收到，我记下了。";
+
+/**
+ * 纯代码真话闸：一句话有没有**假称这条共同规则已经生效 / 定案 / 全员通过**。
+ * 规则尚未定案时命中，就把回复换成中性兜底——**没有全员同意，绝不能说规则已经生效**。
+ */
+function claimsSharedRuleSettled(text: string): boolean {
+  return /已经?(生效|定下来|定了|通过|确定|成立)|正式(生效|实行|执行)|大家都?(同意|同意)|全员(同意|通过)|都说好了|就这么定了/.test(
+    text
+  );
+}
+
+/**
+ * 共同规则协商替换分支的总入口（默认关闭，`COLIVING_COORDINATION_SHARED_RULE=1` 才开）。
+ *
+ * 只为**一条具体规则**「洗完澡后清理地漏头发」的共同协商接的路径：用
+ * `advanceRuleConsultationSession`（独立、事件溯源的状态机）推进这一轮，把状态机的
+ * `consult` / `announce` 动作**按状态机绑定的收件人**发出，并给当前住户一条回复。
+ *
+ * 确定性保证（对应任务要求）：
+ * - **没有全员同意绝不说规则生效**：`announce` 动作只在状态机定案时产生；回复再过一条
+ *   纯代码真话闸 `claimsSharedRuleSettled`，未定案的回复里若出现「已经生效 / 定案 /
+ *   全员通过」等字样，一律换成中性兜底。
+ * - **回执 = 真的送达**：`consulted` / `announced` 只在对应短信（或本人回复）**确实落账后**
+ *   才追加（`deliverRuleActions` / `recordRuleReceipt`）。发送失败**不记回执**，那位住户留在
+ *   待办里、下次问进度可重试；`outbound` 也只记真的发出去的那几条。
+ * - **有人反对绝不定案**：状态机不会产出 `announce`。
+ * - **不泄露来源**：规则事实是**中性固定语义**（`SHARED_SHOWER_DRAIN_HAIR_RULE_FACT`），
+ *   不带发起人原句里的姓名 / 指责 / 私人理由；文案层也拿不到发起人身份。
+ * - **身份用 `personId`**：参与者 / 发起人 / 收件人都按稳定 id，显示名只用于文案，同名
+ *   住户不会合并、也不会互相串收征询 / 宣布。
+ *
+ * **两段式回退边界**（避免同一条消息被处理两次）：
+ * - 只有在**确认属于本路径之前**（读名册失败 / 状态机推进本身抛错 / 不是这条规则）才返回
+ *   `null` 落回旧 AI 流程——这些情况下状态还没有任何推进。
+ * - 一旦状态机**已推进事实**（`res` 非空且带规则），后续任何异常都**绝不返回 `null`**：
+ *   改为返回一个「零出站、中性兜底、不声称做过任何事」的安全结果，防止同一条入站消息
+ *   回落主流程被二次处理。
+ */
+async function maybeSharedRuleReply(args: {
+  sender: repo.Sender;
+  channel: string;
+  text: string;
+  conversationId: string;
+  turnStartedAt: Date;
+}): Promise<TurnOutcome | null> {
+  const { sender, channel, text, conversationId, turnStartedAt } = args;
+  const describeError = (error: unknown): string =>
+    error instanceof Error ? error.message : String(error);
+
+  // 先拿名册——连会话都建不起来就交回旧流程（此时状态未推进）。
+  let members: repo.Member[];
+  try {
+    members = await repo.getMembers(sender.householdId, channel);
+  } catch (error) {
+    console.log("[shared-rule] 读取名册失败，回退旧 AI 流程：", describeError(error));
+    return null;
+  }
+  // **身份一律用 personId**（不是 display name）：参与者 / 发起人都是稳定 id，显示名只
+  // 用于给住户看的文案。否则两位同名住户会被合并或互相串收。
+  const participants = members.map((m) => m.personId);
+  const sessionDir = process.env.COLIVING_COORDINATION_SESSION_DIR;
+  const sessionOpts = sessionDir ? { participants, dir: sessionDir } : { participants };
+
+  // 推进状态机：这里只会落**事实**事件（提出 / 表态 / 定案）；回执稍后另记。
+  let res;
+  try {
+    res = advanceRuleConsultationSession(sender.householdId, sender.personId, text, sessionOpts);
+  } catch (error) {
+    // 状态没推进（或推进不确定）→ 交回旧流程，此刻没有任何出站 / 回复。
+    console.log("[shared-rule] 状态机推进失败，回退旧 AI 流程：", describeError(error));
+    return null;
+  }
+  if (!res || !res.projection.rule) return null; // 不属于这条规则 → 普通流程
+
+  // —— 从这里开始：**这条消息已确认属于共同规则路径、事实已落库**。
+  //    之后任何异常都**绝不能**返回 null 落回旧主流程（否则同一条消息会被处理两次）。
+  const rule = res.projection.rule;
+  const settled = res.projection.state === "settled";
+  const modelId = colivingModelId();
+  /** 措辞这一步真实花掉的用量（失败也照记，不丢）。 */
+  let noticesUsage: TurnUsage = {
+    steps: 0,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+  };
+
+  try {
+    // 1) 文案由模型按**收窄后的字段**（这条规则 + 这一步是什么）写；代码只绑定收件人。
+    let notices: RuleNotices | null = null;
+    try {
+      const composed = await composeRuleNotices(rule, productionFeatureLlm(modelId));
+      notices = composed.notices;
+      noticesUsage = addFeatureUsage(noticesUsage, composed.usage);
+    } catch (error) {
+      // 文案没写出来 → **零第三方出站**，用中性兜底回复；用量照记，不假称已通知。
+      noticesUsage = addFeatureUsage(noticesUsage, usageOfFeatureError(error));
+      console.log("[shared-rule] 文案生成失败（零第三方出站）：", describeError(error));
+    }
+
+    // 2) 入站消息落库 + 关联回它正在回答的沟通。失败也继续——事实已推进，不回退旧流程。
+    try {
+      const inboundId = await repo.appendMessage({
+        conversationId,
+        personId: sender.personId,
+        direction: "inbound",
+        channel,
+        body: text,
+      });
+      if (inboundId) {
+        await repo.linkResponse({ personId: sender.personId, messageId: inboundId });
+      }
+    } catch (error) {
+      console.log("[shared-rule] 入站消息落库失败（继续，不回退旧流程）：", describeError(error));
+    }
+
+    // 3) 拆分动作：发给别人走 deliverSms，发给自己的那条 = 本轮回复。
+    //    收件人**按 personId** 解析（`resolveRuleActionRecipients`），显示名只用于文案；
+    //    同名住户各归各的 id，不会串收。
+    const outbound: OutboundMessage[] = [];
+    let replyText = RULE_NOTICE_FALLBACK;
+    let senderAction: RuleAction | null = null;
+    const external: Array<{ action: RuleAction; target: repo.Member; body: string }> = [];
+    for (const { action, member } of resolveRuleActionRecipients(res.actions, members)) {
+      const body =
+        action.type === "announce" ? notices?.announce ?? null : notices?.consult ?? null;
+      if (!body) continue;
+      if (member.personId === sender.personId) {
+        senderAction = action;
+        replyText = body; // 发给发起人本人的那条 = 本轮回复
+      } else {
+        external.push({ action, target: member, body });
+      }
+    }
+    if (!senderAction) {
+      // 没有发给本人的动作：定案后回「规则已生效」，否则回一句进度确认。定案后仍可能被
+      // 问进度（此时 actions 可能是 `none`）——不能因此落回旧主流程，也不重复通知别人。
+      replyText = (settled ? notices?.announce : notices?.ack) ?? RULE_NOTICE_FALLBACK;
+    }
+
+    // 3a) 发给别人：逐条发；`deliverRuleActions` **只在 send 成功后才记 consulted /
+    //     announced 回执**。失败的人不记回执 → 保持待办、下次问进度可重试。
+    if (external.length > 0) {
+      const externalByAction = new Map(external.map((e) => [e.action, e]));
+      await deliverRuleActions(
+        sender.householdId,
+        external.map((e) => e.action),
+        async (action) => {
+          const e = externalByAction.get(action);
+          if (!e) throw new Error("动作与收件人不匹配");
+          const delivered = await deliverSms({
+            householdId: sender.householdId,
+            channel,
+            senderIsTest: sender.isTest,
+            purposeLabel: action.type === "announce" ? "共同规则定案通知" : "共同规则征询",
+            recipient: e.target,
+            text: e.body,
+          });
+          outbound.push({
+            to: delivered.to,
+            personId: e.target.personId,
+            text: e.body,
+            communicationId: delivered.communicationId,
+            sharedRule: true,
+          });
+        },
+        sessionOpts
+      );
+    }
+
+    // 4) 纯代码真话闸：未定案绝不说规则已经生效（在落库之前改好回复）。
+    if (!settled && claimsSharedRuleSettled(replyText)) {
+      replyText = RULE_NOTICE_FALLBACK;
+    }
+
+    // 5) 回复本人的收据（一条 reply_only decision + communication + message）。
+    const decisionId = await repo.recordDecision({
+      householdId: sender.householdId,
+      kind: "reply_only",
+      intent:
+        "共同规则协商（默认关闭实验路径）：状态机推进这条共同规则，按状态机动作发通知并回本人",
+      modelId,
+      doctrineModules: [],
+      contextChars: 0,
+      contextSnapshot: null,
+    });
+    const replyCommunicationId = await repo.queueCommunication({
+      householdId: sender.householdId,
+      decisionId,
+      caseId: null,
+      toPersonId: sender.personId,
+      channel,
+      purpose: "回复本人",
+      body: replyText,
+    });
+    await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "outbound",
+      channel,
+      body: replyText,
+      communicationId: replyCommunicationId,
+    });
+
+    // 5a) **回复真的落库之后**，才给「发给自己的那个动作」记回执（consulted / announced）。
+    if (senderAction) recordRuleReceipt(sender.householdId, senderAction, sessionOpts);
+
+    return {
+      reply: replyText,
+      replyReview: { mode: "generation-only", verified: false, pass: true, broke: "", why: "" },
+      scheduleFacts: [],
+      replyCommunicationId,
+      outbound,
+      allOutbound: outbound,
+      decisionId,
+      modules: [],
+      promptChars: 0,
+      promptComposition: null,
+      toolsUsed: [],
+      unknownSender: false,
+      usage: noticesUsage,
+      turnStartedAt,
+    };
+  } catch (error) {
+    // 事实已推进：**绝不落回旧主流程**（否则同一条消息会被二次处理）。返回一个不声称
+    // 做过任何事的安全结果（零第三方出站、中性兜底）。
+    console.log("[shared-rule] 推进过程中出错（已不回落旧流程）：", describeError(error));
+    return {
+      reply: RULE_NOTICE_FALLBACK,
+      replyReview: { mode: "generation-only", verified: false, pass: true, broke: "", why: "" },
+      scheduleFacts: [],
+      replyCommunicationId: null,
+      outbound: [],
+      allOutbound: [],
+      decisionId: null,
+      modules: [],
+      promptChars: 0,
+      promptComposition: null,
+      toolsUsed: [],
+      unknownSender: false,
+      usage: noticesUsage,
+      turnStartedAt,
+    };
+  }
+}
+
+/**
  * 三处生成器共用的**请求层** Gateway 自动缓存开关
  * （`providerOptions.gateway.caching = "auto"`，见 Vercel 文档
  * “AI Gateway Automatic Prompt Caching”）。
@@ -1559,6 +1820,36 @@ export async function runColivingTurn(args: {
       turnStartedAt,
     });
     if (replaced) return replaced;
+  }
+
+  /**
+   * **共同规则协商替换分支（默认关闭、可随时回滚）。**
+   *
+   * `COLIVING_COORDINATION_SHARED_RULE=1` 才开（不设 / 不是 1 一律不跑，行为与旧流程
+   * 完全一样）。只为**一条具体规则**「洗完澡后清理地漏头发」的共同协商接的可测路径：
+   * 命中时用 `advanceRuleConsultationSession` 推进那个**独立、事件溯源**的共同规则状态机
+   * （见 `lib/coordination/rule-consultation.ts`），把状态机动作写成短信——**不接管
+   * 其它任何请求**。
+   *
+   * **两段式回退**（`maybeSharedRuleReply` 的边界，别退回“任何异常都落回旧流程”）：
+   * 只有**确认属于本路径之前**（读名册失败 / 状态机推进抛错 / 不是这条规则）才返回 `null`
+   * 落回旧 AI 流程；一旦事实已推进，后续任何异常都**绝不回落**，改为零第三方出站 + 给当前
+   * 住户一句中性安全回复——避免同一条消息被处理两次。不让这条实验路径把整轮搞挂。
+   *
+   * 与黑名单「单方面叫别人清理地漏头发」是两件事：那条是**一个人交办 AI 去要求另一个
+   * 点名的人**；这里是**所有人都要一起确认的一条共同规则**，识别入口要求同时出现共同
+   * 范围信号（每个人 / 大家 / 咱们 …）与立规则框架（规则 / 约定 …），单方面点名要求
+   * 不会命中（仍走原黑名单）。
+   */
+  if (process.env.COLIVING_COORDINATION_SHARED_RULE === "1" && sender) {
+    const sharedRule = await maybeSharedRuleReply({
+      sender,
+      channel,
+      text: args.text,
+      conversationId,
+      turnStartedAt,
+    });
+    if (sharedRule) return sharedRule;
   }
 
   /**

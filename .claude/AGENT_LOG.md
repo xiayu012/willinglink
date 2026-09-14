@@ -6480,3 +6480,120 @@ CODEX_TASK：给自包含协商状态机接「薄 LLM 意图解析」，用 5 �
   `speech-input.tsx:55-56` 两条 TS2717。未发送真实短信，未改数据库 schema/依赖/env。
 
 ---
+
+# 2026-09-13 · 把全屋共同规则协商接入独立的第二台状态机（默认关闭）
+
+- 老板要求验证协商状态机也能协调一条**全屋共同规则**（「每个人洗完澡后清理地漏头发」），
+  而不只是时间排班。新增两台并列、零耦合的模块：
+  - `lib/coordination/rule-consultation.ts`：一台**独立、事件溯源**的小状态机，只管一条共同
+    规则的生命周期（提出 → 逐个征询尚未表态者 → 记同意 / 反对 → 全员同意才定案 → 向全员
+    宣布）。不 import 排班机器，不判断规则内容是否合理，不做任何现场卫生判断，不写死话术，
+    不自己发送。
+  - `lib/chat/coliving/rule-consultation-session.ts`：**唯一的窄识别入口**，只认这一条规则
+    （全屋范围信号 + 立规则框架 + 洗澡 + 「地漏 + 头发 + 清走动作」落在同一分句）。单方面点名
+    要求没有前两个信号，**不进入**本路径，仍走原黑名单。状态按 household 落本地 JSONL，
+    不写 coliving 生产库、不连 DB。
+- **硬不变量（由代码强制）**：没有全员同意绝不 `rule_settled`；同意过 / 已征询的人不重复征询；
+  有人反对则原规则永不定案（`objected` 终态，其余人同意也不翻转）；投影 `RuleProjection` 与
+  出站 `RuleAction` **不含 `initiator`**（来源隐私由类型保证）；定案是终态。
+- **不直接复用** coliving 会把草案立即设 active 的 `proposeRule` 语义：这是另一台机器、另一套
+  事件 / 状态，只收集表态，不产生已生效规则。
+- **接线默认关闭**：`turn.ts` 的 `maybeSharedRuleReply` 由 `COLIVING_COORDINATION_SHARED_RULE=1`
+  控制（不设 / 非 1 一律不跑，行为与旧流程一致）。措辞层 `rule-consultation-notice.ts` 只拿到
+  规则事实文本、看不到发起人；另有纯代码 `claimsSharedRuleSettled` 闸，未定案不得声称已生效。
+- 实现中途曾同时留下两台同义机器，收尾只保留接线使用的那一台，删掉未被引用的草稿
+  `rule-consultation-machine.ts`（及其单测），避免同义重复。
+- 新增纯虚构、三位住户、多轮隔离场景 `corpus-043-shower-drain-hair-shared-rule-2026-09-13`
+  （不写死机器 expect）；免费单测覆盖状态机不变量与「单方面要求阿川清理地漏头发不进本机」。
+- 免费验证：机器单测 `rule-consultation.test.ts` 与运行路径单测
+  `rule-consultation-session.test.ts` 全通过；`pnpm.cmd coliving:quality` 169 项通过；
+  `git diff --check` 通过；tsc 仅既有 `speech-input.tsx:55-56` 两条 TS2717。未跑付费模型、
+  未改数据库 schema / 依赖 / env、未发真实短信。
+
+---
+
+# 2026-09-13 · 共同规则协商：把「事实」与「送达回执」拆开（Codex 退回返工）
+
+- **退回的硬问题**：第一版在**真正发短信之前**就把 `consulted` / `announced` 写进 JSONL。
+  若 `deliverSms` 失败，日志仍显示「已问过 / 已宣布」，于是不再重试，且收据与事实不符。
+  另有一个二次处理风险：状态已推进后若入站 / 回复落库抛错，`maybeSharedRuleReply` 会返回
+  `null` 落回旧主流程，同一条入站消息会被处理两次。
+- **修法（决定动作与回执事件分开）**：`stepRule` 现在**只产出事实事件**——`rule_proposed` /
+  `position_recorded` / `rule_settled`，随 `advanceRuleConsultationSession` 立即落库。
+  `consulted` / `announced` 改为**送达回执**：由新增的 `receiptEventFor(action)` 映射，且**只有**
+  注入的 `send` 兑现后，`deliverRuleActions` / `recordRuleReceipt` 才追加。发起人不再被假记
+  `consulted`（他靠 `positions=agree` 排除）。
+- **可重试**：失败的人不写回执、留在待办；之后问进度（`ask_status`）时，定案前重新 `consult`、
+  定案后对还没收到宣布的人补 `announce`（`stepRuleAskStatus` 的 settled 分支）。全部送达后
+  会话才结束。
+- **不二次处理**：`maybeSharedRuleReply` 改成两段式——只在确认属于本路径之前（读名册失败 /
+  状态机推进抛错 / 不是这条规则）才返回 `null` 落回旧流程；一旦事实已推进，后续任何异常都返回
+  「零出站、中性兜底」的安全结果，绝不 `null`。
+- **验证**：机器单测 14/14（新增回执映射、征询失败/宣布失败可重试）；运行路径单测 7/7
+  （新增**失败注入**：send 对某人抛错时日志里不出现 `consulted` / `announced`，且之后问进度会
+  重试/补发）；`pnpm.cmd coliving:quality` 169 项通过（同一条检查补了「事实事件不含
+  consulted/announced」「投递先在 send 成功再记回执」的哨兵，并把 `promptComposition: null`
+  返回点从 5 条更新为 6 条——共同规则路径新增了安全兜底返回）；`git diff --check` 通过；tsc
+  仅既有 `speech-input.tsx:55-56` 两条 TS2717。默认开关 `COLIVING_COORDINATION_SHARED_RULE`
+  未动、仍默认关闭；未改 schema / 依赖 / env、未跑付费模型、未发真实短信。
+
+---
+
+# 2026-09-13 · 共同规则协商：身份改 personId、规则事实收敛为中性事实（Codex 二次退回返工）
+
+- **退回 1：身份用了 display name**。`turn.ts` 原本 `participants = members.map(name)`、
+  `sender.name`、`byName` 映射——两位**同名**住户会被合并或互相串收。改为**全链路 `personId`**：
+  参与者 / 发起人用 `personId`；新增纯函数 `resolveRuleActionRecipients(actions, members)` **按
+  personId** 解析收件人（显示名只随 member 交给文案层）。补「三位都叫阿川、id 不同 → 分别征询、
+  分别表态、分别宣布」的测试。
+- **退回 2：来源隐私不完整**。识别原本把发起人原句片段当 `rule` 事实传给措辞层，像「阿川总不
+  清理…所以咱们定个规则…」会把姓名与指责带给全屋。改为**规则事实收敛为固定中性句**
+  `SHARED_SHOWER_DRAIN_HAIR_RULE_FACT`（「每个人洗完澡后清理地漏里的头发」）：识别只保留布尔
+  式的共存判定，**绝不**把原句片段写进日志 / 措辞层。最终短信仍由措辞层自然生成，不写死完整
+  短信。补「带姓名 / 指责 / 理由的原句 → 命中的规则事实仍为中性句、投影不含姓名」的泄露反例测试。
+- **边界不变**：默认开关 `COLIVING_COORDINATION_SHARED_RULE` 仍默认关闭；单方面点名黑名单仍由
+  功能前门先收口、不绕过。未加任何 worker pool 文档 / 制度。
+- `corpus-043` 的 `source` 从「不是已批准新功能」改为准确描述（默认关闭的实验状态机、不在
+  APPROVED_FEATURES、规则事实中性、不写死 expect）。
+- 免费验证：机器单测 14/14；运行路径单测 9/9（新增同名身份、来源隐私两例）；`coliving:quality`
+  169 项通过（同一条检查补了中性事实与 personId 收件人的哨兵：`resolveRuleActionRecipients`、
+  `members.map((m) => m.personId)`、「不得再用 display name 当身份」）；`git diff --check` 通过；
+  tsc 仅既有 `speech-input.tsx:55-56` 两条 TS2717。未跑付费模型、未改 schema / 依赖 / env、未发
+  真实短信。
+
+---
+
+# 2026-09-13 · corpus-043 付费报告暴露的真实缺陷：姓名未确认 + 空 expect 假通过
+
+- **缺陷**：corpus-043 4 轮 transcript 的 outbound 全为空，却因场景级 `expect={}` 结构通过。
+  根因：`addResident` 建人时 `name_confirmed` 默认 false，corpus-043 没写 `setup.confirmedNames`，
+  于是 `maybeSharedRuleReply` 对每一个外部成员的 `deliverSms` 都被可达性闸拒绝（`deliverSms`
+  对未确认姓名直接抛错）；事件日志里那两条 `announced` 其实是第 3/4 轮**当前发言人自己**的
+  reply 回执，不是第三方发送。
+- **修 corpus-043 的前提**：补 `setup.confirmedNames: [阿菲,小周,阿凯]`（+ 三条协调员介绍
+  `priorMessages`），让姓名已确认、对外出站能真正落地。
+- **补逐轮机器断言**（用既有 per-turn `expect` 字段，不扩评测框架）：
+  - 第1轮 `minAcceptedOutbound:2 + mustContactNames:[小周,阿凯] + mustNotContactNames:[阿菲]`
+    ——分别征询另外两人；
+  - 第2轮 `minAcceptedOutbound:0 + mustNotContactNames:[三人]` ——只回表态人、不重复乱发；
+  - 第3轮 `minAcceptedOutbound:2 + mustContactNames:[阿菲,小周] + mustNotContactNames:[阿凯]`
+    ——全员同意后向**另外两人**宣布（当前发言人阿凯的宣布算本轮 reply 回执，不算出站）；
+  - 第4轮 `minAcceptedOutbound:0 + mustNotContactNames:[三人]` ——状态询问不再重复通知。
+  - 每轮都加 `mustNotUseTools:[contactPerson,proposeRule]`（确认没有落回主流程乱发），
+    第1/3轮加低歧义 `outboundMustMatch:["地漏|头发"]`、`outboundMustNotMatch:[三个姓名]`
+    （中性事实不应点名任何人）；第1/2轮加 `replyMustNotMatch:["已经生效","正式生效"]`
+    （未定案不得假称已生效）。删掉空 `expect={}`。
+- **运行时核对**：第2轮状态机动作本就是 `none`（只回表态人、不广播）；第4轮原先在“全都收到
+  宣布”后会返回 `null` 落回旧主流程——改为**定案后仍由本路径回答问进度**（`advanceRuleConsultationSession`
+  的 settled 分支只处理 `ask_status`；`stepRule` 此时给出 `none` 或补发缺失宣布），`turn.ts`
+  在没有“发给本人的动作”时按是否定案选 `announce` / `ack` 文案，因此第4轮**零第三方出站、
+  也不回落主流程**，不重复通知。
+- **免费回归**：`coliving:quality` 新增一条检查，读 corpus-043 断言三人姓名都在
+  `confirmedNames`、每轮都有 `expect`，并用 `evaluateTurnExpectation` 证明第1/3轮在**对外出站
+  为空时判失败**、第2/4轮空出站通过且一旦对外发就失败——把这次事故钉成免费回归。
+- 覆盖：机器单测 14/14；运行路径单测 10/10（新增「定案后问进度：仍回当前发言人、零第三方出站、
+  不重复通知也不回落普通流程」）；`coliving:quality` 170 项通过；`git diff --check` 通过；tsc 仅
+  既有 `speech-input.tsx:55-56` 两条 TS2717。未加任何 worker-pool 文档 / 制度；默认开关仍默认
+  关闭；未改 schema / 依赖 / env、未跑付费模型、未发真实短信。
+
+---

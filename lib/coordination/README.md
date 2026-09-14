@@ -122,6 +122,81 @@ offset + 当时完整 Snapshot」，丢了或坏了随时可从事件日志全�
    下标看成 `baseIndex + 局部下标`，保证 `lastProposalIndex` / `lastDisruptIndex`
    仍记绝对位置、`renegotiating` 判定不被增量续放破坏。
 
+## 第二条机器：共同规则协商（`rule-consultation.ts`）
+
+上面那台机器解决的是「**同一件事里有多个可选安排、算出一个方案让大家确认**」
+（厨房排班：几点、谁先谁后）。它**不处理**另一种协调：**一条全屋共同规则本身
+要不要生效**——这不需要算方案，只需要**收集全员表态**。
+
+`rule-consultation.ts` 是一台**独立的小状态机**，跟排班机器**同目录、共享同一套
+事件溯源思想，但不共用代码、不互相 import**（各自的类型、fold、step 分开写；不强行
+抽象，见 CLAUDE.md「允许大量暂时不共用的码」）。它只处理一条具体规则（当前是
+「每个人洗完澡后把地漏里的头发清掉」），**不判断规则内容是否合理、不自己发明规则、
+不做任何现场卫生判断**。
+
+### 与排班机器的区别
+
+| | 排班机器（`machine.ts`） | 共同规则机器（`rule-consultation.ts`） |
+|---|---|---|
+| 协调的对象 | 一件事的**具体安排**（时间/顺序） | 一条**规则本身**要不要生效 |
+| 有没有「候选项」 | 有，`allocateSlots` 先算出方案再确认 | 没有，动作只有「表态 / 征询 / 宣布」 |
+| 定案条件 | 全员确认（或明确豁免） | **全员同意**，缺一不可 |
+| 有人反对 | 重排（`renegotiating`） | **永不定案原规则**（`objected`，其余人同意也不翻转） |
+| 出站内容 | 提议 / 催办 / 定案 | 征询 / 定案宣布 |
+
+### 状态（派生，不落库）
+
+- `none` —— 还没有人提出这条规则。
+- `proposed` —— 规则已提出，正在收集全员表态（**未全员同意前绝不定案**）。
+- `settled` —— **全员同意**，规则正式生效，已向全员宣布（终态）。
+- `objected` —— 有人明确反对，**原规则永不定案**（终态）。
+
+### 事件（只追加，不可变）
+
+- `rule_proposed { rule, initiator }` —— 有人提出这条共同规则；发起人视为已同意、
+  且**不会被重复征询**。
+- `consulted { person }` —— **送达回执**：向某位室友的征询短信**真的发出去过**才记。
+- `position_recorded { person, position }` —— 某人明确表态（agree / disagree）。
+- `rule_settled { rule }` —— 全员同意，定案。
+- `announced { person }` —— **送达回执**：向某人宣布规则已生效的短信**真的发出去过**才记。
+
+**事实与回执分开**：「提出 / 表态 / 全员同意」是**事实**，推进时立即落库（`rule_proposed` /
+`position_recorded` / `rule_settled`）。`consulted` / `announced` 是**动作成功的回执**，只能在
+对应短信（或本人回复）确实落账之后才由调用方追加（`rule-consultation-session.ts` 的
+`deliverRuleActions` / `recordRuleReceipt`）。因此**发送失败不会留下假回执**，不会被当成
+「已问过 / 已宣布」而跳过；失败的人留在待办里，下次问进度（`ask_status`）重新产生同一动作、
+可重试。
+
+### 不变量（`checkRuleInvariants`，代码强制）
+
+1. `rule_proposed` 最多一条（同一栋房子同时只有一条规则在协商）。
+2. `rule_settled` 时，日志里所有**已知的**参与者都必须是 agree——**少一人同意不得定案**。
+3. 已表态的人**不被重复征询**；同一人不重复 `consulted` / `announced`。
+4. 只能先定案、再宣布；定案后不再接受新的 `position_recorded`。
+5. **回执 = 真的送达**：`consulted` / `announced` 只由投递成功后的调用方追加；失败不记，
+   且失败者会在之后问进度时被重新征询 / 补发。
+
+### 来源隐私（类型层保证）
+
+`RuleProjection` / `RuleAction` **没有 `initiator` 字段**——「是谁先提的、谁投诉了」
+只存在于内部 `RuleSnap`，不会投影出去，因此下游措辞层拿不到、也无法泄露是谁发起的。
+`ruleAction` 只表达「对谁做什么」（consult / announce），措辞由 doctrine 决定（见 CLAUDE.md
+「不要替大脑写话术」）。
+
+**注意**：这台机器不写任何固定短信文案，也**不自己发送**；它只产出结构化的
+`RuleAction`，由 coliving 侧（默认关闭的实验接线）交给措辞层生成正文。
+
+### 身份用 `PersonId`、规则事实用固定中性文本（来源隐私）
+
+- **参与者 / 发起人 / 收件人一律是稳定 `PersonId`**（生产里是 `personId`），**不是显示名**；
+  收件人由调用方按 id 精确解析（`rule-consultation-session.ts` 的
+  `resolveRuleActionRecipients`）。两位**同名**住户各有各的 id，会被分别征询 / 宣布，不会
+  被合并，也不会互相串收。
+- **规则事实收敛为中性固定语义**：识别命中后，写进状态机与措辞层的规则文本恒为
+  `SHARED_SHOWER_DRAIN_HAIR_RULE_FACT`（「每个人洗完澡后清理地漏里的头发」），**不是**发起人
+  原句片段——原句里的姓名、指责、私人理由都不会外传给别的住户。最终短信措辞仍由措辞层自然
+  生成，不写死完整短信。
+
 ## 目录结构（自包含）
 
 ```
@@ -130,6 +205,9 @@ lib/coordination/
   types.ts        State / Event / Intent / OutboundAction / Infeasibility 类型
   machine.ts      fold/foldFrom（事件日志→派生快照）、reduce、step、allocateSlots、
                   不变量、diagnoseInfeasibility；snapToJson/snapFromJson（快照 ⇄ JSON）
+  rule-consultation.ts  第二条独立小状态机：全屋共同规则协商（提出→征询→全员
+                  同意才定案→向全员宣布；有人反对则原规则永不定案）。只处理一条具体
+                  规则、不算方案、不写话术、不发送；投影里不含发起人身份。
   intent.ts       parseIntent 接口 + 一个确定性 stub
   llm.ts          上下文感知的 LLM 意图解析（薄意图层胶水）+ fastIntent 快速路径
   store.ts        append-only JSONL 持久化 + checkpoint 物化快照（appendEvents /
@@ -137,6 +215,7 @@ lib/coordination/
   runtime.ts      runCoordinationTurn：把「恢复→投影→解析→step→落盘/推进 checkpoint」
                   收成一个完整一轮的运行时入口
   machine.test.ts 纯函数单测（不调 LLM）
+  rule-consultation.test.ts  共同规则机器纯函数单测（不调 LLM、不连库）
   store.test.ts   持久化层纯 IO 单测（node 临时目录，不连库）
   llm.test.ts     意图快速路径 + 接受时间建议上下文闸 的纯函数单测（不调 LLM）
   runtime.test.ts 运行时入口纯 Node 单测（注入 stub 解析器，不调 LLM）
