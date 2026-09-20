@@ -15,6 +15,7 @@ import {
   rosterStatus,
   type Sender,
 } from "./repo";
+import { residentLanguageInstruction } from "./language";
 
 /**
  * Context Builder —— 数据库与 LLM 上下文之间的注意力层。
@@ -58,6 +59,7 @@ export async function buildContext(
   opts: {
     justJoined?: boolean;
     answering?: { purpose: string | null; body: string; sentAt: Date; act?: string | null } | null;
+    incomingText?: string;
   } = {}
 ): Promise<ColivingContext> {
   const [
@@ -105,6 +107,11 @@ export async function buildContext(
   const recent = [...recentRaw].reverse();
 
   const lines: string[] = [];
+
+  if (opts.incomingText) {
+    lines.push(residentLanguageInstruction(opts.incomingText));
+    lines.push("");
+  }
 
   // 放最前面：实测放末尾会被忽略，模型会编造具体事实（见 AGENT_LOG）
   lines.push("## ⚠️ 你不知道的事（最高优先级，违反即为严重错误）");

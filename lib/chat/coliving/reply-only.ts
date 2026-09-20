@@ -35,6 +35,12 @@ export const REPLY_ONLY_NAME = "feature_reply_only";
 export const REPLY_ONLY_FALLBACK =
   "好，这一轮我先不替你发出去，你想好了再跟我说。";
 
+export function replyOnlyFallback(text: string): string {
+  return /[\u3400-\u9fff]/.test(text)
+    ? REPLY_ONLY_FALLBACK
+    : "Okay — I won't send anything this turn. Let me know once you've decided.";
+}
+
 /** 只接受一个字符串字段：回给当前说话人的那两句。 */
 const replyOnlySchema = z.object({
   reply: z.string().describe("回给当前说话人的一两句自然回应"),
@@ -90,7 +96,7 @@ export async function generateReplyOnlyReply(
     return { reply, usage };
   } catch (error) {
     return {
-      reply: REPLY_ONLY_FALLBACK,
+      reply: replyOnlyFallback(text),
       usage: usageOfFeatureError(error),
       error,
     };

@@ -4,6 +4,7 @@ import { NoOutputGeneratedError, generateText } from "ai";
 import type { z } from "zod";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { trackedGatewayCall } from "./gateway-ledger";
+import { residentLanguageInstruction } from "./language";
 
 /**
  * **功能入口内部那几次模型调用的公共管道——纯代码，不定义功能、不管边界。**
@@ -310,7 +311,10 @@ async function runFeatureGeneration(
         temperature: 0,
         // 短调用一律封顶，不允许无上限输出。
         maxOutputTokens: call.maxOutputTokens,
-        system: call.system,
+        // Every short feature path (route, extraction, reply-only, and feature
+        // Q&A) shares this boundary. The router returns a token, while any
+        // resident-facing JSON strings must follow the resident's language.
+        system: `${call.system}\n\n${residentLanguageInstruction(call.user)}`,
         prompt: call.user,
         ...rec.stepOptions,
         onStepFinish: (step) => {

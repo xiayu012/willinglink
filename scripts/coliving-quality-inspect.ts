@@ -17,6 +17,10 @@ import {
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
 import { CHANNELS } from "../lib/chat/types";
 import {
+  residentLanguage,
+  residentLanguageInstruction,
+} from "../lib/chat/coliving/language";
+import {
   countAcceptedOutbound,
   evaluateReplyReview,
   evaluateTurnExpectation,
@@ -915,6 +919,15 @@ async function main() {
       false,
       "无第三方指向的「我也说了」不得误伤"
     );
+  });
+  check("resident-facing language follows the current message without translating facts", () => {
+    const english = "Could you remind Alex not to run the dryer after 10 tonight?";
+    assert.equal(residentLanguage(english), "en");
+    assert.match(residentLanguageInstruction(english), /natural, idiomatic English/);
+    assert.equal(residentLanguage("阿远，晚上十点后别用烘干机。"), "zh");
+    assert.match(residentLanguageInstruction("阿远，晚上十点后别用烘干机。"), /自然中文/);
+    // A short English name in an otherwise Chinese turn must not flip the reply language.
+    assert.equal(residentLanguage("提醒 Alex 晚上别洗衣服"), "zh");
   });
   check("假完成替换按上下文选文案：本人立场已记账才回短确认，其余仍是未发送真话", () => {
     // corpus-044 第 2 轮：住户对既有规则说"我同意"，模型调 recordStance 记下、

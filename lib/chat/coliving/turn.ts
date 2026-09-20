@@ -2023,6 +2023,7 @@ export async function runColivingTurn(args: {
   const ctx = await buildContext(sender, channel, {
     justJoined: history.length === 0,
     answering,
+    incomingText: args.text,
   });
 
   /**
