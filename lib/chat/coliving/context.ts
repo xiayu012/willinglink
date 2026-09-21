@@ -16,6 +16,7 @@ import {
   type Sender,
 } from "./repo";
 import { languageInstruction, type LanguageDecision } from "./language";
+import { roleLabel } from "./membership-facts";
 import type {
   ContextReceiptSection,
   ContextSectionsReceipt,
@@ -34,7 +35,10 @@ import type {
  */
 
 function describeMember(m: Member, isSelf: boolean): string {
-  const role = m.role === "landlord" ? "房东" : m.role === "tenant" ? "租客" : m.role;
+  // 每个角色都要有人话标签。**不要在这里写 role 的内部英文值**——
+  // 从前只有房东/租客两档，别的角色原样印出 `manager` 这种内部词，
+  // 模型读到的是一串它不该看见的枚举。
+  const role = roleLabel(m.role);
   const tag = isSelf ? "（就是现在跟你说话的人）" : "";
   // 占位名逐个标出来。**不要靠在别处写一句「名字带 X 字样的是占位符」**——
   // 占位名格式一改那句话就静默失效（真踩过：AI 把「2号、3号」念进了短信）。

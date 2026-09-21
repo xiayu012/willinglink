@@ -74,6 +74,7 @@ const MIGRATIONS = [
   "coliving-world-15.sql",
   "coliving-world-16.sql",
   "coliving-world-17.sql",
+  "coliving-world-18.sql",
 ];
 
 async function apply() {
@@ -219,7 +220,10 @@ async function membership() {
   console.log(`\n${house.label} 当前成员：`);
   for (const m of members) {
     console.log(
-      `  ${m.name.padEnd(8)} ${m.role.padEnd(9)} ${m.resides ? "同住" : "不同住"}  ${m.address ?? ""}`
+      // resides 是三态：null 是「还不知道」，印成「不同住」等于把未知说成已知
+      `  ${m.name.padEnd(8)} ${m.role.padEnd(9)} ${
+        m.resides === null ? "未知 " : m.resides ? "同住 " : "不同住"
+      } ${m.address ?? ""}`
     );
   }
 }

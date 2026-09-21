@@ -427,6 +427,9 @@ async function runScenario(
         phone: phoneRewrite[p.phone] ?? p.phone,
         name: p.name,
         role: p.role,
+        // 不填 = 确认住在这里（历史场景的人都是照着住户编的）；
+        // 写 false 才是不住在这儿的宿管/物业/房东联系人。
+        residence: p.resides === false ? "confirmed_not_living" : "confirmed_lives",
         note: null,
       });
     }

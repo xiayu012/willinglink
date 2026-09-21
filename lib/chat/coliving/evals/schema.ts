@@ -10,6 +10,7 @@
  *   子代理审查，这里只做代码能确定性判的那部分（阶段二）。
  */
 
+import { ROLES as SCENARIO_ROLES } from "../membership-facts";
 import {
   COORDINATION_ACTION_BASES,
   COORDINATION_ACTION_STATUSES,
@@ -29,7 +30,14 @@ import {
 export type ScenarioPerson = {
   phone: string;
   name: string;
-  role: "tenant" | "landlord";
+  /** 跟这栋房子的关系。取值与 `membership-facts.ts` 的 `Role` 同一套 */
+  role: "tenant" | "landlord" | "manager" | "coordinator" | "other";
+  /**
+   * 住不住在这里。**不填 = 确认住在这里**（历史场景都是这么写的，
+   * 语料里的人是照着「这栋房子的住户」编的）。要写一个不住在这儿的
+   * 宿管/物业，就显式写 `false`；`true` 与不填等价。
+   */
+  resides?: boolean;
 };
 
 function isEnumValue<T extends string>(
@@ -467,6 +475,19 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
     }
     if (!Array.isArray(obj?.people) || obj.people.length === 0) {
       errors.push("people 必须是非空数组（不是快照场景就必须填）");
+    } else {
+      // 角色写错会一路走到入库，撞 DB 的 role check 才报错；写错的
+      // resides 则会更坏——静默当成「住在这里」。在载入阶段就拦下。
+      for (const [i, p] of (obj.people as ScenarioPerson[]).entries()) {
+        if (!isEnumValue(SCENARIO_ROLES, p?.role)) {
+          errors.push(
+            `people[${i}].role（${String(p?.role)}）必须是 ${SCENARIO_ROLES.join("/")} 之一`
+          );
+        }
+        if (p?.resides !== undefined && typeof p.resides !== "boolean") {
+          errors.push(`people[${i}].resides 只能是 true / false，不填表示住在这里`);
+        }
+      }
     }
   }
 

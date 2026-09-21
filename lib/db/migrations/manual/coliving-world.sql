@@ -136,8 +136,10 @@ create table if not exists coliving.membership (
   id              uuid primary key default gen_random_uuid(),
   household_id    uuid not null references coliving.household(id) on delete cascade,
   person_id       uuid not null references coliving.person(id),
-  -- landlord 不住在这里，所以身份和「是否居住」分开两列
-  role            text not null check (role in ('tenant','landlord','coordinator','other')),
+  -- 身份和「是否居住」是两件独立的事：房东可能就住在自己房子里，
+  -- 宿管/物业通常不住。角色不决定居住，号码也不决定（见 coliving-world-18.sql）
+  role            text not null
+                    check (role in ('tenant','landlord','manager','coordinator','other')),
   resides         boolean not null default true,
   room_id         uuid references coliving.room(id),
   valid_from      timestamptz not null default now(),

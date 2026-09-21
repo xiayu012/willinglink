@@ -2961,13 +2961,17 @@ export async function runColivingTurn(args: {
           sourceCaseId: activeCaseId,
         });
         activeRuleId = ruleId;
-        const residents = ctx.members.filter((m) => m.resides);
+        // **与 repo 里算「谁还没表态」的口径必须一致**（`resides is not false`）：
+        // 住不住还不知道的人也在征询范围内。这里若按 `resides === true` 数，
+        // 就会告诉模型「问过这两个就算成立」，而系统永远等第三个（真出过这种
+        // 反复追问的病），名册上多一个未知居住的人就会犯。
+        const residents = ctx.members.filter((m) => m.resides !== false);
         return {
           ok: true,
           ruleId,
           note:
-            `这条规则要问过这 ${residents.length} 个住在这里的人才算成立：` +
-            `${residents.map((m) => m.name).join("、")}。` +
+            `这条规则要问过这 ${residents.length} 个人（确认不住在这里的不算）` +
+            `才算成立：${residents.map((m) => m.name).join("、")}。` +
             "系统当前不能代为私信住户，只能记录已经表过的态。",
         };
       },
@@ -3491,35 +3495,52 @@ export async function runColivingTurn(args: {
 
     addResident: tool({
       description:
-        "把一个手机号加进这栋房子。拿到号码就加，不要等——房东（或别人）在对话里" +
-        "报出室友号码时用；名字不知道就不填，占位符不影响。",
+        "把一个手机号登记成**跟这栋房子有关的人**（不一定是住户）。拿到号码就加，" +
+        "不要等——房东（或别人）在对话里报出号码时用；名字不知道就不填，占位符不影响。" +
+        "**身份和住不住这儿是两件事，都只填对方真说过的**：没说是谁就留空（记成还" +
+        "不知道身份的联系人，别猜成租客），没说住不住也留空（记成不知道）——" +
+        "**给了号码不等于他住在这儿**。宿管、物业管理员填 manager；" +
+        "**那不是你**，你是这栋房子的 AI 协调者，不在名册上。",
       inputSchema: z.object({
         phone: z.string().describe("手机号，原样填，系统会自己规范化"),
         name: z.string().optional().describe("对方说了名字才填，没说就留空"),
         role: z
-          .enum(["tenant", "landlord"])
+          .enum(["tenant", "landlord", "manager", "coordinator", "other"])
           .optional()
-          .describe("默认 tenant。只有明确是业主才填 landlord"),
+          .describe(
+            "对方说了才填：租客 tenant / 业主 landlord / 宿管·物业 manager / " +
+              "人类协调人 coordinator / 其它 other。没说是谁就别填"
+          ),
+        residence: z
+          .enum(["confirmed_lives", "confirmed_not_living", "unknown"])
+          .optional()
+          .describe(
+            "对方说了住不住这儿才填。没提就别填——留空是「不知道」，" +
+              "不是「住在这儿」"
+          ),
         note: z.string().optional().describe("顺带提到的信息，比如住哪间"),
       }),
-      execute: async ({ phone, name, role, note }) => {
+      execute: async ({ phone, name, role, residence, note }) => {
         try {
           const r = await repo.addResident({
             householdId: sender.householdId,
             phone,
             name: name ?? null,
-            role: (role ?? "tenant") as repo.Role,
+            role: role ?? null,
+            residence: residence ?? null,
             note: note ?? null,
           });
           return {
             ok: true,
             created: r.created,
             name: r.name,
+            role: r.role,
+            resides: r.resides,
             note: r.created
               ? `已加入，系统给他起的名字是「${r.name}」——没听到真名之前，` +
                 "调 contactPerson 时 name 参数就填这个（不是发给他的话里出现这个，" +
                 "消息正文不能提占位名，只是拿它当查找用的 key）。"
-              : "这个号码本来就在房子里",
+              : "这个号码本来就在名册上（说过的事实已补上，没说的照旧，不会重复登记）",
           };
         } catch (e) {
           return {

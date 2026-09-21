@@ -47,7 +47,20 @@ export async function dbNow(): Promise<Date> {
   return rows[0].now;
 }
 
-export type Role = "tenant" | "landlord" | "coordinator" | "other";
+/**
+ * 角色与居住事实的**定义在纯模块 `membership-facts.ts`**（零 import，
+ * 免费闸与离线测试读同一份，不另立会漂移的第二份）。这里只转出去，
+ * 既有 `repo.Role` 的用法保持不变。
+ */
+import {
+  mergeMembershipFacts,
+  placeholderName,
+  residesFromInput,
+  type ResidenceInput,
+  type Role,
+} from "./membership-facts";
+
+export type { ResidenceInput, Role };
 
 export type Member = {
   personId: string;
@@ -1365,50 +1378,105 @@ export async function enrollLandlord(args: {
 }
 
 /**
- * 加一个住户。**AI 从对话里拿到号码时调用**——房东把室友号码发过来，
- * 它就一个个加进来，不需要任何人填表。
+ * 加一个**跟这栋房子有关的人**。**AI 从对话里拿到号码时调用**——房东把
+ * 号码发过来，它就一个个加进来，不需要任何人填表。
  *
- * 名字先占位；真名在往后的对话里听出来再改（renamePerson）。
+ * 这里登记的是「这个号码属于谁、他跟这栋房子是什么关系」，不预设他是谁。
+ * 房东报来的号码可能是租客，也可能是宿管、物业、中介，或者我们压根还不知道
+ * 是谁——**号码本身就是个号码**：
+ *
+ *   · `role` 不填就是 `other`（还不知道什么身份），**不默认成 tenant**
+ *   · `residence` 不填就是 `null`（不知道住不住这儿），**不默认成住在**
+ *
+ * `residence` 是三态（`confirmed_lives` / `confirmed_not_living` / `unknown`），
+ * 映射进 `resides` 的 `true / false / null`。拿不准时按住着算的那套已经废了：
+ * 共用资源按人头分、共同规则按人征询，都建在这个数上，猜错就是算错。
+ *
+ * 名字先占位（**按角色给中性词**，别把宿管叫成「2号住客」）；真名在往后的
+ * 对话里听出来再改（`renamePerson`）。
+ *
+ * 已经认识的人再被报一次：**只补明确说出口的事实，省略的一律保留原值**
+ * （见 `mergeMembershipFacts`）——再报一次号码不该把上次问出来的身份抹掉，
+ * 也不会重复建一条关系（`membership_active_uniq` 兜着）。
  */
 export async function addResident(args: {
   householdId: string;
   phone: string;
   name?: string | null;
-  role?: Role;
+  /** 不填 / `other` = 还不知道什么身份。**不要替对方猜** */
+  role?: Role | null;
+  /** 三态。不填 = 不知道住不住这儿，**不等于住在这儿** */
+  residence?: ResidenceInput | null;
   note?: string | null;
-}): Promise<{ personId: string; created: boolean; name: string }> {
+}): Promise<{
+  personId: string;
+  created: boolean;
+  name: string;
+  role: Role;
+  resides: boolean | null;
+}> {
   const phone = normalizePhone(args.phone);
   if (!phone) {
     throw new Error("手机号无法解析");
   }
+  const suppliedRole = args.role && args.role !== "other" ? args.role : null;
+  const suppliedResides = residesFromInput(args.residence);
   return await db().begin(async (tx) => {
-    const [existing] = await tx<{ person_id: string; display_name: string }[]>`
-      select pc.person_id, p.display_name from coliving.person_contact pc
+    const [existing] = await tx<
+      {
+        person_id: string;
+        display_name: string;
+        /** null = 人在库里，但跟这栋房子还没有生效关系（left join 没命中） */
+        role: Role | null;
+        resides: boolean | null;
+        note: string | null;
+      }[]
+    >`
+      select pc.person_id, p.display_name,
+             m.role, m.resides, m.note
+      from coliving.person_contact pc
       join coliving.person p on p.id = pc.person_id
+      left join coliving.membership m
+        on m.person_id = pc.person_id
+       and m.household_id = ${args.householdId}
+       and m.valid_to is null
       where pc.kind = 'sms' and pc.value = ${phone} limit 1`;
     if (existing) {
-      const [inHouse] = await tx<{ id: string }[]>`
-        select id from coliving.membership
-        where household_id = ${args.householdId}
-          and person_id = ${existing.person_id} and valid_to is null limit 1`;
-      if (inHouse) {
+      if (existing.role !== null) {
+        // 这人已经在这栋房子的名册上。**只补明说的事实，不做减法**
+        const merged = mergeMembershipFacts(
+          { role: existing.role, resides: existing.resides, note: existing.note },
+          { role: suppliedRole, resides: suppliedResides, note: args.note ?? null }
+        );
+        await tx`
+          update coliving.membership
+          set role = ${merged.role}, resides = ${merged.resides}, note = ${merged.note}
+          where household_id = ${args.householdId}
+            and person_id = ${existing.person_id} and valid_to is null`;
         return {
           personId: existing.person_id,
           created: false,
           name: existing.display_name,
+          role: merged.role,
+          resides: merged.resides,
         };
       }
+      // 人在库里（别的房子 / 搬回来过），但跟这栋房子还没有生效关系
+      const role = suppliedRole ?? "other";
       await tx`
-        insert into coliving.membership (household_id, person_id, role, resides)
-        values (${args.householdId}, ${existing.person_id},
-                ${args.role ?? "tenant"}, true)`;
+        insert into coliving.membership (household_id, person_id, role, resides, note)
+        values (${args.householdId}, ${existing.person_id}, ${role},
+                ${suppliedResides}, ${args.note ?? null})`;
       return {
         personId: existing.person_id,
         created: false,
         name: existing.display_name,
+        role,
+        resides: suppliedResides,
       };
     }
 
+    const role = suppliedRole ?? "other";
     // 占位名按人数编号，但**模型会并行调多次 addResident**——
     // 两个事务同时读到同样的 count，两个人都叫「2号住客」，
     // findPersonByName 就分不清了。用事务级咨询锁按房子串行化。
@@ -1416,7 +1484,7 @@ export async function addResident(args: {
     const [n] = await tx<{ c: number }[]>`
       select count(*)::int as c from coliving.membership
       where household_id = ${args.householdId} and valid_to is null`;
-    const displayName = args.name?.trim() || `${n.c + 1}号住客`;
+    const displayName = args.name?.trim() || placeholderName(role, n.c + 1);
     const [p] = await tx<{ id: string }[]>`
       insert into coliving.person (display_name, onboarded_at)
       values (${displayName}, now()) returning id`;
@@ -1425,9 +1493,15 @@ export async function addResident(args: {
       values (${p.id}, 'sms', ${phone}, true)`;
     await tx`
       insert into coliving.membership (household_id, person_id, role, resides, note)
-      values (${args.householdId}, ${p.id}, ${args.role ?? "tenant"}, true,
+      values (${args.householdId}, ${p.id}, ${role}, ${suppliedResides},
               ${args.note ?? null})`;
-    return { personId: p.id, created: true, name: displayName };
+    return {
+      personId: p.id,
+      created: true,
+      name: displayName,
+      role,
+      resides: suppliedResides,
+    };
   });
 }
 

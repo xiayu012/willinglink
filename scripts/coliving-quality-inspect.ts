@@ -28,6 +28,7 @@ import {
   planHistory,
 } from "../lib/chat/coliving/history-policy";
 import { scheduleAffirmationReply } from "../lib/chat/coliving/schedule-affirmation";
+import * as membershipFacts from "../lib/chat/coliving/membership-facts";
 import {
   countAcceptedOutbound,
   evaluateReplyReview,
@@ -10095,6 +10096,144 @@ async function main() {
   });
 
 
+
+  check("名册登记：身份与居住是两件独立的事（纯事实层，含三态与合并规则）", () => {
+    const f = membershipFacts;
+    // **号码本身不说明任何一件事。** 不说居住 = 不知道（null），不是「住着」。
+    assert.equal(f.residesFromInput(undefined), null, "不填居住必须是「不知道」");
+    assert.equal(f.residesFromInput(null), null, "不填居住必须是「不知道」");
+    assert.equal(f.residesFromInput("unknown"), null, "unknown 必须落成 null");
+    assert.equal(f.residesFromInput("confirmed_lives"), true);
+    assert.equal(f.residesFromInput("confirmed_not_living"), false);
+    // 房东住自己房子 / 宿管不住这儿，两种都要能记 —— 角色不决定居住。
+    assert.notEqual(
+      f.residesFromInput("confirmed_lives"),
+      f.residesFromInput("confirmed_not_living"),
+      "三态必须真的分得开，不能都塌成同一个值"
+    );
+    // 角色标签与占位名逐个人话化，**不许把内部英文枚举值印进上下文**。
+    for (const role of f.ROLES) {
+      const label = f.roleLabel(role);
+      assert.ok(label.length > 0, `${role} 缺人话标签`);
+      assert.ok(!/^[a-z]+$/.test(label), `${role} 的标签不得直接是内部枚举值`);
+      assert.ok(f.placeholderName(role, 2).length > 0, `${role} 缺占位名`);
+    }
+    assert.ok(
+      !f.placeholderName("manager", 2).includes("住客"),
+      "物业/宿管不得被叫成「2号住客」——占位名不能顺手断言身份与居住"
+    );
+    assert.ok(
+      f.roleLabel("coordinator").includes("不是你"),
+      "名册里的人类协调人必须与系统自己区分开"
+    );
+    // 合并规则：**明说的事实才覆盖，省略一律保留原值**。
+    const known = { role: "manager", resides: false, note: "B栋宿管" } as const;
+    assert.deepEqual(f.mergeMembershipFacts(known, {}), known, "再报一次号码不得抹掉已知事实");
+    assert.deepEqual(
+      f.mergeMembershipFacts(known, { role: "other", resides: null, note: "   " }),
+      known,
+      "「不知道」不是事实，不得盖掉已经知道的"
+    );
+    assert.deepEqual(
+      f.mergeMembershipFacts(
+        { role: "other", resides: null, note: null },
+        { role: "manager", resides: false, note: null }
+      ),
+      { role: "manager", resides: false, note: null },
+      "后来说明身份与居住必须能补进同一条关系"
+    );
+    // 摆在一起算人头：房东（住自己房子）+ 两个租客 = 3 个住户，
+    // 物业有号码但不住这儿，不进这个数（口径同 `resides is not false`）。
+    const roster = [
+      { role: "landlord", resides: true },
+      { role: "tenant", resides: true },
+      { role: "tenant", resides: true },
+      { role: "manager", resides: false },
+      { role: "other", resides: null },
+    ] as const;
+    assert.equal(
+      roster.filter((m) => m.resides !== false).length,
+      4,
+      "确认不住在这里的人不得被算成住户（号码不说明居住）"
+    );
+  });
+  check("名册登记：addResident 不再把世界写死成「房东→租客→住在这里」", () => {
+    const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
+    const turn = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const start = repo.indexOf("export async function addResident(");
+    assert(start > 0, "必须能定位 addResident");
+    const body = repo.slice(start, repo.indexOf("── 成员变更（换人）", start));
+    // 事实层是唯一来源，入库只转出去 —— 不在这里另写一套会漂移的判断。
+    assert(repo.includes("export type { ResidenceInput, Role }"), "repo 必须转出纯模块的 Role / ResidenceInput");
+    assert(body.includes("mergeMembershipFacts("), "已认识的人必须走合并规则，不覆盖已知事实");
+    assert(body.includes("placeholderName("), "占位名必须按角色给（宿管不能叫「N号住客」）");
+    assert(
+      !/role \?\? "tenant"|"tenant", true/.test(body),
+      "入库路径不得把角色默认成 tenant、也不得把居住默认成 true"
+    );
+    assert(
+      /update coliving\.membership[\s\S]*valid_to is null/.test(body),
+      "同一个人的补充信息必须 UPDATE 已有关系行，不得重复插一条"
+    );
+    // 三态居住输入与五档角色是工具边界上的事实，漏一个就静默回到老推论。
+    for (const role of membershipFacts.ROLES) {
+      assert(turn.includes(`"${role}"`), `addResident 的 role 取值必须含 ${role}`);
+    }
+    for (const input of membershipFacts.RESIDENCE_INPUTS) {
+      assert(turn.includes(`"${input}"`), `addResident 的 residence 三态必须含 ${input}`);
+    }
+    assert(
+      /只填对方真说过的|不猜|别猜|没说是谁就别填/.test(turn),
+      "工具描述必须明说：身份与居住没听到就别猜"
+    );
+    assert(
+      /宿管|物业/.test(turn) && /不是这栋房子的 AI 协调者|不在名册上|那不是你/.test(turn),
+      "工具描述必须把宿管/物业与系统自己的协调者身份分开"
+    );
+  });
+  check("名册登记：schema 与迁移放行 manager，且既有记录不被降级", () => {
+    const base = readFileSync("lib/db/migrations/manual/coliving-world.sql", "utf8");
+    assert(
+      /role\s+text not null[\s\S]{0,120}'manager'/.test(base),
+      "基础 schema 的 role check 必须含 manager"
+    );
+    const migration = "lib/db/migrations/manual/coliving-world-18.sql";
+    assert(existsSync(migration), "必须新增顺序手动迁移 coliving-world-18.sql");
+    const sql = readFileSync(migration, "utf8");
+    assert(/check \(role in \([^)]*'manager'[^)]*\)\)/.test(sql), "迁移必须把 manager 加进 role check");
+    assert(
+      /drop constraint if exists membership_role_check/.test(sql),
+      "迁移必须先 drop 旧 check，重复执行不出错"
+    );
+    assert(
+      !/update coliving\.membership\s+set/.test(sql),
+      "本批只放宽角色取值，不得改动任何已有行的 role / resides（不降级既有记录）"
+    );
+    assert(
+      readFileSync("scripts/coliving-db.ts", "utf8").includes('"coliving-world-18.sql"'),
+      "迁移必须接进 coliving-db 的执行清单，否则永远不生效"
+    );
+    // 同一人在同一栋房子同时只有一条生效关系 —— 「不重复登记」靠它兜着。
+    assert(
+      /create unique index if not exists membership_active_uniq[\s\S]*valid_to is null/.test(base),
+      "membership_active_uniq 必须保留（不重复登记的唯一约束）"
+    );
+    // 场景语料：新增的登记边界场景必须结构合法（不跑付费评测，只校验形状）。
+    const scenarioFile =
+      "lib/chat/coliving/evals/scenarios/corpus-046-manager-not-resident-2026-09-21.json";
+    const scenario = validateScenario(
+      JSON.parse(readFileSync(scenarioFile, "utf8")),
+      scenarioFile
+    );
+    assert(
+      (scenario.people ?? []).some((p) => p.role === "manager" && p.resides === false),
+      "登记边界场景必须真的写进一个「不住在这里的物业/宿管」"
+    );
+    assert(
+      (scenario.people ?? []).some((p) => p.role === "landlord" && p.resides !== false),
+      "登记边界场景必须保留「房东就住在这栋房子里」这个正常事实"
+    );
+  });
 
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);
 
