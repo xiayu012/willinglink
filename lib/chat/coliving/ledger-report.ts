@@ -420,12 +420,15 @@ export function renderPromptCompositionHtml(raw: unknown): string {
 // ── 上下文回执（观察层，与上面的 prompt 观测同一条纪律） ─────────────────
 //
 // 每轮上下文由哪些分节拼成、各占多少字符，以及本轮真跑过哪些**按需检索**
-// 工具（只有名字）。**没有正文**——回执形状里根本没有承载正文的字段，所以
-// 渲染层也无从泄漏分节内容；这里再防御两层：
+// 工具、各调了几次、拉回的字符串有多少字符。**没有正文**——回执形状里根本
+// 没有承载正文的字段，所以渲染层也无从泄漏分节内容或工具返回；这里再防御三层：
 //   1. 分节只认 `id`（字符串）和 `chars`（有限非负数），多余字段一律不读；
 //   2. 检索工具名**只认代码写死在 `context-receipt.ts` 里的那几个名字**，
-//      报告 JSON 里即使被塞了别的字符串（例如某段正文），也不会渲染出来。
-// 未知照旧显示"未知"，不显示成 0；旧报告没这个字段就不展示。
+//      报告 JSON 里即使被塞了别的字符串（例如某段正文），也不会渲染出来；
+//   3. 次数与字符数只接受有限非负数，其余（NaN/负数/字符串/缺席）记"未知"，
+//      **不显示成 0**。
+// 未知照旧显示"未知"，不显示成 0；旧报告没这个字段就不展示（旧版回执只有
+// 名字数组 `retrievalToolNames`，照样认：名字照渲染，次数与字符数记未知）。
 
 /** 归一化后的一节：`chars` 可能"未知"（null），不是 0。 */
 export type NormalizedContextSection = {
@@ -433,14 +436,24 @@ export type NormalizedContextSection = {
   chars: number | null;
 };
 
+/** 归一化后的一类按需检索工具的观测：两个数字都可能"未知"（null），不是 0。 */
+export type NormalizedRetrievalObservation = {
+  name: string;
+  /** `null` = 旧报告只记了名字、没记次数（未知），不是"0 次"。 */
+  calls: number | null;
+  /** `null` = 旧报告没记 / 这次读不出字符数（未知），不是"0 字符"。 */
+  returnedChars: number | null;
+};
+
 /** 归一化后的回执；`null` = 这一轮没构建上下文。 */
 export type NormalizedContextReceipt = {
   sections: NormalizedContextSection[];
   /**
-   * 本轮跑过的按需检索工具名（已按写死的名单过筛）；`null` = 这一栏未知
-   * （旧报告没有），空数组 = 明确没跑任何按需检索。
+   * 本轮跑过的按需检索观测（已按写死的名单过筛、去重）；
+   * `null` = 这一栏整个未知（旧报告连名字都没有），
+   * 空数组 = 明确没跑任何按需检索。
    */
-  retrievalToolNames: string[] | null;
+  retrievalObservations: NormalizedRetrievalObservation[] | null;
 };
 
 /**
@@ -474,18 +487,65 @@ export function normalizeContextReceipt(
   }
   // 只留代码认识的检索工具名：这是"渲染层绝不显示任意字符串"的结构性保证，
   // 也让工具的增删只发生在 `context-receipt.ts` 一处。
-  const rawTools = stringArrayOrNull(o.retrievalToolNames);
-  return {
-    sections: normalized,
-    retrievalToolNames:
-      rawTools === null ? null : rawTools.filter(isContextRetrievalToolName),
-  };
+  const retrieval = normalizeRetrievalObservations(o);
+  return { sections: normalized, retrievalObservations: retrieval };
+}
+
+/**
+ * 归一化"本轮按需检索观测"这一栏，**两种报告格式都认**：
+ * - 新版：`retrievalObservations: [{ name, calls, returnedChars }]` —— 名字过筛，
+ *   两个数字各自归一化（坏值记未知）；
+ * - 旧版：只有 `retrievalToolNames: string[]` —— 名字照渲染，次数与字符数记
+ *   **未知**（那时确实没记，不能拿 1 或 0 冒充）；
+ * - 两栏都没有：整栏 `null`（未知）——旧报告本来就没这项观测。
+ *
+ * 同名只留第一条；名单外的字符串（报告 JSON 若被人塞了正文）一律丢弃。
+ */
+function normalizeRetrievalObservations(
+  o: Record<string, unknown>
+): NormalizedRetrievalObservation[] | null {
+  const raw = o.retrievalObservations;
+  if (Array.isArray(raw)) {
+    const seen = new Set<string>();
+    const out: NormalizedRetrievalObservation[] = [];
+    for (const entry of raw) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      const name = record.name;
+      if (
+        typeof name !== "string" ||
+        !isContextRetrievalToolName(name) ||
+        seen.has(name)
+      ) {
+        continue;
+      }
+      seen.add(name);
+      out.push({
+        name,
+        calls: finiteNonNegative(record.calls),
+        returnedChars: finiteNonNegative(record.returnedChars),
+      });
+    }
+    return out;
+  }
+  const rawNames = stringArrayOrNull(o.retrievalToolNames);
+  if (rawNames === null) return null;
+  const seen = new Set<string>();
+  const out: NormalizedRetrievalObservation[] = [];
+  for (const name of rawNames.filter(isContextRetrievalToolName)) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, calls: null, returnedChars: null });
+  }
+  return out;
 }
 
 /**
  * 渲染一轮的「上下文回执」块：
- * - **分节清单**：一个紧凑列表，每行只有节 id 和字符数；
- * - **按需检索工具**：本轮真跑过哪几类（只列名字）。
+ * - **分节清单**：一个紧凑列表，每行是节 id、字符数、占运行时上下文的份额；
+ * - **按需检索足迹**：本轮真跑过哪几类，各调了几次、拉回多少字符串字符。
  *
  * 旧报告（字段缺席）返回空串；`null` 明说"本轮未构建上下文"。
  * 列表项只取归一化后的 id/chars，工具名只取代码认识的名字，因此收据对象上
@@ -503,31 +563,320 @@ export function renderContextReceiptHtml(raw: unknown): string {
       `</div></div></details>`
     );
   }
+  // 份额的分子分母都只用**已知**字符数：有任一节没回报就标"部分已知"，
+  // 不把分母悄悄换成一个看起来完整的数。
+  const knownChars = receipt.sections
+    .map((s) => s.chars)
+    .filter((c): c is number => c !== null);
+  const sectionTotal = knownChars.reduce((sum, c) => sum + c, 0);
+  const sectionTotalUnknown = knownChars.length !== receipt.sections.length;
+  const share = (chars: number | null): string => {
+    if (chars === null) return PCOMP_UNKNOWN;
+    if (sectionTotal <= 0) return "—";
+    return `${Math.round((chars / sectionTotal) * 100)}%`;
+  };
   const items =
     receipt.sections.length > 0
       ? receipt.sections
           .map(
             (s) =>
               `<li><span class="ck">${escapeHtml(s.id)}</span>` +
-              `<span class="cv">${s.chars === null ? PCOMP_UNKNOWN : s.chars}</span></li>`
+              `<span class="cv">${s.chars === null ? PCOMP_UNKNOWN : s.chars}</span>` +
+              `<span class="cs">${share(s.chars)}</span></li>`
           )
           .join("")
-      : `<li><span class="ck">（无分节）</span><span class="cv">${PCOMP_UNKNOWN}</span></li>`;
-  const retrievalText =
-    receipt.retrievalToolNames === null
-      ? PCOMP_UNKNOWN
-      : receipt.retrievalToolNames.length > 0
-        ? receipt.retrievalToolNames.join("、")
-        : "（无——本轮没有额外按需检索）";
+      : `<li><span class="ck">（无分节）</span><span class="cv">${PCOMP_UNKNOWN}</span><span class="cs"></span></li>`;
+
+  const retrieval = receipt.retrievalObservations;
+  const retrievalItems =
+    retrieval === null
+      ? ""
+      : retrieval
+          .map(
+            (o) =>
+              `<li><span class="ck">${escapeHtml(o.name)}</span>` +
+              `<span class="cv">${o.calls === null ? PCOMP_UNKNOWN : o.calls}</span>` +
+              `<span class="cs">${
+                o.returnedChars === null
+                  ? PCOMP_UNKNOWN
+                  : `${o.returnedChars} 字符`
+              }</span></li>`
+          )
+          .join("");
+  // 合计分三种情形，**"全都没记"绝不写成 0**：
+  //  - 有已知项、也有未知项 → 数字 + "部分已知，是下界"（下界是诚实的）；
+  //  - **一项都没记** → 只写"未知"，一个数字都不给：此时按 0 求和得到的是
+  //    "共 0 次调用"，而事实是"跑了、但没记次数"，两者读起来正好相反
+  //    （旧版回执只记工具名，走的就是这条路）；
+  //  - 全都有 → 直接给数字。
+  const callValues = retrieval?.map((o) => o.calls) ?? [];
+  const knownCalls = callValues.filter((c): c is number => c !== null);
+  const callsTotal = knownCalls.reduce((sum, c) => sum + c, 0);
+  const charsValues = retrieval?.map((o) => o.returnedChars) ?? [];
+  const knownReturnedChars = charsValues.filter((c): c is number => c !== null);
+  const charsTotal = knownReturnedChars.reduce((sum, c) => sum + c, 0);
+  const callsTotalText =
+    knownCalls.length === 0
+      ? `${PCOMP_UNKNOWN}（没有任何一条记了次数，不按 0 算）`
+      : `${callsTotal}${knownCalls.length < callValues.length ? "（部分已知，是下界）" : ""}`;
+  const charsTotalText =
+    knownReturnedChars.length === 0
+      ? `${PCOMP_UNKNOWN}（没有任何一条记了字符数，不按 0 算）`
+      : `${charsTotal}${knownReturnedChars.length < charsValues.length ? "（部分已知，是下界）" : ""}`;
+  const retrievalSummary =
+    retrieval === null
+      ? `本轮真正跑过的按需检索工具：${PCOMP_UNKNOWN}（旧报告没记这一栏）`
+      : retrieval.length === 0
+        ? "本轮真正跑过的按需检索工具：（无——本轮没有额外按需检索，0 次调用）"
+        : `本轮真正跑过的按需检索工具：调用次数 ${callsTotalText}、` +
+          `返回字符串字符数 ${charsTotalText}`;
+
   return (
     `<details class="cost ctx-receipt">` +
-    `<summary>上下文回执（只记分节 id / 字符数与检索工具名，不含正文）</summary>` +
+    `<summary>上下文回执（只记分节 id / 字符数与检索工具名 / 次数 / 返回字符数，不含正文）</summary>` +
     `<div class="cost-body">` +
     `<ul class="ctx-sections">${items}</ul>` +
-    `<div class="cost-note">本轮真正跑过的按需检索工具：${escapeHtml(retrievalText)}</div>` +
+    `<div class="cost-note">运行时上下文分节合计：${
+      receipt.sections.length === 0
+        ? `${PCOMP_UNKNOWN}（本轮没有分节）`
+        : knownChars.length === 0
+          ? `${PCOMP_UNKNOWN}（没有一节回报字符数，不按 0 算；份额也因此算不出来）`
+          : `${sectionTotal} 字符${sectionTotalUnknown ? "（部分已知，下界）" : ""}` +
+            `（份额按这个合计算）`
+    }</div>` +
+    `<div class="cost-note">${escapeHtml(retrievalSummary)}</div>` +
+    (retrievalItems
+      ? `<ul class="ctx-sections">${retrievalItems}</ul>` +
+        `<div class="cost-note">检索三列依次是：工具名 / 本轮调用次数 / 返回内容里的` +
+        `字符串字符数（含键名，不含 JSON 标点，只用于横向比较，不是精确字节数）。` +
+        `读不出字符数就记${PCOMP_UNKNOWN}，不拿偏小的和冒充总数。</div>`
+      : retrieval === null
+        ? ""
+        : `<div class="cost-note">本轮一次按需检索都没跑（不是${PCOMP_UNKNOWN}）。</div>`) +
     `<div class="cost-note">这是观测：只用于解释每轮上下文由哪些分节拼成、` +
-    `模型额外去查了哪几类，单独不构成增删分节或增减工具的依据。字符数按各节` +
+    `模型额外去查了几类、拉回多少，单独不构成增删分节或增减工具的依据。字符数按各节` +
     `自身口径算，不含节与节之间的连接换行。</div>` +
     `</div></details>`
+  );
+}
+
+// ── 逐轮账（观察层，评测报告专用） ───────────────────────────────────────
+//
+// 把**已经记好的**评测台账按 `turnIndex` 标签折成"这一轮花了多少"。
+// 这里不新增任何埋点、不改运行时：数据源就是台账里已有的 `GenerationRecord`
+// （标签只有 run/scenario/turn 这类标识，**绝无住户正文**）。
+//
+// 三态是这条设计的重点，不能糊成两个：
+//  1. 这一轮**没有主生成**（未知号码 / 简单肯定短路 / 功能前门 / 状态机接管 /
+//     共同规则协商）→ **null**（"没有这一层"）。这几条路径里有的确实调过模型
+//     （功能前门的路由与写正文、状态机措辞），但那不是主生成，把它们算进
+//     "本轮主生成的上下文成本"会直接把结论带偏；
+//  2. **不可用**（旧报告没有这个字段、或整轮没有记账）→ 同样不出数字；
+//  3. **真实的 0**（跑过主生成、上游如实回报了 0）→ 照实显示 0。
+// 判据只看代码写死的 `stage === "main"`，不靠"这一轮有没有记录"猜。
+
+/** 一轮主生成的账（评测报告专用）。字段口径与场景级台账一致。 */
+export type TurnLedgerSummary = {
+  /** 本轮已记账的 **generation 总数**（含兜底补回复 `forced-sendReply`、
+   *  以及工具里触发的向量化 `embed`）——**不是 HTTP 请求数**。 */
+  generations: number;
+  /** 其中主生成（`stage === "main"`）的个数；为 0 → 整份摘要是 `null`。 */
+  mainGenerations: number;
+  /** 本轮已完成的 step 数（带工具时一轮主生成不止一次往返）。 */
+  completedSteps: number;
+  tokens: LedgerTokenTotals;
+  /** 已知金额合计；有未知项时是下界。 */
+  knownCostUsd: number;
+  unknownCostGenerations: number;
+  hasUnknownCost: boolean;
+};
+
+/**
+ * 按 `turnIndex` 标签把台账折成**这一轮**的账。
+ *
+ * 返回 `null` 的两种情形都表示"没有这一层的数字"，不是 0：
+ * - 这一轮一条记录都没有（确定性路径，压根没调模型）；
+ * - 这一轮有记录、但**没有一条是主生成**（功能前门 / 状态机接管这类只调了
+ *   窄路径模型）。
+ *
+ * 只按标签筛，不猜别的：`turnIndex` 由评测 runner 在轮边界打（`runWithLedgerLabels`），
+ * 判定器（judge）跑在轮外、标签是 null，因此**不在任何一轮的账里**——
+ * 各轮之和不等于场景总计，这是设计如此（报告里明说）。
+ */
+export function summarizeTurnLedger(
+  records: readonly GenerationRecord[],
+  turnIndex: number
+): TurnLedgerSummary | null {
+  const mine = records.filter((r) => r.turnIndex === turnIndex);
+  const mainGenerations = mine.filter((r) => r.stage === "main").length;
+  if (mainGenerations === 0) return null;
+  const summary = summarizeGenerations(mine);
+  return {
+    generations: summary.generations,
+    mainGenerations,
+    completedSteps: summary.completedSteps,
+    tokens: summary.tokens,
+    knownCostUsd: summary.knownCostUsd,
+    unknownCostGenerations: summary.unknownCostGenerations,
+    hasUnknownCost: summary.hasUnknownCost,
+  };
+}
+
+/** 归一化后的一轮账；每个数字都可能"未知"（null），不是 0。 */
+export type NormalizedTurnLedger = {
+  generations: number | null;
+  mainGenerations: number | null;
+  completedSteps: number | null;
+  tokens: LedgerTokenTotals;
+  knownCostUsd: number | null;
+  unknownCostGenerations: number | null;
+};
+
+/**
+ * 归一化报告里的一轮账（三态，与 `normalizePromptComposition` 同规矩）：
+ * - `undefined`：旧报告没有这个字段 → 调用方不展示；
+ * - `null`：这一轮没有主生成 / 不可用 → 明说，**不显示成 0**；
+ * - 对象：逐字段归一化，坏值（NaN/负数/非数/字符串）记 null → 显示"未知"。
+ *
+ * 形状完全不认识的（不是对象）也当 `undefined`，避免把别的东西渲染成账。
+ */
+export function normalizeTurnLedgerSummary(
+  raw: unknown
+): NormalizedTurnLedger | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  // tokens 是 `{known, hasUnknown}` 逐类结构（就是 `summarizeGenerations` 的产出）。
+  // 照原样读回来：`known` 坏值 → null（未知）；`hasUnknown` 只认布尔 true。
+  // 缺失/形状不对的整类当成"未知"，不补 0。
+  const tokensRaw =
+    typeof o.tokens === "object" && o.tokens !== null && !Array.isArray(o.tokens)
+      ? (o.tokens as Record<string, unknown>)
+      : {};
+  const token = (key: string): LedgerTokenTotal => {
+    const raw = tokensRaw[key];
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return { known: null, hasUnknown: false };
+    }
+    const t = raw as Record<string, unknown>;
+    return {
+      known: finiteNonNegative(t.known),
+      hasUnknown: t.hasUnknown === true,
+    };
+  };
+  return {
+    generations: finiteNonNegative(o.generations),
+    mainGenerations: finiteNonNegative(o.mainGenerations),
+    completedSteps: finiteNonNegative(o.completedSteps),
+    tokens: {
+      inputTotalTokens: token("inputTotalTokens"),
+      inputUncachedTokens: token("inputUncachedTokens"),
+      cacheReadTokens: token("cacheReadTokens"),
+      cacheWriteTokens: token("cacheWriteTokens"),
+      outputTokens: token("outputTokens"),
+      reasoningTokens: token("reasoningTokens"),
+    },
+    knownCostUsd: finiteNonNegative(o.knownCostUsd),
+    unknownCostGenerations: finiteNonNegative(o.unknownCostGenerations),
+  };
+}
+
+/**
+ * 渲染一轮的「本轮账（主生成）」块。**只记数量与 token，不含任何提示词/正文。**
+ *
+ * 旧报告（字段缺席）返回空串；`null` 明说"本轮没有主生成账"——这与"花了 0"
+ * 是两件事，措辞上必须分开，否则读报告的人会把"这一轮没走主生成"记成"这一轮
+ * 不要钱"。
+ */
+export function renderTurnLedgerHtml(raw: unknown): string {
+  const ledger = normalizeTurnLedgerSummary(raw);
+  if (ledger === undefined) return "";
+  if (ledger === null) {
+    return (
+      `<details class="cost turn-ledger"><summary>本轮账（主生成）</summary>` +
+      `<div class="cost-body"><div class="cost-note">` +
+      `本轮没有主生成账：要么这一轮根本没跑主生成（未知号码、简单肯定短路、` +
+      `功能前门、状态机接管等确定性路径），要么这一轮没有记账（不可用）。` +
+      `两种都不是"花了 0"——这里不显示 0。` +
+      `</div></div></details>`
+    );
+  }
+  const num = (v: number | null) => (v === null ? PCOMP_UNKNOWN : String(v));
+  const known = ledger.knownCostUsd;
+  const unknownCost = ledger.unknownCostGenerations;
+  // 已知金额为 null（这一栏整个没记）→ "未知"；**不走 formatKnownCost(0, …)**，
+  // 否则 `unknownCost` 也是 null 时会渲染成 `$0.000000`——那是凭空造出来的 0。
+  const costText =
+    known === null
+      ? COST_UNKNOWN
+      : formatKnownCost(known, (unknownCost ?? 0) > 0);
+  const unknownCostText =
+    unknownCost === null
+      ? PCOMP_UNKNOWN
+      : `${unknownCost} 个${unknownCost > 0 ? "（已知金额是下界）" : ""}`;
+  const items = [
+    cell("本轮 generation（含兜底补回复与工具内向量化）", num(ledger.generations)),
+    cell("其中主生成", num(ledger.mainGenerations)),
+    cell("已完成 step", num(ledger.completedSteps)),
+    cell("输入总量 token", formatTokenTotal(ledger.tokens.inputTotalTokens)),
+    cell("非缓存输入 token", formatTokenTotal(ledger.tokens.inputUncachedTokens)),
+    cell("缓存读 token", formatTokenTotal(ledger.tokens.cacheReadTokens)),
+    cell("输出 token", formatTokenTotal(ledger.tokens.outputTokens)),
+    cell("推理 token", formatTokenTotal(ledger.tokens.reasoningTokens)),
+    cell("本轮已知花费", costText),
+    cell("未知花费 generation", unknownCostText),
+  ].join("");
+  return (
+    `<details class="cost turn-ledger">` +
+    `<summary>本轮账（按 turn 标签折出来的主生成成本）</summary>` +
+    `<div class="cost-body">` +
+    `<div class="cost-grid">${items}</div>` +
+    `<div class="cost-note">口径：只算打了本轮标签的 generation——即这一轮` +
+    `主生成及其兜底补回复、工具里触发的向量化；语义验收（judge）跑在轮外、` +
+    `不带轮标签，所以各轮之和不等于场景总计，差额在场景计费面板里。</div>` +
+    `<div class="cost-note">这是观测：只用于比较各轮的上下文/生成成本，` +
+    `单独不构成改动提示词、工具或模型的依据。</div>` +
+    `</div></details>`
+  );
+}
+
+// ── Context Engineering 面板（把三块观测并到一起看） ─────────────────────
+//
+// 这一轮"模型实际背了多重的上下文、额外去查了什么、为此花了多少"是三个分开
+// 记录的事实，但要**并排看**才有意义（单看任一项都无法判断优化该往哪走）。
+// 这里只做拼接与抬头，不改任何一块自己的口径；三块各自仍是三态（缺席/null/值），
+// 缺失一律**明说**，不补 0、不判对错，也不触发任何告警或阻断。
+
+/**
+ * 渲染一轮的「Context Engineering」面板：提示词组成 + 上下文回执（含检索足迹）
+ * + 本轮账。三块各自处理三态；**三块都缺席**（旧格式报告）时给一句明说的说明，
+ * 而不是空白、也不是"0"。
+ */
+export function renderContextEngineeringPanelHtml(raw: {
+  promptComposition?: unknown;
+  contextReceipt?: unknown;
+  turnLedger?: unknown;
+}): string {
+  const inner =
+    renderPromptCompositionHtml(raw.promptComposition) +
+    renderContextReceiptHtml(raw.contextReceipt) +
+    renderTurnLedgerHtml(raw.turnLedger);
+  if (inner === "") {
+    return (
+      `<div class="ce-panel"><div class="ce-title">Context Engineering（逐轮观测）</div>` +
+      `<div class="cost-note">本报告的这一轮没有 Context Engineering 观测` +
+      `（旧格式报告）——缺席就是缺席，不是"这轮没有成本、没有检索"。</div></div>`
+    );
+  }
+  return (
+    `<div class="ce-panel">` +
+    `<div class="ce-title">Context Engineering（逐轮观测：提示词组成 / 上下文` +
+    `分节 / 按需检索足迹 / 本轮账；只记名字与数字，不含正文）</div>` +
+    inner +
+    `<div class="cost-note">三块都是观测：可用来横向比较各轮的上下文与生成` +
+    `负担，本身不做正确性判断、不触发告警，也不构成增删提示词或工具的依据。` +
+    `"未知 / 没有这一层"与"0"是两件事，报告里分开写。</div>` +
+    `</div>`
   );
 }

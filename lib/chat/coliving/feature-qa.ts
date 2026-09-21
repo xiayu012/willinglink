@@ -9,24 +9,34 @@ import {
 } from "./feature-llm";
 import {
   buildFeatureQaFacts,
+  COORDINATOR_ROLE_NOTE,
+  COORDINATOR_ROLE_NOTE_EN,
   FULL_FLOW_NOTE,
   OPTIMIZED_FAST_PATH_NOTE,
   selectBlacklistedCapabilities,
   type FeatureQaFactBundle,
 } from "./feature-facts";
 import { findGroundingViolations } from "./feature-grounding";
+import { residentLanguage } from "./language";
 
 /**
  * **统一的产品功能问答入口——不是功能、不是工具、不出站。**
  *
  * 老板 2026-09-13 决策（默认宽容）：住户问「你有什么功能 / 能不能做 X / 为什么 X
- * 不能做 / 刚才为什么拒绝」这类**产品边界元问题**时进这里，读 `feature-facts.ts`
- * 那份统一事实源回答。**口径不再是"只有两项功能"**：
+ * 不能做 / 刚才为什么拒绝 / **你是谁、你是干什么的、你怎么工作**」这类**产品边界与
+ * 自称元问题**时进这里，读 `feature-facts.ts` 那份统一事实源回答。**口径不再是
+ * "只有两项功能"**：
  *
  * - 两项已批准功能是**专门优化的快路径**（更快、更省），不是全部能力；
  * - 其它需要协调同住人的请求会走**完整的协调流程**处理，**不是不能做**；
  * - 真正办不了的只有老板明确登记的**黑名单**（`blacklist.ts`，当前一项是**「单方面叫
  *   别人在洗完澡后清理地漏头发」**）。与问题对不上的条目不得被选中，也不得为它编造原因。
+ *
+ * **住户问起「你是谁 / 你怎么工作」**（`asksAboutSelf`）走的是同一次回答、同一个兜底，
+ * 只是多拿一条身份事实（`COORDINATOR_ROLE_NOTE`，镜像 doctrine 的「AI 协调员」那段）。
+ * 它**不给**能力清单、**不碰**内部架构 / 工具 / 模型 / 数据库，也**不改**任何第三方动作
+ * 权限（本路径零工具、零出站这条不变）；问身份与问能力都要求列全专门优化功能，所以
+ * "只有这两项"这种失真在两条路上都会被兜底换掉。
  *
  * 以后新增功能**只改事实源数据 / `APPROVED_FEATURES`，不改本文件**。
  *
@@ -61,6 +71,20 @@ export const FEATURE_QA_NAME = "feature_qa";
 /** 正文长度上限（一两句，模型偶尔啰嗦时换兜底，不截断）。 */
 export const FEATURE_QA_MAX_CHARS = 240;
 
+/**
+ * 英文正文的长度上限。**同一条「一两句」在英文里占的字符数本来就多得多**：住户用英文
+ * 问起自己时，正文必须同时说清身份、两个功能名和完整流程那条，按 240 字符卡几乎必然
+ * 被换掉兜底——那等于英文这条路白修。上限按语言取，只放宽英文，中文口径一字不动。
+ */
+export const FEATURE_QA_MAX_CHARS_EN = 400;
+
+/** 这一轮正文的长度上限：按住户说话的语言取（判定复用 `language.ts`，不另写关键词）。 */
+export function featureQaMaxChars(question: string): number {
+  return residentLanguage(question) === "en"
+    ? FEATURE_QA_MAX_CHARS_EN
+    : FEATURE_QA_MAX_CHARS;
+}
+
 /** 只接受一个字符串字段：回给当前说话人的那一两句。 */
 const featureQaSchema = z.object({
   reply: z.string().describe("回给当前说话人的一两句自然回应"),
@@ -72,7 +96,15 @@ const featureQaSchema = z.object({
  * 等以后」判定在 `feature-grounding.ts`（`findGroundingViolations`）。
  */
 const INTERNAL_TERMS =
-  /白名单|路由|提示词|能力清单|未开放|functionId|schema|内部规则|系统设定/i;
+  /白名单|路由|提示词|能力清单|未开放|functionId|schema|内部规则|系统设定|模型|大模型|数据库|工具|接口|算法|服务器|后台|代码|训练|架构|\b(?:llm|api|gpt|model|models|database|tool|tools|prompt|prompts|architecture|backend|server|agent|token|tokens)\b/i;
+
+/**
+ * **「只有两项功能」式失真**的窄哨兵：老板 2026-09-13 的口径是那两项只是**专门优化的
+ * 快路径**、不是全部能力。住户问起自己时最容易滑向"我只能做这两件事"，一旦说成就换回
+ * 只含事实源事实的兜底——这和内部术语一样是**这条路径自己的格式约束**，不是 grounding。
+ */
+const CLAIMS_ONLY_TWO_FUNCTIONS =
+  /只有(?:这|那)?两(?:项|个|件)|就(?:是)?这(?:两|2)(?:项|个|件)|只能做这(?:两|2)件|only (?:these |the )?two\b/i;
 
 /**
  * 住户是不是在问「你现在能做什么 / 你有哪些功能」。**只做元问题识别，不做主题分类。**
@@ -92,11 +124,101 @@ export function asksWhatIsAvailable(text: string): boolean {
 }
 
 /**
- * **窄的、通用的功能边界问句识别——保守优先。** 只认那几类元问题：
- * 「你有什么功能 / 能不能做 X / 为什么 X 不能做 / 刚才为什么拒绝」。普通交办、抱怨、
- * 闲聊、新的提醒请求都返回 false（仍走原来的对话路径，成功交办的已批准功能不受影响）。
+ * 自称类问句里允许出现的**最小句式**（中英各若干条）。只写"住户在问你是谁 / 你是
+ * 干什么的 / 你怎么工作"这几种意思，不写主题词——主题分类不在这里做。
+ */
+const SELF_QUOTE_PHRASES: readonly string[] = [
+  // —— 中文 ——
+  "你是谁",
+  "你到底是谁",
+  "你究竟是谁",
+  "你是什么(?:人)?",
+  "你是(?:干什么|做什么|干嘛|干啥)的",
+  // 「你是不是 AI」「你是这套房子的管理员吗」：中间允许几个修饰字（这套房子的 / 一个）。
+  // 整句两端都被锚住，中间的 `{0,6}?` 拉不长，不会退化成主题匹配。
+  "你(?:是不是|是)\\s*[^。！？?!，,\\n]{0,6}?(?:AI|ai|机器人|人工智能|真人|人|管理员|管家|房东|物业|中介)\\s*(?:吗|嘛)?",
+  "你(?:的)?(?:身份|角色|作用|职责)是(?:什么|啥)",
+  "自我介绍",
+  "介绍(?:一下)?你自己",
+  "你介绍(?:一下)?自己",
+  "你能(?:帮|替|给|为)?(?:我|我们)?(?:做|干|办)(?:什么|啥|哪些)",
+  "你会(?:做|干)(?:什么|啥|哪些)",
+  "你(?:都)?有(?:什么|哪些)功能",
+  "你(?:平时|一般|大概|到底|究竟)?(?:是)?怎么(?:工作|运作|运行)的",
+  // —— 英文（`asksAboutSelf` 里以 `i` 标记匹配，大小写不敏感）——
+  "who are you",
+  "who r u",
+  "what are you",
+  "what(?:'s|s| is)\\s+this(?: number| service| thing)?",
+  "are you (?:a |an )?(?:bot|robot|ai|human|person|machine|real)",
+  "introduce yourself",
+  "tell me about yourself",
+  "what(?:'|’)s your (?:role|job|purpose)",
+  "how do you work",
+  "how does this work",
+  "what can you do(?: for (?:me|us))?",
+  "what do you do(?: for (?:me|us))?",
+];
+
+/**
+ * 句间/句尾允许的停顿与语气词（「你是谁啊？」「你好，请问你是做什么的？」）。
+ * 标点与语气词**合在一个字符类里重复**：中文里两者先后不固定（「你是谁啊？」是语气词
+ * 在前），合成一处就不必猜顺序，也不必为每种组合各写一条。
+ */
+const SELF_QUOTE_TAIL = "[\\s，,、；;：:。.！!？?~～…（）()啊呀呢吧哦噢哈嘛诶嘞么]*";
+
+/** 自称类问句前面允许的招呼 / 「请问」；**可以连着来两句**（「你好，请问……」）。 */
+const SELF_QUOTE_LEAD = `(?:${[
+  "你好",
+  "您好",
+  "哈喽",
+  "哈啰",
+  "嗨",
+  "请问",
+  "打扰(?:一下)?",
+  "hi",
+  "hello",
+  "hey",
+].join("|")})`;
+
+const SELF_QUOTE_RE = new RegExp(
+  `^(?:${SELF_QUOTE_LEAD}${SELF_QUOTE_TAIL})*` +
+    `(?:${SELF_QUOTE_PHRASES.join("|")})` +
+    `(?:${SELF_QUOTE_TAIL}(?:${SELF_QUOTE_PHRASES.join("|")}))*` +
+    `${SELF_QUOTE_TAIL}$`,
+  "i"
+);
+
+/**
+ * **住户在问「你是谁 / 你是干什么的 / 你怎么工作」的窄识别——保守优先。**
  *
- * 这不是主题分类，只是识别"住户在问产品功能边界"这一种**元问题**。
+ * 与 `asksWhatIsAvailable` 的分工：那个认的是"问能力"（你有哪些功能），本函数认的是
+ * **"问身份/角色"**。两者都会让回答必须列全专门优化功能——住户在要一份整体说明时，
+ * 漏项本身就是失真。身份事实取 `feature-facts.ts` 的 `COORDINATOR_ROLE_NOTE`
+ * （镜像自 doctrine 的「AI 协调员」那段），**不是**一份能力清单。
+ *
+ * 判据是**结构不是主题**：整句话必须**就是**一句（或连着几句）自称类问句，前面只允许
+ * 一句招呼 / 「请问」。**只要后面还跟着别的要求就整条不认**——「你是谁？顺便帮我跟阿川
+ * 说一声」里有一件真正要办的事，被这里吞掉就等于住户的交办没人办。同理
+ * 「what can you do about the noise next door?」不认：`about …` 后面挂着一个具体
+ * 诉求，那是交办不是问身份。
+ *
+ * 宁可漏掉口语变体（漏了就退回普通对话，不会造成新的越界），也不把普通交办误判进来。
+ */
+export function asksAboutSelf(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  // 英文撇号有直撇和弯撇两种写法，先归一，免得「what’s this?」漏掉。
+  return SELF_QUOTE_RE.test(t.replace(/[’‘]/g, "'"));
+}
+
+/**
+ * **窄的、通用的功能边界问句识别——保守优先。** 只认那几类元问题：
+ * 「你有什么功能 / 你是谁 / 能不能做 X / 为什么 X 不能做 / 刚才为什么拒绝」。普通交办、
+ * 抱怨、闲聊、新的提醒请求都返回 false（仍走原来的对话路径，成功交办的已批准功能不受
+ * 影响）。
+ *
+ * 这不是主题分类，只是识别"住户在问产品功能边界或问起我自己"这一种**元问题**。
  * 宁可漏掉不常见的口语变体（漏了就退回普通对话，不会造成新的越界），也不把普通聊天
  * 误判进来。
  */
@@ -121,6 +243,7 @@ export function isFeatureQaQuestion(text: string): boolean {
 
   return (
     asksWhatIsAvailable(t) ||
+    asksAboutSelf(t) ||
     asksWhyNotPossible ||
     asksAboutJustNow ||
     asksWhetherYouCan
@@ -143,15 +266,56 @@ export function featureQaFallback(args: {
     args.referencedBlacklistedId
   );
   const open = args.openFeatures.map((f) => f.label).join("、");
+  // **兜底也要说住户那一轮的语言**：住户用英文问、模型那侧又没写出可用正文时，回一段
+  // 中文正是「用对方的语言回答」最容易被代码兜底破坏的地方（语言判定复用 `language.ts`，
+  // 不在这里另写一套关键词）。
+  if (residentLanguage(args.question) === "en") {
+    return englishFeatureQaFallback({
+      blacklisted,
+      openLabels: args.openFeatures.map((f) => f.label),
+      selfIntro: asksAboutSelf(args.question),
+    });
+  }
   if (blacklisted.length) {
     const f = blacklisted[0];
     const fast = open ? `${OPTIMIZED_FAST_PATH_NOTE}。` : "";
     return `「${f.label}」这件事我目前没法替你办：${f.reason}。${fast}${FULL_FLOW_NOTE}。`;
   }
+  // 问起我自己：先说清身份（镜像 doctrine 的「AI 协调员」那段），再说能帮上什么忙。
+  const facts = args.openFeatures.length
+    ? `我目前对${open}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`
+    : `${FULL_FLOW_NOTE}。`;
+  if (asksAboutSelf(args.question)) {
+    return `${COORDINATOR_ROLE_NOTE}。${facts}`;
+  }
   if (args.openFeatures.length) {
-    return `我目前对${open}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`;
+    return facts;
   }
   return `${FULL_FLOW_NOTE}。`;
+}
+
+/**
+ * 兜底的英文写法，**事实与中文兜底同一份**（角色说明取 `COORDINATOR_ROLE_NOTE_EN`；
+ * 黑名单条目的名称与理由照旧原样引用数据，不另翻一份——那是老板登记的原话）。
+ */
+function englishFeatureQaFallback(args: {
+  blacklisted: readonly { label: string; reason: string }[];
+  openLabels: readonly string[];
+  selfIntro: boolean;
+}): string {
+  const role = args.selfIntro ? `${COORDINATOR_ROLE_NOTE_EN}. ` : "";
+  const shortcuts = args.openLabels.length
+    ? `I've got dedicated shortcuts for ${args.openLabels.join(", ")} — those run ` +
+      "faster and cheaper to handle; "
+    : "";
+  const fullFlow =
+    "anything else that needs coordinating between the people who live here goes " +
+    "through the full coordination flow, so it's not that I can't do it";
+  if (args.blacklisted.length) {
+    const f = args.blacklisted[0];
+    return `${role}There's one thing I can't do for you — ${f.label}: ${f.reason}. ${shortcuts}${fullFlow}.`;
+  }
+  return `${role}${shortcuts}${fullFlow}.`;
 }
 
 /**
@@ -161,8 +325,10 @@ export function featureQaFallback(args: {
  * 1. 含**每一条**被选中的黑名单条目的 `label`；
  * 2. 保留它的**理由**——含该条目 `validation.reasonAnchors` 里的**每一个**锚点词
  *    （允许自然改写措辞：锚点是数据里「换句话也绕不开」的核心词）；
- * 3. 当住户明确在问「你能做什么」（`asksWhatIsAvailable`）时，含**当前全部**专门优化
- *    功能的 `label`，一项不漏。
+ * 3. 当住户明确在问「你能做什么」或问起「你是谁」（`asksWhatIsAvailable` /
+ *    `asksAboutSelf`）时，含**当前全部**专门优化功能的 `label`，一项不漏；
+ * 4. 问起我自己时，含 `selfIntro.anchors` 里的每一个锚点——doctrine 的硬规则是
+ *    「AI」两字不能省（不冒充真人），住户用中文还是英文问都得说出来。
  *
  * 返回空数组 = 通过；否则返回**缺了什么**的可诊断短语，调用方据此换成只含事实源事实的
  * `featureQaFallback`。新增功能 / 条目只改事实源数据，本函数一行不动。
@@ -184,6 +350,12 @@ export function findUngroundedFeatureQaFacts(
       missing.push(`未保留「${fact.label}」的原因（缺：${absent.join("、")}）`);
     }
   }
+  if (bundle.selfIntro) {
+    const absent = bundle.selfIntro.anchors.filter((a) => !text.includes(a));
+    if (absent.length) {
+      missing.push(`没有说清自己的身份（缺：${absent.join("、")}）`);
+    }
+  }
   if (opts.requireOpenLabels) {
     for (const f of bundle.openFeatures) {
       if (!text.includes(f.label)) missing.push(`未列出优化功能「${f.label}」`);
@@ -203,9 +375,13 @@ function featureQaSystem(
     ? bundle.blacklisted.map((c) => `- ${c.label}：${c.reason}`)
     : ["（没有与这个问题对应的、明确办不了的事项）"];
   return [
-    "你是这套合租房的 AI 协调员。住户正在问你跟你的功能有关的问题：你有哪些功能、某件事能不能做、为什么某件事做不了、或者刚才为什么没给他办。",
+    "你是这套房子的 AI 协调员。住户正在问你跟你自己有关的问题：你是谁、你是干什么的、你怎么工作、你有哪些功能、某件事能不能做、为什么某件事做不了、或者刚才为什么没给他办。",
     "**你只能依据下面这些事实回答**，不得补充、不得猜测、不得虚构、不得承诺：",
     "",
+    // 问起我自己时才给这段身份事实：普通的功能边界问答不背它，既不跑题也省 token。
+    ...(bundle.selfIntro
+      ? ["关于你自己（住户正在问你是谁 / 你怎么工作）：", bundle.selfIntro.note, ""]
+      : []),
     `你目前**专门优化**、处理起来更快更省的功能（这两项不是你的全部能力，只是被优化过的两件）：`,
     ...open,
     "",
@@ -214,9 +390,15 @@ function featureQaSystem(
     `其它需要协调同住人的请求（例如替他把某件事跟另一位同住人沟通），${FULL_FLOW_NOTE}。`,
     "",
     "必须做到：",
-    "- 用**一两句**自然、口语的中文直接回答他，别绕。",
+    "- 用**一两句**自然、口语的话直接回答他，别绕；**用他这一轮说话用的那种语言**，不要生硬地换成另一种。",
     `- **不要说「只有这两项功能」或「只能做这两件事」**：它们只是被专门优化、更快更省的；其它协调请求走完整协调流程，不是做不到。`,
     `- **不要编造某件事办不了或一个「为什么不能做」的原因**；只有上面明确列为办不了的事项才说办不了、并保留写的那个原因。住户说的那件事若不在办不了清单里，就不要说它办不了。`,
+    ...(bundle.selfIntro
+      ? [
+          "- 住户问起你时，**说清自己是「AI 协调员」**（「AI」两个字不能省），并如实说不是真人、不是房东、也不是替住户定规矩的管理员；共同生活的规则由住在一起的人一起定。",
+          "- 只讲上面给的身份事实：**不提**你由什么做出来、用什么模型、跑在什么系统上、有没有数据库，也不提任何内部工具、流程或代码；不讲实现细节，也不描述内部机制。",
+        ]
+      : []),
     ...(bundle.blacklisted.length
       ? [
           "- 上面列出的、与这个问题有关的办不了的事项：要把它的**名称**说出来，并保留写的那个**原因**（可以换措辞，但不得省略、不得换掉成别的原因）。",
@@ -255,14 +437,19 @@ export async function generateFeatureQaReply(
   },
   llm: FeatureLlm
 ): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown }> {
+  // 问起我自己（你是谁 / 你怎么工作）与问能力是同一类"要一份整体说明"的问题：
+  // 分类在引擎这一处做完，事实源只做数据查找（见 `buildFeatureQaFacts`）。
+  const selfIntro = asksAboutSelf(args.question);
   const bundle = buildFeatureQaFacts({
     openFeatures: args.openFeatures,
     question: args.question,
     referencedBlacklistedId: args.referencedBlacklistedId ?? null,
+    selfIntro,
   });
-  // 住户明确问「你能做什么」时必须逐项列出全部专门优化功能名；只问「为什么某件事办不了」
-  // 则不强制全列。
-  const requireOpenLabels = asksWhatIsAvailable(args.question);
+  // 住户明确问「你能做什么」或问起「你是谁」时必须逐项列出全部专门优化功能名；
+  // 只问「为什么某件事办不了」则不强制全列。
+  const requireOpenLabels = asksWhatIsAvailable(args.question) || selfIntro;
+  const maxChars = featureQaMaxChars(args.question);
   const fallback = featureQaFallback({
     question: args.question,
     openFeatures: args.openFeatures,
@@ -290,8 +477,9 @@ export async function generateFeatureQaReply(
     const violations = findGroundingViolations(reply);
     if (
       !reply ||
-      reply.length > FEATURE_QA_MAX_CHARS ||
+      reply.length > maxChars ||
       INTERNAL_TERMS.test(reply) ||
+      CLAIMS_ONLY_TWO_FUNCTIONS.test(reply) ||
       violations.length > 0 ||
       ungrounded.length > 0
     ) {
@@ -303,7 +491,9 @@ export async function generateFeatureQaReply(
           ? `模型输出的功能回答没有覆盖全部事实：${ungrounded.join("；")}`
           : violations.length
             ? `模型输出的功能回答越界：${violations.join("；")}`
-            : "模型输出的功能回答不可用（空 / 超长 / 内部术语）"
+            : CLAIMS_ONLY_TWO_FUNCTIONS.test(reply)
+              ? "模型输出的功能回答把两项专门优化说成了全部能力"
+              : "模型输出的功能回答不可用（空 / 超长 / 内部术语）"
       );
     }
     return { reply, fallback, usage };

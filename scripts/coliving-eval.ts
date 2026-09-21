@@ -103,7 +103,9 @@ import {
   formatKnownCost,
   formatTokenTotal,
   summarizeGenerations,
+  summarizeTurnLedger,
   TRANSPORT_UNOBSERVABLE,
+  type TurnLedgerSummary,
 } from "../lib/chat/coliving/ledger-report";
 
 // ── CLI args ─────────────────────────────────────────────────────────────
@@ -305,6 +307,14 @@ type TurnRecord = {
    * 生产路径不落这份数据，只进评测报告 JSON。
    */
   contextReceipt: ContextReceipt | null;
+  /**
+   * 这一轮**主生成**的账（按台账里已有的 `turnIndex` 标签折出来，只记数量与
+   * token，不含任何提示词/正文）。`null` = 这一轮没有主生成（短路/接管/未知
+   * 号码/功能前门/共同规则协商）——**不是"花了 0"**。
+   *
+   * 它与其他观测一样只进评测报告 JSON，生产路径不落这份数据。
+   */
+  turnLedger: TurnLedgerSummary | null;
   toolsUsed: string[];
   scheduleFacts: string[];
   outbound: Array<{
@@ -533,6 +543,10 @@ async function runScenario(
       replyReview: last.replyReview,
       promptComposition: last.promptComposition,
       contextReceipt: last.contextReceipt,
+      // 台账里这一轮的 generation 现在就全在（主生成在 `runColivingTurn` 内部
+      // 已经收尾，标签上下文在 await 返回时也已退出），所以这里折一次就够了，
+      // 不必等整场跑完再回填。没有主生成 → `null`（"没有这一层"），不是 0。
+      turnLedger: summarizeTurnLedger(ledger.snapshot().generationRecords, i),
       toolsUsed: last.toolsUsed,
       scheduleFacts: last.scheduleFacts,
       // 用 allOutbound 而不是 outbound：被审稿拦下的那些也要进文字稿，

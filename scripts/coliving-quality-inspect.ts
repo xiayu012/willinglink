@@ -97,17 +97,24 @@ import { findGroundingViolations } from "../lib/chat/coliving/feature-grounding"
 // `feature-facts.ts` 事实源里有关的事实交给模型说人话，越界回落只含事实源事实的兜底。
 import {
   FEATURE_QA_MAX_CHARS,
+  FEATURE_QA_MAX_CHARS_EN,
   FEATURE_QA_NAME,
   FEATURE_QA_STAGE,
+  asksAboutSelf,
   asksWhatIsAvailable,
   featureQaFallback,
+  featureQaMaxChars,
   findUngroundedFeatureQaFacts,
   generateFeatureQaReply,
   isFeatureQaQuestion,
   runFeatureQa,
 } from "../lib/chat/coliving/feature-qa";
-// 用户可见功能事实源（运行时读取的单点数据文件）：专门优化的开放功能 + 与问题有关的黑名单条目。
+// 用户可见功能事实源（运行时读取的单点数据文件）：专门优化的开放功能 + 与问题有关的黑名单条目
+// + 住户问起自己时的身份事实（镜像 doctrine 的「AI 协调员」那段）。
 import {
+  COORDINATOR_ROLE_ANCHORS,
+  COORDINATOR_ROLE_NOTE,
+  COORDINATOR_ROLE_NOTE_EN,
   FULL_FLOW_NOTE,
   buildFeatureQaFacts,
   selectBlacklistedCapabilities,
@@ -184,6 +191,8 @@ import {
   parseEvalMaxOutputTokens,
   runWithEvalLedger,
   trackedGatewayCall,
+  type GenerationRecord,
+  type StepUsageRecord,
 } from "../lib/chat/coliving/gateway-ledger";
 import {
   COLIVING_GUIDANCE_TEXTS,
@@ -229,9 +238,18 @@ import { findUnknownActionPlanFlags } from "../lib/chat/coliving/evals/action-pl
 import {
   normalizeContextReceipt,
   normalizePromptComposition,
+  normalizeTurnLedgerSummary,
+  renderContextEngineeringPanelHtml,
   renderContextReceiptHtml,
   renderPromptCompositionHtml,
+  renderTurnLedgerHtml,
+  summarizeTurnLedger,
 } from "../lib/chat/coliving/ledger-report";
+import {
+  isContextRetrievalToolName,
+  returnedCharsOf,
+  retrievalObservationsFrom,
+} from "../lib/chat/coliving/context-receipt";
 import {
   ACTION_PLAN_SAMPLES,
   SIMPLE_GREEN_SAMPLE,
@@ -3296,6 +3314,215 @@ async function main() {
       assert.equal(noRefOkQa!.reply, listOpen, "没有引用时不要求补被拒条目，列全功能即可");
     }
   );
+
+  /**
+   * ── 住户问起「你是谁 / 你怎么工作」时的自称问答（2026-09-20 扩展） ──
+   *
+   * 走的是**同一条**功能问答路径：零工具、零第三方出站、不装旧 doctrine，只多拿一条
+   * 身份事实（`COORDINATOR_ROLE_NOTE`，镜像 doctrine 的「AI 协调员」那段）。
+   * 这里盯三件事：①认出「问自己」且**不吞掉普通交办**；②回答用住户那一轮的语言；
+   * ③不泄露内部（模型 / 数据库 / 工具）也不把两项专门优化说成全部能力。
+   */
+  check("自称问答：中英文问句都进，普通交办 / 带诉求的追问一律不进", () => {
+    // 认得出的问法（中英各若干；含招呼、「请问」、语气词、连着两问）。
+    for (const q of [
+      "你是谁？",
+      "你好，请问你是做什么的？",
+      "你是谁啊？你能做什么呢？",
+      "你是什么人",
+      "你是 AI 吗",
+      "你是不是真人",
+      "你到底是谁",
+      "你是这套房子的管理员吗",
+      "介绍一下你自己",
+      "你平时怎么工作的",
+      "Who are you?",
+      "Hi, what can you do?",
+      "What’s this number?",
+      "Are you a bot?",
+      "how do you work",
+      "Introduce yourself",
+      "What's your role?",
+    ]) {
+      assert.equal(asksAboutSelf(q), true, `应当认出是在问我自己：${q}`);
+      assert.equal(isFeatureQaQuestion(q), true, `应当进功能问答：${q}`);
+    }
+    // 认不出的：**普通交办与闲聊**，以及**后面还挂着别的要求**的追问。后者是这条扩展
+    // 最危险的失效方式——吞掉就等于住户交办的事没人办。这些句子整条都不得进功能问答。
+    for (const q of [
+      "今天晚饭吃什么",
+      "帮我提醒 Alex 晚上别用烘干机",
+      "阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。",
+      "阿远，我是刚搬来的，想问问半夜洗衣机的事，你能帮我跟他说一下吗？",
+      "你好，我是刚搬进来的，室友半夜洗衣服很吵，能帮我跟他说一声吗？",
+      "Hi, I just moved in - the dryer beeps late at night. Can you ask Jordan to empty it before 10?",
+      "Hi, what can you do about the dryer beeping at night? Can you ask Jordan to stop it?",
+      "what can you do about the noise next door?",
+      "你是谁？顺便帮我跟阿川说一声别半夜洗衣服",
+      "你是什么意思",
+      "你是做什么工作的",
+    ]) {
+      assert.equal(asksAboutSelf(q), false, `不得把普通交办 / 闲聊认成问我自己：${q}`);
+      assert.equal(isFeatureQaQuestion(q), false, `不得进功能问答：${q}`);
+    }
+    // 只是「问我自己的身份/能力」这一栏认不出，其余口径不归这条扩展管（「你会做什么菜」
+    // 命中的是既有的问能力句式，与本次扩展无关，这里不为它立新规）。
+    assert.equal(asksAboutSelf("你会做什么菜"), false, "有具体主题的「会做什么」不是问我自己");
+  });
+
+  check("自称问答：身份事实镜像 doctrine，且住户可见内容不掺内部架构", () => {
+    // 角色名必须与权威来源一致（doctrine/always/identity.md 的「AI 协调员」「不自称管理员」）。
+    const identity = readFileSync(
+      "lib/ai/brains/coliving/doctrine/always/identity.md",
+      "utf8"
+    );
+    assert(
+      identity.includes("AI 协调员") && identity.includes("不是「管理员」"),
+      "doctrine 身份段仍是「AI 协调员 / 不是管理员」——事实源镜像的就是它"
+    );
+    assert(
+      COORDINATOR_ROLE_NOTE.includes("AI 协调员") &&
+        COORDINATOR_ROLE_NOTE.includes("管理员"),
+      "身份事实必须说清角色名与「不是管理员」"
+    );
+    // 住户可见的那句里不得出现内部架构 / 工具 / 模型 / 数据库。
+    for (const note of [COORDINATOR_ROLE_NOTE, COORDINATOR_ROLE_NOTE_EN]) {
+      assert(
+        !/模型|数据库|工具|接口|API|架构|系统提示|提示词|白名单|路由|database|\bmodel\b|\btools?\b|\bapi\b|\barchitecture\b/i.test(
+          note
+        ),
+        "身份事实不得暴露内部架构 / 工具 / 模型 / 数据库"
+      );
+    }
+    // 锚点来自 doctrine 的硬规则：「AI」两字不能省。
+    assert.deepEqual([...COORDINATOR_ROLE_ANCHORS], ["AI"], "报身份的锚点就是「AI」不能省");
+  });
+
+  check("自称问答：中文问句给身份事实 + 列全专门优化，且不背这段给别的问法", () => {
+    const selfBundle = buildFeatureQaFacts({
+      openFeatures: OPEN_FEATURES,
+      question: "你是谁？",
+      selfIntro: true,
+    });
+    assert(
+      selfBundle.selfIntro?.note === COORDINATOR_ROLE_NOTE,
+      "问起我自己时事实源才给身份事实"
+    );
+    assert.deepEqual([...selfBundle.selfIntro!.anchors], ["AI"]);
+    // 别的问法不背这段（省 token，也不跑题）。
+    const boundaryBundle = buildFeatureQaFacts({
+      openFeatures: OPEN_FEATURES,
+      question: combinedQuestion,
+    });
+    assert.equal(boundaryBundle.selfIntro, null, "功能边界问句不带身份事实");
+    assert.equal(
+      buildFeatureQaFacts({ openFeatures: OPEN_FEATURES, question: "为什么不能让他清理地漏的头发？" })
+        .selfIntro,
+      null,
+      "黑名单主题问句不带身份事实"
+    );
+
+    // 兜底：问起自己时先说身份、再列全专门优化功能，且过 grounding 闸。
+    const fb = featureQaFallback({ question: "你是谁？", openFeatures: OPEN_FEATURES });
+    assert(fb.includes(COORDINATOR_ROLE_NOTE), "自称兜底必须含身份事实");
+    assert(openLabels.every((l) => fb.includes(l)), "自称兜底仍要列全专门优化功能");
+    assert(fb.includes("不是做不到"), "自称兜底仍要说明清单外走完整流程");
+    assert.deepEqual(findGroundingViolations(fb), [], "自称兜底必须过 grounding 闸");
+    // 漏说身份（少了「AI」）或漏列功能，都要被 grounding 抓出来。
+    assert.deepEqual(
+      findUngroundedFeatureQaFacts(fb, selfBundle, { requireOpenLabels: true }),
+      []
+    );
+    const noRole = `我是这套房子的协调员。${listOpen}`;
+    assert(
+      findUngroundedFeatureQaFacts(noRole, selfBundle, { requireOpenLabels: true }).some((m) =>
+        m.includes("身份")
+      ),
+      "不说「AI」= 没披露身份，必须报缺"
+    );
+  });
+
+  await checkAsync("自称问答：英文问句用英文回答，中文问句口径不变", async () => {
+    const enQuestion = "Who are you?";
+    // 英文正文：说身份（含 AI）+ 两个功能名 + 完整流程那条 —— 长度按英文上限放宽后要能过。
+    const enReply =
+      "I'm the AI coordinator for this house — not a person, not the landlord. I've got dedicated shortcuts " +
+      "for 夜间洗衣提醒 and 个人物品使用提醒, which run faster and cheaper; anything else that needs " +
+      "coordinating goes through the full coordination flow, so it's not that I can't do it.";
+    assert(
+      enReply.length > FEATURE_QA_MAX_CHARS && enReply.length <= FEATURE_QA_MAX_CHARS_EN,
+      "这条英文正文正好落在「中文上限之外、英文上限之内」，用来证明上限是按语言取的"
+    );
+    assert.equal(featureQaMaxChars(enQuestion), FEATURE_QA_MAX_CHARS_EN);
+    assert.equal(featureQaMaxChars("你是谁？"), FEATURE_QA_MAX_CHARS, "中文上限一字不动");
+    const en = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: enReply }) });
+    const enQa = await runFeatureQa({ text: enQuestion, openFeatures: OPEN_FEATURES, llm: en.llm });
+    assert(enQa, "英文自称问句必须进功能问答");
+    assert.equal(enQa!.reply, enReply, "含身份 + 全功能 + 完整流程的英文正文要原样接受");
+    assert(!("error" in enQa!), "英文正文不得因为中文口径的长度上限被误换兜底");
+    assert.equal(en.calls.length, 1, "自称问答只花一次模型调用");
+    assert.equal(en.calls[0].name, FEATURE_QA_NAME);
+    // 英文兜底也是英文（不是一个中文字符串），且同样含身份与两个功能名。
+    const enFb = featureQaFallback({ question: enQuestion, openFeatures: OPEN_FEATURES });
+    assert(
+      enFb.includes(COORDINATOR_ROLE_NOTE_EN) && enFb.includes("AI coordinator"),
+      "英文自称兜底必须是英文身份事实"
+    );
+    assert(
+      openLabels.every((l) => enFb.includes(l)) && !/办不了|没法|不是做不到/.test(enFb),
+      "英文兜底仍要列全专门优化功能，且不得编造办不了"
+    );
+    // 中文问句走中文兜底（口径与扩展前一字不差）。
+    assert(
+      featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES }) === listOpen,
+      "问能力的中文兜底文案不变"
+    );
+    // 语言判定复用 language.ts：混了中文的英文问句仍按中文处理。
+    assert.equal(featureQaMaxChars("提醒 Alex 晚上别用烘干机"), FEATURE_QA_MAX_CHARS);
+  });
+
+  await checkAsync("自称问答：泄露内部 / 说成「只有两项」/ 自创方案一律回落兜底", async () => {
+    const fb = featureQaFallback({ question: "你是谁？", openFeatures: OPEN_FEATURES });
+    const good =
+      "我是这套房子的 AI 协调员，不是真人也不是管理员。我目前对" +
+      `${openLabels.join("、")}有专门优化，处理起来更快、更省；其它需要协调同住人的请求，` +
+      "会走完整的协调流程来处理，不是做不到。";
+    const okRun = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: good }) });
+    const okQa = await runFeatureQa({ text: "你是谁？", openFeatures: OPEN_FEATURES, llm: okRun.llm });
+    assert.equal(okQa!.reply, good, "说清身份 + 列全功能的中文正文要接受");
+    assert(!("error" in okQa!));
+
+    // 三类必须回落：暴露内部实现 / 把两项说成全部能力 / 承诺去联系。逐条都要报出原因。
+    for (const [label, reply] of [
+      ["暴露内部实现", "我是这套房子的 AI 协调员，背后是一个大模型加数据库和一堆工具。"],
+      ["说成只有两项功能", `我是这套房子的 AI 协调员，只有这两项功能：${openLabels.join("、")}。`],
+      ["承诺去联系", `我是这套房子的 AI 协调员。我目前对${openLabels.join("、")}有专门优化；` + "我这就去跟阿川说。"],
+    ] as Array<[string, string]>) {
+      const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
+      const qa = await runFeatureQa({ text: "你是谁？", openFeatures: OPEN_FEATURES, llm: m.llm });
+      assert.equal(qa!.reply, fb, `${label} 必须回落只含事实源事实的兜底`);
+      assert(qa!.error, `${label} 回落时要把原因带出来`);
+      assert.deepEqual(findGroundingViolations(fb), [], "换上的兜底自己必须干净");
+    }
+  });
+
+  await checkAsync("自称问答：不调工具、不产生任何第三方出站（与既有口径同一条）", async () => {
+    const { llm, calls } = mockLlm({
+      [FEATURE_QA_NAME]: JSON.stringify({
+        reply: `我是这套房子的 AI 协调员。我目前对${openLabels.join("、")}有专门优化，处理起来更快、更省；其它需要协调同住人的请求，会走完整的协调流程来处理，不是做不到。`,
+      }),
+    });
+    const qa = await runFeatureQa({ text: "你是谁？", openFeatures: OPEN_FEATURES, llm });
+    assert(qa, "自称问句要进功能问答");
+    // 这条路径只经 feature-llm 的小生成调用：既没有工具表，也不可能出站。
+    assert.equal(calls.length, 1, "自称问答只有一次模型调用（没有任何工具调用）");
+    assert.equal(calls[0].stage, FEATURE_QA_STAGE);
+    const qaSrcSelf = readFileSync("lib/chat/coliving/feature-qa.ts", "utf8");
+    assert(
+      !/deliverSms|contactPerson|queueCommunication|tool\(/.test(qaSrcSelf.replace(/\/\/.*$/gm, "")),
+      "feature-qa.ts 不接投递层、不点收件人（自称扩展不得改动第三方动作权限）"
+    );
+  });
 
 
   check("corpus-035 两句原文逐字保留，且这轮功能问答无工具 / 无出站 / 不装旧 doctrine", () => {
@@ -7611,19 +7838,23 @@ async function main() {
   });
 
   /**
-   * ── 上下文回执：只有分节 id / 字符数与检索工具名，没有正文 ──────────────
+   * ── 上下文回执：只有分节 id / 字符数与检索足迹（名字 / 次数 / 字符数） ──
    *
    * 回执是观察层，跟上面的 prompt 观测同一条纪律：它只回答"这一轮上下文由
-   * 哪些分节拼成、各占多少字符，模型额外去查了哪几类"，**不回答里面写了
-   * 什么**。所以要证三件事：
-   *  1. **源级**：`ContextReceipt` 的形状里没有任何承载正文的字段，
-   *     `buildContext` 只按 `lines` 的字符数记账（不把分节文本存进收据）；
+   * 哪些分节拼成、各占多少字符，模型额外去查了哪几类、各拉回多少字符"，
+   * **不回答里面写了什么**。所以要证四件事：
+   *  1. **源级**：`ContextReceipt` 的形状里没有任何承载正文的字段（连工具
+   *     入参都没有承载字段），`buildContext` 只按 `lines` 的字符数记账
+   *     （不把分节文本存进收据）；
    *  2. **离线渲染**：把一份**被刻意塞进"样例机密正文"**的收据喂给渲染函数，
    *     输出里绝不能出现那段正文——分节只读 `id` / `chars`，工具名只留
    *     代码认识的名字，多余字段一律不读、不渲染；
-   *  3. **旧报告兼容**：字段缺席时整个块不渲染（不补 0、不 NaN）。
+   *  3. **折字符数不抛**：非字符串 / 数不出来的返回内容只记"未知"，绝不上抛
+   *     （观测坏了不能连累这一轮对话）；
+   *  4. **旧报告兼容**：字段缺席时整个块不渲染（不补 0、不 NaN），旧格式的
+   *     工具名列表照旧能读成"次数与字符数未知"。
    */
-  check("上下文回执：只有分节 id / 字符数与检索工具名，渲染不暴露任何正文", () => {
+  check("上下文回执：分节 id / 字符数与检索足迹，渲染不暴露正文", () => {
     // 形状与工具名单在纯模块里（零 import）：运行时、评测脚本、报告层共用一份，
     // 不许在别处再立一套收据类型或再写一份检索工具名单。
     const receiptSrc = readFileSync(
@@ -7663,14 +7894,46 @@ async function main() {
           !t.startsWith("/*")
       );
     assert(
-      receiptDeclLines.every((line) => !/\btext\b/.test(line)),
-      "收据类型里不得出现任何正文承载字段（text）——收据只有 id / 字符数 / 工具名"
+      receiptDeclLines.every((line) => !/\b(text|body|content|query|output)\b/.test(line)),
+      "收据类型里不得出现任何正文/入参承载字段——收据只有名字与数字"
     );
+    // **结构行**：类型头与闭合大括号。它们不承载任何字段，单独登记（且**逐个
+    // 写死**：多出一个没登记的类型头——比如新起一个收据类型——照样当场失败），
+    // 好让下面那条白名单**只管字段声明行**。
+    const RECEIPT_STRUCTURAL_LINES = [
+      "export type ContextReceiptSection = {",
+      "export type ContextSectionsReceipt = {",
+      "export type ContextRetrievalObservation = {",
+      "export type ContextReceipt = ContextSectionsReceipt & {",
+      "};",
+    ];
+    // 只可能出现在字段位置上；`};` 之外的未登记行一律判为字段并当场失败
+    // （所以上面那几行之外，任何新行都不会被当成结构行放过去）。
+    const receiptFieldLines = receiptDeclLines.filter(
+      (line) => !RECEIPT_STRUCTURAL_LINES.includes(line)
+    );
+    // **精确白名单**：不是"检查有没有 text"，而是"只允许这几行存在"。多出任何
+    // 一行（新的承载字段）都会当场失败，不用等有人想起来给它加一条负面断言。
+    // 按需检索观测那三个字段（name / calls / returnedChars）就是在这里逐个审过的。
+    const RECEIPT_FIELD_ALLOWLIST = [
+      "id: string;",
+      "chars: number;",
+      "sections: ContextReceiptSection[];",
+      "name: string;",
+      "calls: number;",
+      "returnedChars: number | null;",
+      "retrievalObservations: ContextRetrievalObservation[];",
+    ];
     assert(
-      receiptDeclLines.some((line) => line === "id: string;") &&
-        receiptDeclLines.some((line) => line === "chars: number;") &&
-        receiptDeclLines.some((line) => line === "retrievalToolNames: string[];"),
-      "收据声明行只能是 id: string、chars: number 与 retrievalToolNames: string[]"
+      receiptFieldLines.every((line) => RECEIPT_FIELD_ALLOWLIST.includes(line)),
+      `收据类型只允许这几行声明，出现了没审过的字段：${receiptFieldLines
+        .filter((line) => !RECEIPT_FIELD_ALLOWLIST.includes(line))
+        .join(" | ")}`
+    );
+    assert.equal(
+      receiptFieldLines.length,
+      RECEIPT_FIELD_ALLOWLIST.length,
+      "收据类型的字段声明行必须与白名单逐条对应（少一条就是有字段被删了）"
     );
     // context.ts 只产出"分节那半"，不许再另立一套收据形状。
     const ctxSrc = readFileSync("lib/chat/coliving/context.ts", "utf8");
@@ -7727,14 +7990,47 @@ async function main() {
     assert(
       turnSrc.includes("contextReceipt: {") &&
         turnSrc.includes("...ctx.receipt,") &&
-        turnSrc.includes("retrievalToolNames: retrievalToolNamesUsed(toolsUsed),"),
-      "主生成返回点必须带上 buildContext 的分节 + 本轮真跑过的按需检索工具名"
+        turnSrc.includes(
+          "retrievalObservations: retrievalObservationsFrom(retrievalCallFootprints),"
+        ),
+      "主生成返回点必须带上 buildContext 的分节 + 本轮真跑过的按需检索足迹"
     );
     assert(
-      turnSrc.includes("retrievalToolNamesUsed") &&
+      turnSrc.includes("retrievalObservationsFrom") &&
         turnSrc.includes("from \"./context-receipt\""),
-      "按需检索工具名只能从纯模块的名单里筛出来，不在 turn.ts 里另写一份名单"
+      "按需检索足迹只能从纯模块的名单与纯函数里折出来，不在 turn.ts 里另写一份"
     );
+    // 调用与返回按 `toolCallId` 配对：工具抛错时那一轮**没有** toolResult，
+    // 按下标配对会把下一个返回安到上一个调用头上，字符数就记错了人。
+    // 同时，返回内容在**当行**就折成数字（`returnedCharsOf`），装配数组里只留
+    // 名字与数字——结构上不存在"读完还留着正文引用"的窗口。
+    assert(
+      turnSrc.includes("outputByCallId.set(toolResult.toolCallId, toolResult.output)") &&
+        turnSrc.includes(
+          "chars: output === undefined ? null : returnedCharsOf(output),"
+        ),
+      "工具返回必须按 toolCallId 配对，且当行折成数字（数组里不许留返回内容）"
+    );
+    // 装配数组的元素类型本身不许有承载字段：`RetrievalToolCall` 只有名字与数字。
+    const footprintStart = receiptSrc.indexOf("export type RetrievalToolCall = {");
+    assert(footprintStart > 0, "RetrievalToolCall 类型必须导出");
+    const footprintFields = receiptSrc
+      .slice(footprintStart, receiptSrc.indexOf("};", footprintStart))
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(
+        (t) => t.length > 0 && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")
+      );
+    assert.deepEqual(
+      footprintFields,
+      ["export type RetrievalToolCall = {", "name: string;", "chars: number | null;"],
+      "RetrievalToolCall 只能有 name / chars 两个字段——返回内容不许有承载字段"
+    );
+    // 收据附近不得出现运行时正文（`ctx.text`）、住户原话 / 工具入参
+    // （`args.text`、`call.args`）或**原生工具调用对象**（`toolCalls`，每个都
+    // 带着入参）。**禁词表没有任何例外**：装配数组 `retrievalCallFootprints`
+    // 从一开始就只有名字与数字（返回内容在当行折成字符数，见上面那条与
+    // `RetrievalToolCall` 的类型断言），所以这里不需要、也不许为任何标识符开口子。
     assert(
       !/contextReceipt[\s\S]{0,400}(ctx\.text|args\.text|toolCalls|call\.args)/.test(
         turnSrc
@@ -7765,7 +8061,8 @@ async function main() {
       undefined,
       "形状不认识 → 不渲染"
     );
-    // **样例机密正文**：刻意塞进收据对象的额外字段，用来证明渲染不会带出正文。
+    // **样例机密正文**：刻意塞进收据对象（含检索观测）的额外字段，用来证明
+    // 渲染不会带出正文。工具名位置上塞的是一段"名字"，名单外的名字一个都不留。
     const SAMPLE_SECRET = "样例机密正文-SHOULD-NOT-APPEAR-42";
     const normalized = normalizeContextReceipt({
       sections: [
@@ -7773,8 +8070,13 @@ async function main() {
         { id: 7, chars: 10 },
         { id: "house-rules", chars: Number.NaN, statement: SAMPLE_SECRET },
       ],
-      // 检索工具名里也塞一段机密正文：名单外的字符串一个都不许渲染。
-      retrievalToolNames: ["recall", SAMPLE_SECRET, "lookupHistory"],
+      retrievalObservations: [
+        { name: "recall", calls: 2, returnedChars: 640, query: SAMPLE_SECRET },
+        { name: SAMPLE_SECRET, calls: 1, returnedChars: 10 },
+        { name: "lookupHistory", calls: Number.NaN, returnedChars: -1 },
+        { name: "findSimilarCases", calls: 1, returnedChars: Number.POSITIVE_INFINITY },
+        { name: "recall", calls: 9, returnedChars: 9 },
+      ],
     });
     assert.ok(normalized, "形状认识的收据要归一化");
     assert.deepEqual(
@@ -7792,23 +8094,132 @@ async function main() {
         "归一化后的分节只能有 id/chars 两个键"
       );
     }
+    // 检索足迹只留代码写死名单里的名字；坏计数（NaN / Infinity / 负数）记未知。
     assert.deepEqual(
-      normalized.retrievalToolNames,
-      ["recall", "lookupHistory"],
-      "检索工具名只留代码认识的那几个，名单外的字符串丢弃"
+      normalized.retrievalObservations,
+      [
+        { name: "recall", calls: 2, returnedChars: 640 },
+        { name: "lookupHistory", calls: null, returnedChars: null },
+        { name: "findSimilarCases", calls: 1, returnedChars: null },
+      ],
+      "检索足迹只留名单里的名字、同名只留第一条，坏次数/坏字符数记未知"
     );
-    // 旧报告连检索工具名这一栏都没有 → 未知（不是"没跑检索"）。
-    assert.equal(
-      normalizeContextReceipt({ sections: [] })?.retrievalToolNames,
-      null,
-      "缺检索工具名 → 未知，不猜成空"
+    for (const o of normalized.retrievalObservations ?? []) {
+      assert.deepEqual(
+        Object.keys(o),
+        ["name", "calls", "returnedChars"],
+        "归一化后的检索观测只能有 name/calls/returnedChars 三个键"
+      );
+      assert.ok(
+        isContextRetrievalToolName(o.name),
+        "归一化后的工具名必须仍在那份写死的名单里"
+      );
+    }
+    // **旧报告兼容**：旧格式只有工具名列表、没有次数与字符数 → 名字照旧显示，
+    // 两个数字记"未知"（不是 0，也不是"这一栏没了"）。
+    assert.deepEqual(
+      normalizeContextReceipt({
+        sections: [],
+        retrievalToolNames: ["recall", SAMPLE_SECRET, "lookupHistory"],
+      })?.retrievalObservations,
+      [
+        { name: "recall", calls: null, returnedChars: null },
+        { name: "lookupHistory", calls: null, returnedChars: null },
+      ],
+      "旧格式的工具名列表要照旧读出来，次数与字符数记未知"
     );
-    // 类型不对（不是字符串数组）→ 未知。
+    // 旧报告连检索这一栏都没有 → 未知（不是"没跑检索"）。
     assert.equal(
-      normalizeContextReceipt({ sections: [], retrievalToolNames: [7] })
-        ?.retrievalToolNames,
+      normalizeContextReceipt({ sections: [] })?.retrievalObservations,
       null,
-      "非字符串数组 → 未知"
+      "缺检索那一栏 → 未知，不猜成空"
+    );
+    // 类型不对（不是数组）→ 未知；数组里坏条目丢弃，剩下的空列表就是"真没跑"。
+    assert.equal(
+      normalizeContextReceipt({ sections: [], retrievalObservations: 7 })
+        ?.retrievalObservations,
+      null,
+      "不是数组 → 未知"
+    );
+    assert.deepEqual(
+      normalizeContextReceipt({
+        sections: [],
+        retrievalObservations: [{ name: 7 }],
+      })?.retrievalObservations,
+      [],
+      "名字不是字符串的条目丢弃，空数组 = 明确没跑检索"
+    );
+
+    // ── 折字符数：非字符串 / 数不出来的返回只记未知，绝不上抛 ─────────────
+    // 真工具返回的是对象（不是字符串），所以字符数是**数出来的**：只数字符串与
+    // 键名，标量不计；数不出来（函数 / symbol / 超深 / 超节点）记 null，不抛。
+    assert.equal(returnedCharsOf("四个字"), 3, "字符串按自身长度算");
+    assert.equal(
+      returnedCharsOf({ who: "阿May", note: null, count: 3 }),
+      "who".length + "阿May".length + "note".length + "count".length,
+      "对象累加键名与字符串值，数字/null 不计（只数检索负担，不数标点）"
+    );
+    assert.equal(returnedCharsOf(undefined), 0, "undefined 本身没有字符串内容");
+    const cycle: Record<string, unknown> = { a: "x" };
+    cycle.self = cycle;
+    assert.equal(
+      returnedCharsOf({ fn: () => "SHOULD-NOT-APPEAR" }),
+      null,
+      "函数数不出来 → 未知（不调它、也不把它的返回值带出来）"
+    );
+    assert.equal(
+      returnedCharsOf(cycle),
+      null,
+      "自引用对象撞到深度/节点边界 → 未知，不无限递归、不抛"
+    );
+    const throwingGetter: Record<string, unknown> = {};
+    Object.defineProperty(throwingGetter, "boom", {
+      enumerable: true,
+      get() {
+        throw new Error("getter 抛错");
+      },
+    });
+    assert.equal(
+      returnedCharsOf(throwingGetter),
+      null,
+      "读不动的属性（抛错的 getter）→ 未知，绝不向上抛"
+    );
+    assert.equal(
+      returnedCharsOf(Symbol("SHOULD-NOT-APPEAR")),
+      null,
+      "symbol / 函数 / bigint 数不出来 → 未知"
+    );
+    // 一次调用数不出来 → 这条工具整条记未知，**不拿偏小的和冒充总数**。
+    assert.deepEqual(
+      retrievalObservationsFrom([
+        { name: "recall", chars: 120 },
+        { name: "recall", chars: null },
+      ]),
+      [{ name: "recall", calls: 2, returnedChars: null }],
+      "同一次工具只要有一次读不出字符数，整条记未知（次数照算）"
+    );
+    assert.deepEqual(
+      retrievalObservationsFrom([
+        { name: "lookupHistory", chars: 31 },
+        { name: "recall", chars: 8 },
+        { name: SAMPLE_SECRET, chars: 999 },
+      ]),
+      [
+        { name: "lookupHistory", calls: 1, returnedChars: 31 },
+        { name: "recall", calls: 1, returnedChars: 8 },
+      ],
+      "名单外的工具一个都不进观测，名单内的按写死顺序返回"
+    );
+    assert.deepEqual(
+      retrievalObservationsFrom([]),
+      [],
+      "一次检索都没跑 → 空数组（明确没跑），不是未知"
+    );
+    assert(
+      !JSON.stringify(
+        retrievalObservationsFrom([{ name: "recall", chars: 12 }])
+      ).includes(SAMPLE_SECRET),
+      "折出来的观测里只剩名字与数字，带不出任何正文"
     );
 
     assert.equal(
@@ -7822,13 +8233,14 @@ async function main() {
       receiptHtml,
       renderContextReceiptHtml({ sections: [] }),
       renderContextReceiptHtml({}),
+      renderContextReceiptHtml({ sections: [], retrievalObservations: [] }),
     ];
     for (const html of rendered) {
       assert(!html.includes("NaN"), "收据块绝不能渲染出 NaN");
       assert(!html.includes("undefined"), "收据块绝不能渲染出 undefined");
       assert(
         !html.includes(SAMPLE_SECRET),
-        "渲染绝不能暴露分节正文（样例机密文本不得出现）"
+        "渲染绝不能暴露分节正文或工具入参（样例机密文本不得出现）"
       );
     }
     // 紧凑列表：每行一个节 id + 字符数；未知字符数照实说"未知"。
@@ -7842,23 +8254,83 @@ async function main() {
       receiptHtml.includes("house-rules") && receiptHtml.includes("未知"),
       "坏字符数显示为未知，不显示成 0"
     );
-    // 按需检索工具：报告要列出本轮真跑过的那几类名字。
+    // 按需检索足迹：名字 + 次数 + 数字符足迹。
     assert(
-      receiptHtml.includes("recall") && receiptHtml.includes("lookupHistory"),
-      "报告要列出本轮跑过的按需检索工具名"
+      receiptHtml.includes("recall") &&
+        receiptHtml.includes("lookupHistory") &&
+        receiptHtml.includes("640 字符"),
+      "报告要列出本轮跑过的按需检索工具名、次数与返回字符数"
     );
+    // 份额：只有一个已知分节时它占 100%（分母只算已知的那部分）。
+    assert(receiptHtml.includes("100%"), "分节要给出占已知合计的份额");
+    // 两种"没有"分得清：**真的没跑**说"（无"，**旧报告没记**说"未知"。
+    const emptyRetrievalHtml = renderContextReceiptHtml({
+      sections: [],
+      retrievalObservations: [],
+    });
     assert(
-      renderContextReceiptHtml({ sections: [], retrievalToolNames: [] }).includes(
-        "（无"
-      ),
+      emptyRetrievalHtml.includes("（无") && emptyRetrievalHtml.includes("0 次调用"),
       "没跑任何按需检索时明说无，不显示成未知"
     );
+    assert(
+      renderContextReceiptHtml({ sections: [] }).includes("旧报告没记这一栏"),
+      "旧报告缺这一栏时明说是旧报告没记，不与'没跑检索'混为一谈"
+    );
 
-    // 报告页真的挂了这块（html 报告侧）。
+    // ── **一项都没记 ≠ 0**：旧版回执只记了工具名（次数/字符数全未知）──────
+    // 这是最容易写错的一格：按 `(c ?? 0)` 求和会渲染出"共 0 次调用"，而事实
+    // 是"跑了这两个工具、只是没记次数"——两者读起来正好相反。所以这里钉死：
+    // 全未知时只写"未知"，一个 0 都不许出现。
+    const legacyNamesHtml = renderContextReceiptHtml({
+      sections: [{ id: "roster", chars: 128 }],
+      retrievalToolNames: ["recall", "lookupHistory"],
+    });
+    assert(
+      legacyNamesHtml.includes("recall") && legacyNamesHtml.includes("lookupHistory"),
+      "旧格式的工具名照旧渲染（不能因为没记次数就连名字都不显示）"
+    );
+    assert(
+      !legacyNamesHtml.includes("0 次调用") &&
+        !legacyNamesHtml.includes("共 0 字符") &&
+        legacyNamesHtml.includes("调用次数 未知") &&
+        legacyNamesHtml.includes("不按 0 算"),
+      "次数/字符数全未知时只许写未知，绝不许求和成 0（旧格式回执就吃这一格）"
+    );
+    // 分节那一半同理：全部节都没回报字符数时，合计也不许写成"0 字符"。
+    const allUnknownSections = renderContextReceiptHtml({
+      sections: [
+        { id: "roster", chars: Number.NaN },
+        { id: "house-rules", chars: Number.NaN },
+      ],
+      retrievalObservations: [],
+    });
+    assert(
+      !allUnknownSections.includes("0 字符") &&
+        allUnknownSections.includes("没有一节回报字符数"),
+      "没有一节回报字符数时合计记未知，不写成 0 字符（份额也算不出来）"
+    );
+    // 对照：**部分**已知时下界照给（那是诚实的），别把这条修过头成一律未知。
+    const partialKnown = renderContextReceiptHtml({
+      sections: [{ id: "roster", chars: 128 }],
+      retrievalObservations: [
+        { name: "recall", calls: 2, returnedChars: 640 },
+        { name: "lookupHistory", calls: Number.NaN, returnedChars: Number.NaN },
+      ],
+    });
+    assert(
+      partialKnown.includes("2（部分已知，是下界）") &&
+        partialKnown.includes("640（部分已知，是下界）"),
+      "有已知项时给下界并标'部分已知'——别把全未知的修法套到部分已知上"
+    );
+
+    // 报告页真的挂了这块（html 报告侧）：三块并进同一个面板，报告层不再自己
+    // 分别调渲染器——口径只有一处。
     const reportSrc = readFileSync("scripts/coliving-report.ts", "utf8");
     assert(
-      reportSrc.includes("renderContextReceiptHtml(t.contextReceipt)"),
-      "HTML 报告必须渲染收据块"
+      reportSrc.includes("renderContextEngineeringPanelHtml({") &&
+        reportSrc.includes("contextReceipt: t.contextReceipt,") &&
+        reportSrc.includes("turnLedger: t.turnLedger,"),
+      "HTML 报告必须把提示词组成 / 收据 / 本轮账并进 Context Engineering 面板"
     );
   });
 
@@ -7996,24 +8468,35 @@ async function main() {
       );
       assert(
         turnSrc.includes("...ctx.receipt,") &&
-          turnSrc.includes("retrievalToolNames: retrievalToolNamesUsed(toolsUsed),"),
-        "主生成回执必须来自 buildContext 的分节 + 本轮真跑过的按需检索工具名"
+          turnSrc.includes(
+            "retrievalObservations: retrievalObservationsFrom(retrievalCallFootprints),"
+          ),
+        "主生成回执必须来自 buildContext 的分节 + 本轮真跑过的按需检索足迹"
       );
 
-      // 评测（eval）逐轮记录：契约里有**文档化的可空** ContextReceipt，且只从
-      // 主生成结果的 `last.contextReceipt` 原样带进报告 JSON。
+      // 评测（eval）逐轮记录：契约里有**文档化的可空** ContextReceipt 与逐轮账，
+      // 且只从主生成结果的 `last.contextReceipt` 原样带进报告 JSON。
       const evalSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
       assert(
         evalSrc.includes("contextReceipt: ContextReceipt | null;") &&
           evalSrc.includes("contextReceipt: last.contextReceipt,"),
         "评测逐轮记录必须沿用可空 ContextReceipt，并只从主生成结果带进报告"
       );
+      assert(
+        evalSrc.includes("turnLedger: TurnLedgerSummary | null;") &&
+          evalSrc.includes(
+            "turnLedger: summarizeTurnLedger(ledger.snapshot().generationRecords, i),"
+          ),
+        "评测逐轮记录必须按 turn 标签折出本轮账，而不是另起一套埋点"
+      );
       // 报告：字段**可缺省**（旧报告不展示），原样透传给三态渲染。
       const reportSrc = readFileSync("scripts/coliving-report.ts", "utf8");
       assert(
         /contextReceipt\?: unknown;/.test(reportSrc) &&
-          reportSrc.includes("contextReceipt: t?.contextReceipt,"),
-        "报告契约必须把 ContextReceipt 标成可缺省（旧报告不展示）并原样透传"
+          reportSrc.includes("contextReceipt: t?.contextReceipt,") &&
+          /turnLedger\?: unknown;/.test(reportSrc) &&
+          reportSrc.includes("turnLedger: t?.turnLedger,"),
+        "报告契约必须把 ContextReceipt 与本轮账都标成可缺省（旧报告不展示）并原样透传"
       );
 
       // ── 只可能有安全字段：拿一份**故意塞进正文**的收据归一化 ───────────
@@ -8023,7 +8506,11 @@ async function main() {
           { id: "unknowns", chars: 120, text: SAMPLE_SECRET },
           { id: "now", chars: 42, body: SAMPLE_SECRET },
         ],
-        retrievalToolNames: ["recall", SAMPLE_SECRET, "not-a-tool"],
+        retrievalObservations: [
+          { name: "recall", calls: 1, returnedChars: 88, output: SAMPLE_SECRET },
+          { name: SAMPLE_SECRET, calls: 1, returnedChars: 1 },
+          { name: "not-a-tool", calls: 1, returnedChars: 1 },
+        ],
       });
       assert.ok(safe, "形状认识的收据要归一化");
       assert.deepEqual(
@@ -8035,9 +8522,9 @@ async function main() {
         "归一化后只能留下安全字段 id/chars，正文与额外字段一律丢弃"
       );
       assert.deepEqual(
-        safe.retrievalToolNames,
-        ["recall"],
-        "按需检索工具名只留代码认识的名单，名单外字符串丢弃"
+        safe.retrievalObservations,
+        [{ name: "recall", calls: 1, returnedChars: 88 }],
+        "检索足迹只留代码认识的名单，名单外字符串丢弃"
       );
       assert(
         !JSON.stringify(safe).includes(SAMPLE_SECRET),
@@ -8067,6 +8554,340 @@ async function main() {
       }
     }
   );
+
+  /**
+   * ── 逐轮账：按已有的 turn 标签折，且"没有主生成"与"0"必须分开 ──────────
+   *
+   * 这一栏的用途是让人比较各轮的上下文/生成负担，所以最要紧的不是数字好看，
+   * 而是**三种状态分得清**：
+   *  1. **没有主生成**（功能前门 / 状态机接管 / 未知号码 / 简单肯定短路）→
+   *     `null`。这几条路径里有的确实调了模型（前门路由、写正文），但把它们
+   *     算进"本轮主生成的上下文成本"会直接把结论带偏；
+   *  2. **不可用**（旧报告没这个字段、或这一轮压根没记账）→ 也不出数字；
+   *  3. **真实的 0**（跑过主生成、上游如实回报 0）→ 照实显示 0。
+   *
+   * 判据只看代码写死的 `stage === "main"`，**不靠"这一轮有没有记录"猜**——
+   * 功能前门那一轮是有记录的（路由 + 写正文都带同一个 turn 标签）。
+   * 全程纯函数 + 固定夹具，不接模型、不读数据库、不发任何请求。
+   */
+  check("逐轮账：按 turn 标签折，没有主生成记 null、真 0 才显示 0", () => {
+    const step = (
+      index: number,
+      over: Partial<StepUsageRecord> = {}
+    ): StepUsageRecord => ({
+      index,
+      inputTotalTokens: 1000,
+      inputUncachedTokens: 200,
+      cacheReadTokens: 800,
+      cacheWriteTokens: 0,
+      outputTokens: 50,
+      reasoningTokens: 10,
+      costUsd: 0.001,
+      finishReason: "stop",
+      durationMs: null,
+      providerId: "test-provider",
+      upstreamProviderId: "test-upstream",
+      generationId: "gen-test",
+      requestId: "req-test",
+      ...over,
+    });
+    const gen = (
+      seq: number,
+      stage: string,
+      turnIndex: number | null,
+      over: Partial<GenerationRecord> = {}
+    ): GenerationRecord => ({
+      seq,
+      runId: "run-test",
+      scenarioId: "scenario-test",
+      turnIndex,
+      stage,
+      modelId: "test-model",
+      operationKind: "text-generation",
+      status: "completed",
+      steps: [step(0)],
+      completedSteps: 1,
+      knownCostUsd: 0.001,
+      unknownCostSteps: 0,
+      unknownCost: false,
+      durationMs: 12,
+      transportAttempts: null,
+      transportObservability: "不可观测",
+      ...over,
+    });
+    /**
+     * 第 1 轮（turnIndex 0）：主生成（两步：一次工具往返）×1 + 兜底补回复 ×1
+     * + 工具里触发的向量化 ×1。**三种 stage 都带同一个轮标签**，所以"本轮
+     * generation 数"本来就不等于"主生成数"。
+     */
+    const records: GenerationRecord[] = [
+      // 第 2 轮：功能前门只调了路由与写正文，**没有主生成**。
+      gen(0, "feature:route", 1),
+      gen(1, "feature:qa", 1),
+      gen(2, "main", 0, { steps: [step(0), step(1)], completedSteps: 2 }),
+      gen(3, "forced-sendReply", 0, {
+        steps: [],
+        completedSteps: 0,
+        knownCostUsd: 0,
+      }),
+      gen(4, "embed", 0, {
+        operationKind: "embedding",
+        steps: [],
+        completedSteps: 0,
+        knownCostUsd: 0,
+      }),
+      // 第 4 轮：跑了主生成，但上游没回报 token 与金额。
+      gen(5, "main", 3, {
+        steps: [step(0, { inputTotalTokens: null, costUsd: null })],
+        knownCostUsd: 0,
+        unknownCostSteps: 1,
+        unknownCost: true,
+      }),
+      // judge 跑在轮外、不带轮标签 → 不属于任何一轮。
+      gen(6, "judge", null, { knownCostUsd: 0.5 }),
+    ];
+
+    const turn0 = summarizeTurnLedger(records, 0);
+    assert.ok(turn0, "第 1 轮有主生成 → 必须有账");
+    assert.equal(turn0.mainGenerations, 1, "只数 stage=main 的那条");
+    assert.equal(
+      turn0.generations,
+      3,
+      "本轮 generation 含兜底补回复与工具内向量化（不是只有主生成）"
+    );
+    assert.equal(turn0.completedSteps, 2, "step 数按本轮所有 generation 累加");
+    assert.equal(turn0.tokens.inputTotalTokens.known, 2000, "token 按已知项求和");
+    assert.equal(turn0.tokens.inputTotalTokens.hasUnknown, false, "全部回报 → 完整");
+    assert.equal(
+      turn0.knownCostUsd,
+      0.001,
+      "金额按本轮已知项求和（兜底补回复与向量化在这里没花钱）"
+    );
+    assert.equal(
+      turn0.tokens.cacheReadTokens.known,
+      1600,
+      "缓存读 token 同样按本轮累加（这一步决定优化该不该动缓存断点）"
+    );
+
+    // 功能前门那一轮：有记录、也有花掉的钱，但**没有任何主生成** → null。
+    // 这里绝不能返回一个 `generations: 2` 的"账"，那会被读成"这轮主生成很便宜"。
+    assert.equal(
+      summarizeTurnLedger(records, 1),
+      null,
+      "只有功能前门路由/写正文的轮次没有主生成账（不是 0）"
+    );
+    // 压根没调模型的轮次（未知号码 / 短路 / 状态机接管）同样 null。
+    assert.equal(summarizeTurnLedger(records, 2), null, "没有记录 → 没有这一层");
+    // judge 不带轮标签，不会漏进任何一轮（也不该给它编一个轮号）。
+    assert.equal(summarizeTurnLedger(records, 6), null, "轮外调用不属于任何一轮");
+
+    // 上游没回报 token / 金额的那一轮：账在，但每一栏都标"部分已知"。
+    const turn3 = summarizeTurnLedger(records, 3);
+    assert.ok(turn3, "有主生成 → 有账，哪怕回报不全");
+    assert.equal(turn3.tokens.inputTotalTokens.hasUnknown, true, "未回报 → 标未知");
+    assert.equal(
+      turn3.tokens.outputTokens.known,
+      50,
+      "同类 token 里已知的那部分照样求和"
+    );
+    assert.equal(turn3.unknownCostGenerations, 1, "未知花费的 generation 要计数");
+
+    // ── 三态渲染：缺席 / null / 真 0 各说各的 ──────────────────────────
+    assert.equal(renderTurnLedgerHtml(undefined), "", "旧报告不渲染本轮账");
+    const noMain = renderTurnLedgerHtml(null);
+    assert(
+      noMain.includes("没有主生成账") && !noMain.includes("$0.000000"),
+      "null 必须明说没有主生成账，绝不能渲染成 $0.000000"
+    );
+    assert.equal(
+      normalizeTurnLedgerSummary(undefined),
+      undefined,
+      "字段缺席 = 旧报告，不展示"
+    );
+    assert.equal(normalizeTurnLedgerSummary(null), null, "null = 没有主生成");
+    assert.equal(
+      normalizeTurnLedgerSummary("不是对象"),
+      undefined,
+      "形状不认识 → 不渲染，避免把别的东西当成账"
+    );
+    // 已知金额这一栏没记（null）时不能借 0 显示成"没花钱"。
+    const noCost = renderTurnLedgerHtml({
+      generations: 1,
+      mainGenerations: 1,
+      completedSteps: 1,
+      tokens: {},
+      knownCostUsd: null,
+      unknownCostGenerations: null,
+    });
+    assert(
+      noCost.includes("未知") && !noCost.includes("$0.000000"),
+      "金额没记 → 未知，不许补成 $0.000000"
+    );
+    // 真实的 0 照实显示 0，且不误标"未知"。
+    const realZero = renderTurnLedgerHtml({
+      generations: 1,
+      mainGenerations: 1,
+      completedSteps: 1,
+      tokens: { outputTokens: { known: 0, hasUnknown: false } },
+      knownCostUsd: 0,
+      unknownCostGenerations: 0,
+    });
+    assert(
+      realZero.includes("$0.000000") && !realZero.includes("下界"),
+      "真 0 就显示 $0.000000（这是唯一该出现它的情形），也不误标成下界"
+    );
+    // 坏值（NaN / 负数 / 字符串）一律记未知，不渲染出 NaN。
+    const dirty = renderTurnLedgerHtml({
+      generations: Number.NaN,
+      mainGenerations: -1,
+      completedSteps: "3",
+      tokens: { cacheReadTokens: Number.POSITIVE_INFINITY },
+      knownCostUsd: Number.NaN,
+      unknownCostGenerations: -2,
+    });
+    assert(
+      !dirty.includes("NaN") && !dirty.includes("undefined"),
+      "坏字段只能渲染成未知，不许出现 NaN / undefined"
+    );
+
+    // ── 面板：三块并排，全缺席时明说是旧格式报告 ──────────────────────
+    const legacy = renderContextEngineeringPanelHtml({});
+    assert(
+      legacy.includes("旧格式报告") && legacy.includes("缺席"),
+      "三块都缺席时明说是旧格式报告，不空白、也不当成 0"
+    );
+    const panel = renderContextEngineeringPanelHtml({
+      promptComposition: {
+        doctrineChars: 100,
+        runtimeChars: 50,
+        systemChars: 150,
+        moduleIds: [],
+        toolNames: [],
+        toolCount: 0,
+      },
+      contextReceipt: {
+        sections: [{ id: "roster", chars: 128 }],
+        retrievalObservations: [
+          { name: "recall", calls: 1, returnedChars: 640 },
+        ],
+      },
+      turnLedger: turn0,
+    });
+    for (const piece of ["recall", "640 字符", "roster", "本轮已知花费"]) {
+      assert(
+        panel.includes(piece),
+        `面板必须把三块观测并在一起（缺了：${piece}）`
+      );
+    }
+    assert(
+      panel.includes("不做正确性判断") || panel.includes("不构成"),
+      "面板必须明说这只是观测，不做正确性判断、不构成改动依据"
+    );
+    assert(
+      renderContextEngineeringPanelHtml({
+        promptComposition: undefined,
+        contextReceipt: undefined,
+        turnLedger: turn0,
+      }).includes("本轮已知花费"),
+      "只有本轮账有值时照样渲染，其余两块缺席不影响"
+    );
+  });
+
+  /**
+   * ── 观测只进评测报告：生产持久化层一个字都不认识它们 ────────────────────
+   *
+   * 这份观测的存在理由就是"让人在评测报告里解释成本"，所以它**不许**变成
+   * 生产数据：不落库、不进生产日志、不进住户可见文本、不参与决策。这条用
+   * 两道独立的结构性证据钉死：
+   *  1. **形状模块零 import**：`context-receipt.ts` 连一行 import 都没有，
+   *     结构上碰不到数据库、模型、出站；
+   *  2. **引用面白名单**：源码根（`lib/` / `scripts/` / `app/` / `components/`，
+   *     `lib/db` 就在其中）里提到这些观测字段名的文件，只能是我逐个审过的
+   *     那几个——运行时装配 + 评测脚本 + 报告渲染，**没有任何持久化 / 路由 /
+   *     出站模块**。报告产物目录（`reports/`、`tests/coliving-eval/reports/`）
+   *     不在扫描范围内：那是这份观测**该**出现的地方，不在"生产引用面"里。
+   */
+  check("逐轮观测不落生产：形状模块零 import，引用面只有白名单那几个文件", () => {
+    const RECEIPT_MODULE = path.join(
+      "lib",
+      "chat",
+      "coliving",
+      "context-receipt.ts"
+    );
+    const receiptSrc = readFileSync(RECEIPT_MODULE, "utf8");
+    const importLines = receiptSrc
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^import\b/.test(line) || /^} from /.test(line));
+    assert.deepEqual(
+      importLines,
+      [],
+      "context-receipt.ts 必须零 import（纯形状 + 纯函数），结构上碰不到数据库/模型"
+    );
+
+    // 只扫源码根：排除报告产物、依赖、构建产物与其它 worktree。
+    const SKIP_DIRS = new Set([
+      "node_modules",
+      ".next",
+      "dist",
+      "build",
+      "coverage",
+      "reports",
+    ]);
+    const SEARCHED_EXT = /\.(ts|tsx|js|mjs|cjs|sql)$/;
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name.startsWith(".")) continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (SKIP_DIRS.has(e.name)) continue;
+          walk(p);
+        } else if (SEARCHED_EXT.test(e.name)) {
+          files.push(path.normalize(p));
+        }
+      }
+    };
+    for (const root of ["lib", "scripts", "app", "components"]) {
+      if (existsSync(root)) walk(root);
+    }
+    assert.ok(files.length > 0, "源码扫描必须真的扫到文件（否则这条检查是空转）");
+
+    const FIELD_NAMES = [
+      "retrievalObservations",
+      "retrievalToolNames",
+      "turnLedger",
+      "TurnLedgerSummary",
+      "summarizeTurnLedger",
+    ];
+    // 白名单 = 形状定义 + 运行时装配 + 评测 runner + 报告渲染 + 这份检查本身。
+    const ALLOWED = new Set(
+      [
+        RECEIPT_MODULE,
+        path.join("lib", "chat", "coliving", "turn.ts"),
+        path.join("lib", "chat", "coliving", "ledger-report.ts"),
+        path.join("scripts", "coliving-eval.ts"),
+        path.join("scripts", "coliving-report.ts"),
+        path.join("scripts", "coliving-quality-inspect.ts"),
+      ].map((f) => path.normalize(f))
+    );
+    const referencing = files.filter((f) => {
+      const src = readFileSync(f, "utf8");
+      return FIELD_NAMES.some((name) => src.includes(name));
+    });
+    const unexpected = referencing.filter((f) => !ALLOWED.has(f));
+    assert.deepEqual(
+      unexpected,
+      [],
+      `这些观测字段只许出现在白名单文件里，多出来的引用面要逐个审：${unexpected.join(", ")}`
+    );
+    // 白名单必须逐条对上：少一条说明这套观测已经从某个环节掉了（白名单变摆设）。
+    assert.deepEqual(
+      [...ALLOWED].filter((f) => !referencing.includes(f)),
+      [],
+      "白名单里每个文件都必须真的在引用这套观测"
+    );
+  });
 
   /**
    * ── outreach.ts 的裸 generateText 不在评测路径上 ───────────────────────

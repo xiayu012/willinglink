@@ -18,12 +18,13 @@
  *   这是审稿系统真的起作用的证据，用户要能直接看到，不能藏起来。
  * - **judge 的问题锚定到轮次里**：写在对应那一轮下面，而不是堆在场景末尾。
  *   评语离原话越近，越容易判断这条评语本身是不是对的。
- * - **提示词组成单独成一个观测块**：每轮显示 doctrine/runtime/system 字符数、
- *   已加载模块 id 与主生成暴露的工具名，并明说"只用于解释、单独不构成删
- *   doctrine 的依据"。旧报告没这个字段就不显示，不补 0、不显示 NaN。
- * - **上下文回执单独成一个观测块**：每轮显示运行时上下文由哪些稳定分节拼成、
- *   各占多少字符，以及本轮真跑过哪几类按需检索工具——**只有名字和数字**，
- *   没有正文。旧报告没这个字段就不显示。
+ * - **每轮的 Context Engineering 观测并成一块**：提示词组成（doctrine/runtime/
+ *   system 字符数、已加载模块 id、暴露的工具名）、上下文回执（运行时上下文由
+ *   哪些稳定分节拼成、各占多少、份额多少）、按需检索足迹（工具名 / 调用次数 /
+ *   返回字符数）、以及本轮主生成的账（generation/step 数与 token）——**全部只有
+ *   名字和数字，没有任何正文**。三块各自三态：旧报告没这个字段就不显示、
+ *   `null` 明说"没有这一层"、真 0 才显示 0；并明说这只是观测，单独不构成删
+ *   doctrine / 增删工具的依据，也不做正确性判断、不触发告警。
  * - **失败的排前面、默认展开；通过的折叠**：用户时间宝贵，先看有问题的。
  * - 纯字符串拼 HTML，不引模板引擎；CSS 内联、不引外部字体/CDN，
  *   一个文件双击就能看，也不会被 CSP 拦。
@@ -34,9 +35,8 @@ import path from "node:path";
 // 计费面板是**纯函数模块**（只用 `import type` 引 gateway-ledger，运行时不
 // 依赖 server-only 的台账），所以普通 tsx 脚本也能安全 import。
 import {
-  renderContextReceiptHtml,
+  renderContextEngineeringPanelHtml,
   renderLedgerPanelHtml,
-  renderPromptCompositionHtml,
 } from "../lib/chat/coliving/ledger-report";
 import type { LedgerSnapshot } from "../lib/chat/coliving/gateway-ledger";
 
@@ -60,12 +60,20 @@ type TurnRecord = {
    */
   promptComposition?: unknown;
   /**
-   * 上下文回执（只记分节 id / 字符数与**本轮真跑过的按需检索工具名**，不含
-   * 任何正文），由 coliving-eval 写入。**可选**：旧报告没有这个字段 → 不展示；
-   * `null` = 本轮没构建上下文。渲染前一律走 `normalizeContextReceipt` 防御：
-   * 坏节丢弃、坏字符数显示"未知"、名单外的工具名不渲染。
+   * 上下文回执（只记分节 id / 字符数与**本轮真跑过的按需检索工具名、次数、
+   * 返回字符数**，不含任何正文），由 coliving-eval 写入。**可选**：旧报告没有
+   * 这个字段 → 不展示；`null` = 本轮没构建上下文。渲染前一律走
+   * `normalizeContextReceipt` 防御：坏节丢弃、坏字符数显示"未知"、名单外的
+   * 工具名不渲染。
    */
   contextReceipt?: unknown;
+  /**
+   * 本轮主生成的账（只记 generation/step 数与 token，不含任何提示词正文），
+   * 由 coliving-eval 从**已有的**台账标签折出来。**可选**：旧报告没有这个字段
+   * → 不展示；`null` = 本轮没有主生成（**不是"花了 0"**）。渲染前走
+   * `normalizeTurnLedgerSummary` 防御。
+   */
+  turnLedger?: unknown;
 };
 
 type JudgeFinding = {
@@ -181,12 +189,11 @@ function loadReport(file: string): ScenarioResult[] {
         said: t?.said ?? "",
         reply: t?.reply ?? "",
         toolsUsed: Array.isArray(t?.toolsUsed) ? t.toolsUsed : [],
-        // 观测字段原样透传，由 renderPromptCompositionHtml 自己兼容三态
-        // （缺席=旧报告不展示 / null=本轮没走模型 / 对象=归一化展示）。
+        // 三块观测字段原样透传，由 renderContextEngineeringPanelHtml 里的
+        // 各自渲染器兼容三态（缺席=旧报告不展示 / null=没有这一层 / 对象=归一化展示）。
         promptComposition: t?.promptComposition,
-        // 收据同样原样透传，由 renderContextReceiptHtml 兼容三态
-        // （缺席=旧报告不展示 / null=本轮没走主提示词 / 对象=归一化展示）。
         contextReceipt: t?.contextReceipt,
+        turnLedger: t?.turnLedger,
         outbound: Array.isArray(t?.outbound)
           ? t.outbound.map((m) => ({
               toName: m?.toName ?? "（未知）",
@@ -340,8 +347,11 @@ function renderTurn(t: TurnRecord, index: number, findings: JudgeFinding[]): str
       ${said}
       ${reply}
       ${outbound}
-      ${renderPromptCompositionHtml(t.promptComposition)}
-      ${renderContextReceiptHtml(t.contextReceipt)}
+      ${renderContextEngineeringPanelHtml({
+        promptComposition: t.promptComposition,
+        contextReceipt: t.contextReceipt,
+        turnLedger: t.turnLedger,
+      })}
       ${findingsHtml}
     </div>`;
 }
@@ -706,6 +716,29 @@ h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
 .cost-table th { color: var(--muted); font-weight: 600; }
 .cost-table.wide { display: block; overflow-x: auto; }
 .cost-sub { font-weight: 600; color: var(--muted); margin-top: 10px; }
+
+/* ── 逐轮 Context Engineering 面板（三块观测并排看） ── */
+.ce-panel {
+  margin: 10px 0 14px; padding: 10px 12px; font-size: 13px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+}
+.ce-title { font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+.ce-panel .cost > summary { border-top: 0; }
+.ce-panel .cost:last-of-type { margin-bottom: 0; }
+/* 分节 / 检索行的三列：名字、数字、份额（或字符数） */
+.ctx-sections {
+  list-style: none; margin: 8px 0 0; padding: 0; font-size: 12.5px;
+}
+.ctx-sections li {
+  display: grid; grid-template-columns: minmax(120px, 1fr) auto minmax(64px, auto);
+  gap: 4px 12px; padding: 2px 0; border-bottom: 1px solid var(--border);
+}
+.ctx-sections li:last-child { border-bottom: 0; }
+.ctx-sections .ck { color: var(--muted); word-break: break-word; }
+.ctx-sections .cv, .ctx-sections .cs {
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+.ctx-sections .cs { color: var(--muted); min-width: 56px; }
 
 @media (max-width: 640px) {
   .bubble { max-width: 92%; }

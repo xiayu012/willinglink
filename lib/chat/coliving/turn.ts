@@ -7,8 +7,11 @@ import { assembleSystemPrompt } from "@/lib/ai/brains";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { buildContext } from "./context";
 import {
-  retrievalToolNamesUsed,
+  isContextRetrievalToolName,
+  retrievalObservationsFrom,
+  returnedCharsOf,
   type ContextReceipt,
+  type RetrievalToolCall,
 } from "./context-receipt";
 import { kitchenEveningWindow } from "./coordination-bridge";
 import { advanceCoordinationSession } from "./coordination-session";
@@ -1098,10 +1101,11 @@ export type TurnOutcome = {
    */
   promptComposition: PromptComposition | null;
   /**
-   * 本轮上下文的**回执**（只记分节 id / 字符数与按需检索工具名，不记正文），
-   * 见 `context-receipt.ts` 的 `ContextReceipt`。与 `promptComposition` 同一批
-   * 返回点、同一条纪律：**只在主提示词真正跑起来的那条路径上有值**（上下文就是
-   * 那时构建的，模型调了哪些工具也是那时才知道）；其余路径显式 `null`——那几个
+   * 本轮上下文的**回执**（只记分节 id / 字符数，以及本轮按需检索工具的
+   * 名字 / 次数 / 返回字符数，不记正文），见 `context-receipt.ts` 的
+   * `ContextReceipt`。与 `promptComposition` 同一批返回点、同一条纪律：
+   * **只在主提示词真正跑起来的那条路径上有值**（上下文就是那时构建的，模型调了
+   * 哪些工具、拉回多少东西也是那时才知道）；其余路径显式 `null`——那几个
    * "没构建上下文"的轮次不是"0 个分节"。
    */
   contextReceipt: ContextReceipt | null;
@@ -3971,9 +3975,41 @@ export async function runColivingTurn(args: {
     ...evalMaxOutputTokensOption(),
   }));
 
+  /**
+   * 本轮**按需检索工具**的调用足迹（名字 + 已经折好的字符数），只喂给上下文回执：
+   * 次数与 `toolsUsed` 同源（名单里的工具按"调了一次"算，哪怕没拿到返回也算）。
+   *
+   * 返回内容**拿到的那一刻就折成数字**（`returnedCharsOf`），随后只把数字放进
+   * 这个数组——数组里从头到尾没有承载正文/入参的字段，连"读完还留着引用"的
+   * 窗口都不存在（见 `context-receipt.ts` 的 `RetrievalToolCall`）。
+   *
+   * 按 `toolCallId` 配对，不用数组下标：工具抛错时 `toolResults` 里可能整条缺席，
+   * 下标配对会把后面每一次调用的返回都错位到别人头上，数出来的字符数就是假的。
+   *
+   * **只折名单里的工具**：回执渲染层最后只认 `CONTEXT_RETRIEVAL_TOOL_NAMES` 那几类
+   * （`retrievalObservationsFrom`），名单外的调用（decide / sendReply / contactPerson
+   * 这些每轮都跑的）折出来也会被整条丢掉。这不是推测：corpus-045 那份评测报告里四轮
+   * 共 25+ 次工具调用只有 2 次是检索工具，其余每次都白走一遍返回结构。配对表也因此
+   * 只在真出现检索工具时才建。次数口径不变——检索工具照旧"调一次记一次"。
+   */
+  const retrievalCallFootprints: RetrievalToolCall[] = [];
   for (const step of result.steps) {
+    let outputByCallId: Map<string, unknown> | null = null;
     for (const call of step.toolCalls ?? []) {
       toolsUsed.push(call.toolName);
+      if (!isContextRetrievalToolName(call.toolName)) continue;
+      if (!outputByCallId) {
+        outputByCallId = new Map<string, unknown>();
+        for (const toolResult of step.toolResults ?? []) {
+          outputByCallId.set(toolResult.toolCallId, toolResult.output);
+        }
+      }
+      // 没拿到返回 → undefined → 这次调用记"字符数未知"，不是 0。
+      const output = outputByCallId.get(call.toolCallId);
+      retrievalCallFootprints.push({
+        name: call.toolName,
+        chars: output === undefined ? null : returnedCharsOf(output),
+      });
     }
   }
 
@@ -4028,9 +4064,22 @@ export async function runColivingTurn(args: {
       // 安全网确实兜住了、消息也送达了，但事后完全看不出这一轮其实是
       // 靠安全网兜住的，会掩盖"主生成为什么没能正常交付"这条排查线索
       // （这个会话反复靠 toolsUsed 诊断问题，这是真实存在的盲区）。
+      // 回执也照同一口径收：这条兜底路径只摆 `sendReply`，名单里的按需检索工具
+      // 本来不可能出现在这里；但既然 `toolsUsed` 算了它，次数就该同源，
+      // 以后万一这里摆了别的工具也不会出现"工具有、回执没有"的口径分叉。
       for (const step of forced.steps) {
+        let outputByCallId: Map<string, unknown> | null = null;
         for (const call of step.toolCalls ?? []) {
           toolsUsed.push(call.toolName);
+          if (!isContextRetrievalToolName(call.toolName)) continue;
+          outputByCallId ??= new Map(
+            (step.toolResults ?? []).map((r) => [r.toolCallId, r.output])
+          );
+          const output = outputByCallId.get(call.toolCallId);
+          retrievalCallFootprints.push({
+            name: call.toolName,
+            chars: output === undefined ? null : returnedCharsOf(output),
+          });
         }
       }
       raw = deliveredReply ?? "";
@@ -4387,12 +4436,12 @@ export async function runColivingTurn(args: {
       toolCount: exposedToolNames.length,
     },
     // 上下文就是这条路径上构建的：分节与上面那份 runtime 同源，只记 id 与字符数。
-    // 按需检索工具名在这里补上——`buildContext` 那一刻还不知道模型会调什么；
-    // 只从 `toolsUsed` 里挑出**代码写死名单里的**那几类，纯名字、去重、顺序稳定，
-    // 查询参数与工具返回正文一概不进回执。
+    // 按需检索观测在这里补上——`buildContext` 那一刻还不知道模型会调什么；
+    // 只从**代码写死名单里的**那几类工具折出「名字 + 次数 + 返回字符数」，
+    // 查询参数与工具返回正文一概不进回执（见 context-receipt.ts 的同名说明）。
     contextReceipt: {
       ...ctx.receipt,
-      retrievalToolNames: retrievalToolNamesUsed(toolsUsed),
+      retrievalObservations: retrievalObservationsFrom(retrievalCallFootprints),
     },
     toolsUsed,
     unknownSender: false,
