@@ -27,6 +27,9 @@ import { embedOne } from "./embedding";
 import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
 import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
+import { HISTORY_BUDGET, planHistory } from "./history-policy";
+import { decideLanguage, observeLanguage } from "./language";
+import { scheduleAffirmationReply } from "./schedule-affirmation";
 import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
 import { deliverSms, resolveNamedRecipient, smsDeliveryDeps } from "./sms-delivery";
@@ -1849,6 +1852,20 @@ export async function runColivingTurn(args: {
   const history = await repo.getRecentTurns(conversationId);
 
   /**
+   * **轮次语言判定的唯一一次判定**（`language.ts` 的 `decideLanguage`）。
+   *
+   * 判在这里、判一次，往下**当一个值传**：主生成（`buildContext` 的语言硬指令）、
+   * 功能前门（路由 / 抽取 / 生成 / 黑名单与保留轮的代码回复）、功能问答（正文上限、
+   * 模型指令、兜底）都读同一个判定。原话能定就按原话；中英混写、只有数字 / 名字 /
+   * 一个 "ok" 这类定不了的原话，回退读**同一条会话线上最近的**那一条；都读不出来才
+   * 用默认中文（与加这个闸之前逐字一致）。
+   *
+   * 各下游**不许再各写一套正则**重推语言（`reply-only.ts` 曾经自己写过一个汉字正则，
+   * 就是这条纪律的反例），否则同一轮里两处判定会各说各话。
+   */
+  const language = decideLanguage(args.text, history);
+
+  /**
    * coordination 实时旁路（shadow，默认关闭）：真实短信照常由下面现有 AI 流程
    * 处理并回复，这里只在后台用 coordination 状态机把这条消息跟一遍，结果只
    * `console.log` 打印，不改变 `reply`/`outbound`/任何生产返回值。只读位置，
@@ -1967,9 +1984,10 @@ export async function runColivingTurn(args: {
    */
   if (isSimpleAffirmation(args.text) && isScheduleSlotInquiry(answering)) {
     const slot = answering ? extractSlotFromInquiry(answering.body) : null;
-    const shortReply = slot
-      ? `好，${slot} 就定给你了。`
-      : `好，时段定了，按这个来。`;
+    // **这一句是代码写的，所以它必须自己跟语言闸**：模型在这条路径上根本没被
+    // 调用（准则管不到一句不会被生成的正文），住户通篇英文、回一个 "ok" 时就
+    // 会收到一句中文。语言判定就在上面、判过一次，这里只读它。
+    const shortReply = scheduleAffirmationReply(slot, language.language);
 
     // 落库与正常回合一致：先把住户这句话作为入站消息写下，再 linkResponse
     // 把它关联回它正在回答的那条征询——这也是「谁确认过哪段」持久事实的
@@ -2045,7 +2063,7 @@ export async function runColivingTurn(args: {
   const ctx = await buildContext(sender, channel, {
     justJoined: history.length === 0,
     answering,
-    incomingText: args.text,
+    language,
   });
 
   /**
@@ -2123,7 +2141,7 @@ export async function runColivingTurn(args: {
         senderIsTest: sender.isTest,
       },
       { llm: featureLlm, delivery: smsDeliveryDeps },
-      { grantedFeatureIds }
+      { grantedFeatureIds, language }
     );
     // 先把路由/抽取/生成已花的钱记进本轮，再决定是收工还是落回主生成。
     frontDoorUsage = addFeatureUsage(frontDoorUsage, featureRun.usage);
@@ -2198,6 +2216,9 @@ export async function runColivingTurn(args: {
       text: args.text,
       openFeatures: APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label })),
       referencedBlacklistedId: blacklistRef?.capabilityId ?? null,
+      // 与主生成、功能前门共用同一次轮次判定：住户用英文问「What does this AI do?」
+      // 时正文上限、模型指令与兜底都说英文，中文问句的口径一字不动。
+      language,
       llm: productionFeatureLlm(modelId),
     });
     if (qa) {
@@ -3941,6 +3962,25 @@ export async function runColivingTurn(args: {
   const exposedToolNames = Object.keys(activeTools);
 
   /**
+   * **对话历史的有界化**（`history-policy.ts`，纯函数、零模型调用）。
+   *
+   * `repo.getRecentTurns` 只按**条数**取最近 8 条，没有任何**体量**上限；而这条
+   * 消息数组在带工具的一轮里**每一步都会被整条重发**，历史那一段的重量因此被步数
+   * 放大。政策给它补上字符预算，并且**只从最旧那头丢**——最新的一两条一定留下，
+   * 否则模型会把上一轮已经问过、已经答过的事再问一遍。
+   *
+   * **结构化运行时事实不在这里的射程内**：未结的事 / 现行规则 / 在等谁回话
+   * 由 `buildContext` 拼进 `runtime`，压根不经过这个函数的入参，结构上就删不掉
+   * （见 `history-policy.ts` 的「不做」一节）。下面的 `historyPlan` 同时进上下文
+   * 回执，让"历史这段到底多重"在评测报告里第一次可见。
+   *
+   * 三条旁路（coordination shadow / replace / 共同规则协商）读的仍是原样 `history`：
+   * 它们各自有自己的输入契约，这条政策只针对**主生成的消息数组**。
+   */
+  const historyPlan = planHistory(history, HISTORY_BUDGET);
+  const boundedHistory = historyPlan.kept;
+
+  /**
    * 系统提示词拆成两条，**缓存断点卡在中间**。
    *
    * 这是本模块最大的一笔省钱：带工具的一轮对话不是一次调用，而是每调一次工具
@@ -3960,7 +4000,7 @@ export async function runColivingTurn(args: {
       runtime,
       guidance: args.guidance,
     }),
-    messages: [...history, { role: "user" as const, content: args.text }],
+    messages: [...boundedHistory, { role: "user" as const, content: args.text }],
     tools: activeTools,
     // 交付了正文就收工；没交付则最多跑到步数上限
     stopWhen: [hasToolCall("sendReply"), stepCountIs(MAX_STEPS)],
@@ -4046,7 +4086,9 @@ export async function runColivingTurn(args: {
           guidance: args.guidance,
         }),
         messages: [
-          ...history,
+          // 与主生成读同一份有界历史：这条兜底路径重发的是同一段前缀，
+          // 两处口径不一致会让"这一轮模型到底看到了多少历史"没法回答。
+          ...boundedHistory,
           { role: "user" as const, content: args.text },
           ...result.response.messages,
           {
@@ -4122,9 +4164,9 @@ export async function runColivingTurn(args: {
     isScheduleSlotInquiry(answeringCtx)
   ) {
     const slot = answeringCtx ? extractSlotFromInquiry(answeringCtx.body) : null;
-    simpleScheduleConfirmationText = slot
-      ? `好，${slot} 就定给你了。`
-      : `好，时段定了，按这个来。`;
+    // 与上方短路闸、下方最终落锤读**同一个**轮次语言判定：这三处是同一句话，
+    // 各自拿文本现推就会出现"早返回说英文、终稿覆盖回中文"这种自相矛盾。
+    simpleScheduleConfirmationText = scheduleAffirmationReply(slot, language.language);
     reply = simpleScheduleConfirmationText;
     simpleScheduleAffirmation = true;
   }
@@ -4442,6 +4484,17 @@ export async function runColivingTurn(args: {
     contextReceipt: {
       ...ctx.receipt,
       retrievalObservations: retrievalObservationsFrom(retrievalCallFootprints),
+      // 语言判定与历史有界化都是**这一轮怎么装上下文**的一部分，与分节/检索足迹
+      // 落在同一份回执里：只记判定、来源、条数与字符数，**没有任何正文**
+      // （形状见 `context-receipt.ts`，隐私边界由那里的结构检查守着）。
+      language: observeLanguage(language),
+      history: {
+        consideredTurns: historyPlan.consideredTurns,
+        keptTurns: historyPlan.keptTurns,
+        droppedTurns: historyPlan.droppedTurns,
+        keptChars: historyPlan.keptChars,
+        droppedChars: historyPlan.droppedChars,
+      },
     },
     toolsUsed,
     unknownSender: false,

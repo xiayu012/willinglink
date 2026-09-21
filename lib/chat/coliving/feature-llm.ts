@@ -4,7 +4,11 @@ import { NoOutputGeneratedError, generateText } from "ai";
 import type { z } from "zod";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { trackedGatewayCall } from "./gateway-ledger";
-import { residentLanguageInstruction } from "./language";
+import {
+  languageInstruction,
+  residentLanguageInstruction,
+  type LanguageDecision,
+} from "./language";
 
 /**
  * **功能入口内部那几次模型调用的公共管道——纯代码，不定义功能、不管边界。**
@@ -141,6 +145,16 @@ export type FeatureCallBase = {
    * 生成一条短信加一句回执），不给上限就可能被 provider 默认值放大成大段输出。
    */
   maxOutputTokens: number;
+  /**
+   * 本轮住户语言判定（`language.ts` 的 `decideLanguage`）。**给了就用它**。
+   *
+   * 为什么必须能显式传：这里的语言指令原先一律从 `call.user` 现推，而
+   * `<id>:compose` 那一步的 `call.user` **不是住户原话**，是 `composeUser(...)`
+   * 拼出来的**中文字段清单**（`收件人：…／涉及的物品：…`）。于是住户用英文交办时，
+   * 生成正文那一步拿到的语言指令反而是中文——快路径正文的语言从源头就是错的。
+   * 轮次判定必须**从外面传进来**，不能在这里由 `user` 反推。
+   */
+  language?: LanguageDecision;
 };
 
 /**
@@ -314,7 +328,15 @@ async function runFeatureGeneration(
         // Every short feature path (route, extraction, reply-only, and feature
         // Q&A) shares this boundary. The router returns a token, while any
         // resident-facing JSON strings must follow the resident's language.
-        system: `${call.system}\n\n${residentLanguageInstruction(call.user)}`,
+        //
+        // 语言取**轮次判定**（`call.language`），只有在调用方没给的时候才退回
+        // 从 `call.user` 现推——那条退路对 `:compose` 是错的（`user` 是拼出来的
+        // 中文字段清单，不是住户原话），只为兼容还没接上判定的旧调用而留。
+        system: `${call.system}\n\n${
+          call.language
+            ? languageInstruction(call.language)
+            : residentLanguageInstruction(call.user)
+        }`,
         prompt: call.user,
         ...rec.stepOptions,
         onStepFinish: (step) => {

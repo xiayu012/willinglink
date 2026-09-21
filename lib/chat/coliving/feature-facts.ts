@@ -30,7 +30,8 @@ import {
  * grounding 用）。以后新增 / 改写：只改 `blacklist.ts` 的数据与 `APPROVED_FEATURES`
  * 登记，问答引擎一行不动。
  *
- * 本文件只 import 同目录的 `blacklist.ts`（后者不 import 任何东西），不会成环。
+ * 本文件只 import 同目录的 `blacklist.ts`（后者只对本目录的 `language.ts` 做
+ * **纯类型**导入，运行时不产生 require），不会成环。
  */
 
 /** 两项专门优化功能的统一说明（正文只用 label，不暴露内部机制）。 */

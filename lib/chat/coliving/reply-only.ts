@@ -7,6 +7,7 @@ import {
   type FeatureLlm,
   type FeatureUsage,
 } from "./feature-llm";
+import type { LanguageDecision, ResidentLanguage } from "./language";
 
 /**
  * **保留对话轮（reply_only）的小回复生成——不是功能、不是工具、不出站。**
@@ -35,10 +36,17 @@ export const REPLY_ONLY_NAME = "feature_reply_only";
 export const REPLY_ONLY_FALLBACK =
   "好，这一轮我先不替你发出去，你想好了再跟我说。";
 
-export function replyOnlyFallback(text: string): string {
-  return /[\u3400-\u9fff]/.test(text)
-    ? REPLY_ONLY_FALLBACK
-    : "Okay — I won't send anything this turn. Let me know once you've decided.";
+/** 同一句兜底的英文写法（事实与中文版一字不差，只是换一种语言说）。 */
+export const REPLY_ONLY_FALLBACK_EN =
+  "Okay — I won't send anything this turn. Let me know once you've decided.";
+
+/**
+ * 哪一句兜底：按**本轮语言判定**（`language.ts`）取，不在这里另写一套汉字正则——
+ * 判定的依据是轮次（原话 + 会话回退），只看这一句文本会在中英混写 / 只回一个 "ok"
+ * 时算错。缺省按中文，与加语言闸之前逐字一致。
+ */
+export function replyOnlyFallback(language: ResidentLanguage = "zh"): string {
+  return language === "en" ? REPLY_ONLY_FALLBACK_EN : REPLY_ONLY_FALLBACK;
 }
 
 /** 只接受一个字符串字段：回给当前说话人的那两句。 */
@@ -51,7 +59,10 @@ function replyOnlySystem(): string {
     "你是这套合租房的 AI 协调员。",
     "住户刚说的这句话，围绕的是一件你本来能替他办的提醒，但**这一轮不该执行任何动作**：",
     "他可能是在否定（让你先别发）、在犹豫、在征询你的意见，或者把这件事绑在一件还没办的事上。",
-    "你只用**一两句**自然、口语的中文回应他，就这件事继续商量。",
+    // **不写死"用中文"**：说哪种语言由轮次语言判定（`language.ts`，经
+    // `feature-llm.ts` 追加在系统提示最后）说了算。这里留一句"用中文"会和那条硬规则
+    // 直接打架——住户用英文说"先别发"时，正文的语言就成了两条指令的拔河。
+    "你只用**一两句**自然、口语的话回应他，就这件事继续商量。",
     "",
     "必须做到：",
     "- 绝不声称已经替他说了 / 已经联系了谁 / 已经把话转达了——这一轮什么都没发。",
@@ -72,7 +83,13 @@ function replyOnlySystem(): string {
  */
 export async function generateReplyOnlyReply(
   text: string,
-  llm: FeatureLlm
+  llm: FeatureLlm,
+  /**
+   * 本轮住户语言判定（`turn.ts` 在轮次边界判一次）。**给了就用它**，不在这里从
+   * `text` 现推——判定还含会话回退那一半（只回一个 "ok"、中英混写时全靠它）。
+   * 调用方没给时按中文，与加语言闸之前逐字一致。
+   */
+  language?: LanguageDecision
 ): Promise<{ reply: string; usage: FeatureUsage; error?: unknown }> {
   try {
     const { value, usage } = await structuredCall(llm, {
@@ -82,6 +99,7 @@ export async function generateReplyOnlyReply(
       system: replyOnlySystem(),
       // 小回复是**只对当前说话人**的，可以看他的原话（不存在披露给第三方的问题）。
       user: text,
+      language,
       maxOutputTokens: FEATURE_REPLY_ONLY_MAX_OUTPUT_TOKENS,
     });
     const reply = ((value as z.infer<typeof replyOnlySchema>).reply ?? "").trim();
@@ -96,7 +114,7 @@ export async function generateReplyOnlyReply(
     return { reply, usage };
   } catch (error) {
     return {
-      reply: replyOnlyFallback(text),
+      reply: replyOnlyFallback(language?.language),
       usage: usageOfFeatureError(error),
       error,
     };

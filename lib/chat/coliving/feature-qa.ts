@@ -17,7 +17,7 @@ import {
   type FeatureQaFactBundle,
 } from "./feature-facts";
 import { findGroundingViolations } from "./feature-grounding";
-import { residentLanguage } from "./language";
+import { residentLanguage, type LanguageDecision } from "./language";
 
 /**
  * **统一的产品功能问答入口——不是功能、不是工具、不出站。**
@@ -55,10 +55,11 @@ import { residentLanguage } from "./language";
  * 本入口**不装载旧 doctrine、不进主生成、没有任何工具、零第三方出站**（由 `turn.ts`
  * 调 `finalizeFeatureTurn` 早返回）。生成阶段**只看到三样**：住户的问题、事实源里
  * **与这个问题有关**的事实（`buildFeatureQaFacts`）、当前专门优化的功能清单。模型只
- * 负责把事实说成自然、简短的中文；**不得补充处理方案、虚构能力、或承诺立刻去联系 /
- * 跟进**。写出内部术语 / 假承诺，或**把球踢回住户（「你自己去找他」「换个渠道」
- * 「以后再说」）**，或结构不合法时，用**同样只含事实源事实**的代码兜底
- * （`featureQaFallback`）。共享的 grounding 判定见 `feature-grounding.ts`。
+ * 负责把事实说成自然、简短的、**住户这一轮语言**的回应（语言由轮次判定给出，见
+ * `language.ts`）；**不得补充处理方案、虚构能力、或承诺立刻去联系 / 跟进**。写出内部
+ * 术语 / 假承诺，或**把球踢回住户（「你自己去找他」「换个渠道」「以后再说」）**，或
+ * 结构不合法时，用**同样只含事实源事实**的代码兜底（`featureQaFallback`）。共享的
+ * grounding 判定见 `feature-grounding.ts`。
  *
  * 它只在 `turn.ts` **已批准功能前门之后**接线：命中已批准功能 / 保留轮的请求先由前门
  * 处理，前门不接的（普通问句不需要点名收件人）才轮到本入口——**已批准功能的执行行为
@@ -79,8 +80,16 @@ export const FEATURE_QA_MAX_CHARS = 240;
 export const FEATURE_QA_MAX_CHARS_EN = 400;
 
 /** 这一轮正文的长度上限：按住户说话的语言取（判定复用 `language.ts`，不另写关键词）。 */
-export function featureQaMaxChars(question: string): number {
-  return residentLanguage(question) === "en"
+export function featureQaMaxChars(
+  question: string,
+  /**
+   * 本轮住户语言判定（`turn.ts` 在轮次边界判一次）。**给了就用它**——判定还含会话
+   * 回退那一半（住户只回一个 "ok" / 中英混写时全靠它），在这里从 `question` 现推
+   * 只剩原话那一半。缺省按原话现推，既有离线调用一行不改。
+   */
+  language?: LanguageDecision
+): number {
+  return (language?.language ?? residentLanguage(question)) === "en"
     ? FEATURE_QA_MAX_CHARS_EN
     : FEATURE_QA_MAX_CHARS;
 }
@@ -150,6 +159,9 @@ const SELF_QUOTE_PHRASES: readonly string[] = [
   "who r u",
   "what are you",
   "what(?:'s|s| is)\\s+this(?: number| service| thing)?",
+  // 「What does this AI do?」——问的是**这个 AI / 这项服务**是干什么的。名词必须出现
+  // 才认（光有 "what does this do" 太泛），与相邻条目同一粒度。
+  "what does (?:this|the) (?:ai|bot|robot|service|number|thing|system|assistant) do",
   "are you (?:a |an )?(?:bot|robot|ai|human|person|machine|real)",
   "introduce yourself",
   "tell me about yourself",
@@ -260,6 +272,12 @@ export function featureQaFallback(args: {
   openFeatures: readonly { id: string; label: string }[];
   /** 本人上一轮刚被黑名单拒绝的条目 id（结构化引用；没有则 null） */
   referencedBlacklistedId?: string | null;
+  /**
+   * 本轮住户语言判定（`turn.ts` 在轮次边界判一次）。**给了就用它**，不再从
+   * `question` 现推——住户只回一个 "ok"、或中英混写时，依据在会话回退里。缺省按原话
+   * 现推，既有离线调用一行不改。
+   */
+  language?: LanguageDecision;
 }): string {
   const blacklisted = selectBlacklistedCapabilities(
     args.question,
@@ -269,7 +287,7 @@ export function featureQaFallback(args: {
   // **兜底也要说住户那一轮的语言**：住户用英文问、模型那侧又没写出可用正文时，回一段
   // 中文正是「用对方的语言回答」最容易被代码兜底破坏的地方（语言判定复用 `language.ts`，
   // 不在这里另写一套关键词）。
-  if (residentLanguage(args.question) === "en") {
+  if ((args.language?.language ?? residentLanguage(args.question)) === "en") {
     return englishFeatureQaFallback({
       blacklisted,
       openLabels: args.openFeatures.map((f) => f.label),
@@ -434,6 +452,8 @@ export async function generateFeatureQaReply(
      * 的收窄查询结果）。问题本身对不上条目、但这是紧接被拒的追问时，据此说出名称与原因。
      */
     referencedBlacklistedId?: string | null;
+    /** 本轮住户语言判定（`turn.ts` 判一次）——正文上限、模型指令、兜底都由它定语言。 */
+    language?: LanguageDecision;
   },
   llm: FeatureLlm
 ): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown }> {
@@ -449,11 +469,12 @@ export async function generateFeatureQaReply(
   // 住户明确问「你能做什么」或问起「你是谁」时必须逐项列出全部专门优化功能名；
   // 只问「为什么某件事办不了」则不强制全列。
   const requireOpenLabels = asksWhatIsAvailable(args.question) || selfIntro;
-  const maxChars = featureQaMaxChars(args.question);
+  const maxChars = featureQaMaxChars(args.question, args.language);
   const fallback = featureQaFallback({
     question: args.question,
     openFeatures: args.openFeatures,
     referencedBlacklistedId: args.referencedBlacklistedId ?? null,
+    language: args.language,
   });
   try {
     const { value, usage } = await structuredCall(llm, {
@@ -463,6 +484,8 @@ export async function generateFeatureQaReply(
       system: featureQaSystem(bundle, requireOpenLabels),
       // 只对当前说话人说明，可以看他的问法；这里不会把内容发给任何第三方。
       user: args.question,
+      // 说哪种语言由轮次判定（含会话回退）定，不由这一句问法的字面反推。
+      language: args.language,
       maxOutputTokens: FEATURE_QA_MAX_OUTPUT_TOKENS,
     });
     const reply = ((value as z.infer<typeof featureQaSchema>).reply ?? "").trim();
@@ -512,6 +535,11 @@ export async function runFeatureQa(args: {
   openFeatures: readonly { id: string; label: string }[];
   /** 本人上一轮刚被黑名单拒绝的条目 id（结构化引用；没有则 null） */
   referencedBlacklistedId?: string | null;
+  /**
+   * 本轮住户语言判定（`turn.ts` 在轮次边界判一次，与主生成、功能前门共用同一个值）。
+   * 缺省时退回"按这句问法现推"，既有离线调用一行不改。
+   */
+  language?: LanguageDecision;
   llm: FeatureLlm;
 }): Promise<{ reply: string; fallback: string; usage: FeatureUsage; error?: unknown } | null> {
   if (!isFeatureQaQuestion(args.text)) return null;
@@ -520,6 +548,7 @@ export async function runFeatureQa(args: {
       question: args.text,
       openFeatures: args.openFeatures,
       referencedBlacklistedId: args.referencedBlacklistedId ?? null,
+      language: args.language,
     },
     args.llm
   );

@@ -58,15 +58,62 @@ export type ContextRetrievalObservation = {
 };
 
 /**
+ * **本轮住户语言判定**的可观测投影：只说"判成哪种语言、依据是什么"，
+ * **不带任何正文**——与整份回执同一条纪律。
+ *
+ * 这一栏存在的理由：报告里解释得了"这一轮为什么回中文/英文"的只有判定与来源。
+ * `direct`（原话自己就能定）与 `conversation-fallback`（原话定不了、读了会话里
+ * 最近判得出来的那条）是两件不同的事，混成一句"这轮是英文"就再也查不出差别。
+ *
+ * ⚠️ 这里**故意重写一遍字面量**，不 import `language.ts` 的类型：本模块必须保持
+ * 零 import（见下面「零 import」的纪律与 `scripts/coliving-quality-inspect.ts`
+ * 的结构检查）。两套词汇表是否真的一致，由离线检查**跑一遍判定再归一化**来证明
+ * （而不是比字符串）——那才是"新增一种来源会不会被静默丢掉"的真问题。
+ */
+export type ContextLanguageObservation = {
+  language: "en" | "zh";
+  source: "direct" | "conversation-fallback" | "default";
+};
+
+/**
+ * **本轮喂给主生成的对话历史**的有界化观测：只记条数与字符数，**不带任何正文**。
+ *
+ * 口径是"考虑了多少 / 实际留下多少 / 丢掉多少"，两个字符数按正文长度累加。
+ * 它回答的是"这一轮的上下文里，历史那一段到底有多重"——以前这个问题在报告里
+ * 完全看不见，历史是仓库给多少就塞多少。
+ */
+export type ContextHistoryObservation = {
+  /** 仓库交过来的历史条数（政策之前的原样，不是政策之后）。 */
+  consideredTurns: number;
+  /** 真正进了 `messages` 的条数。 */
+  keptTurns: number;
+  /** 被有界化丢掉的条数（从**最旧**那头丢，见 `history-policy.ts`）。 */
+  droppedTurns: number;
+  /** 保留部分的正文总字符数。 */
+  keptChars: number;
+  /** 丢掉部分的正文总字符数。 */
+  droppedChars: number;
+};
+
+/**
  * 一轮的**完整上下文回执**（随 `TurnOutcome` 落到评测报告）：
- * 分节清单 + 本轮**真的跑过**的按需检索观测。
+ * 分节清单 + 本轮**真的跑过**的按需检索观测 + 语言判定 + 历史有界化。
  *
  * 检索那半由 `turn.ts` 在主生成收尾时补上——`buildContext` 那一刻还不知道
- * 模型会调什么工具。两者都只是名字/数字，绝无正文。
+ * 模型会调什么工具；语言是轮次边界判一次的值，历史有界化发生在装配 `messages`
+ * 那一刻。四者都只是名字/数字，绝无正文。
  */
 export type ContextReceipt = ContextSectionsReceipt & {
   /** 本轮跑过的按需检索工具观测（按下面写死的名单顺序，没跑就是空数组）。 */
   retrievalObservations: ContextRetrievalObservation[];
+  /** 本轮住户语言判定（只记判定与来源，不记住户原话）。 */
+  language: ContextLanguageObservation;
+  /**
+   * 本轮对话历史的有界化结果（只记条数与字符数）。
+   * 结构化运行时事实（未结的事 / 现行规则 / 在等谁回话）**不在这条政策的射程内**：
+   * 它们由 `buildContext` 拼进运行时状态，不经过这里（见 `history-policy.ts`）。
+   */
+  history: ContextHistoryObservation;
 };
 
 /**

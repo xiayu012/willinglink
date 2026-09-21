@@ -1,5 +1,6 @@
 import type * as repo from "./repo";
 import type { FeatureLlm, FeatureUsage } from "./feature-llm";
+import type { LanguageDecision } from "./language";
 import type { SmsDeliveryDeps } from "./sms-delivery";
 
 /**
@@ -69,6 +70,13 @@ export type FeatureContext = {
   householdId: string;
   channel: string;
   senderIsTest: boolean;
+  /**
+   * 本轮住户语言判定。由前门（`features.ts` 的 `runApprovedFeature`）从 `turn.ts` 在
+   * 轮次边界判一次后传进来的 `options.language` 注入；功能模块只往下传、**不自己重算**
+   * ——正文与兜底回执都要说住户这一轮的语言，而这个判定不只取决于原话（还有会话回退），
+   * 在功能模块里重算只会算出差的那一半。
+   */
+  language?: LanguageDecision;
 };
 
 export type FeatureDeps = {
@@ -84,15 +92,26 @@ export type FeatureDeps = {
 export type ApprovedFeature = {
   /** 功能 id。只用于台账、内部路由白名单与测试，**不是给主模型选的 functionId** */
   id: string;
-  /** 落 decision / 收据时用的功能名 */
+  /**
+   * 落 decision / 收据时用的功能名。**也是功能问答里对住户说的名字**：住户用英文问起
+   * 时，正文里的功能名照旧是这一个（老板登记的原话，不另翻一份——与黑名单条目的名称、
+   * 理由同一条口径，见 `feature-qa.ts`）。
+   */
   label: string;
   /**
    * 给**内部路由**看的一句话功能定义（只描述"这一件"是什么，不进入任何正文，
    * 也不是给主生成模型的措辞）。
    */
   routeDescription: string;
-  /** 命中后只抽取本功能获准字段（不再回答 match）。 */
-  extract(text: string, llm: FeatureLlm): Promise<FeatureExtraction>;
+  /**
+   * 命中后只抽取本功能获准字段（不再回答 match）。
+   * `language` 是本轮住户语言判定，照原样传给模型调用——**不要在功能模块里重算**。
+   */
+  extract(
+    text: string,
+    llm: FeatureLlm,
+    language?: LanguageDecision
+  ): Promise<FeatureExtraction>;
   /** 绑定收件人 → 用收窄字段生成正文 → 投递；返回可投递结果与自己的用量。 */
   execute(
     extraction: FeatureExtraction,

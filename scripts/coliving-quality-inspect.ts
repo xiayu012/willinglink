@@ -17,9 +17,16 @@ import {
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
 import { CHANNELS } from "../lib/chat/types";
 import {
+  decideLanguage,
+  observeLanguage,
   residentLanguage,
   residentLanguageInstruction,
 } from "../lib/chat/coliving/language";
+import {
+  HISTORY_BUDGET,
+  planHistory,
+} from "../lib/chat/coliving/history-policy";
+import { scheduleAffirmationReply } from "../lib/chat/coliving/schedule-affirmation";
 import {
   countAcceptedOutbound,
   evaluateReplyReview,
@@ -2618,7 +2625,9 @@ async function main() {
     );
 
     // 前门只在本户功能授权开关打开时读盘；grantedFeatureIds 只作为 runApprovedFeature
-    // 第四参数传入，不并进静态 APPROVED_FEATURES 清单。
+    // 第四参数传入，不并进静态 APPROVED_FEATURES 清单。（同一次调用还会带上本轮语言
+    // 判定 `language`——两者都是**纯内存入参**，第四个参数是对象字面量、首键必须是
+    // grantedFeatureIds，不是清单。）
     assert.ok(
       /if \(process\.env\.COLIVING_COORDINATION_SHARED_RULE === "1"\) \{\s*try \{\s*grantedFeatureIds = activeHouseholdFeatureIds\(/.test(
         src
@@ -2631,7 +2640,7 @@ async function main() {
       "activeHouseholdFeatureIds 只能出现在 flag 闸内这一处，不能绕过开关读授权"
     );
     assert.ok(
-      /runApprovedFeature\(\s*args\.text,[\s\S]*?\{ llm: featureLlm, delivery: smsDeliveryDeps \},\s*\{ grantedFeatureIds \}\s*\)/.test(
+      /runApprovedFeature\(\s*args\.text,[\s\S]*?\{ llm: featureLlm, delivery: smsDeliveryDeps \},\s*\{ grantedFeatureIds[^{}]*\}\s*\)/.test(
         src
       ),
       "grantedFeatureIds 必须作为 runApprovedFeature 第四参数传入"
@@ -7904,6 +7913,8 @@ async function main() {
       "export type ContextReceiptSection = {",
       "export type ContextSectionsReceipt = {",
       "export type ContextRetrievalObservation = {",
+      "export type ContextLanguageObservation = {",
+      "export type ContextHistoryObservation = {",
       "export type ContextReceipt = ContextSectionsReceipt & {",
       "};",
     ];
@@ -7923,6 +7934,18 @@ async function main() {
       "calls: number;",
       "returnedChars: number | null;",
       "retrievalObservations: ContextRetrievalObservation[];",
+      // 语言判定那两个字段：都是**代码认识的枚举**（不是任意字符串），
+      // 逐条审过才放进白名单——枚举的取值面由下面的运行时检查钉住。
+      `language: "en" | "zh";`,
+      `source: "direct" | "conversation-fallback" | "default";`,
+      // 历史有界化：只允许五个有限非负计数，一个承载字段都没有。
+      "consideredTurns: number;",
+      "keptTurns: number;",
+      "droppedTurns: number;",
+      "keptChars: number;",
+      "droppedChars: number;",
+      "language: ContextLanguageObservation;",
+      "history: ContextHistoryObservation;",
     ];
     assert(
       receiptFieldLines.every((line) => RECEIPT_FIELD_ALLOWLIST.includes(line)),
@@ -7994,6 +8017,15 @@ async function main() {
           "retrievalObservations: retrievalObservationsFrom(retrievalCallFootprints),"
         ),
       "主生成返回点必须带上 buildContext 的分节 + 本轮真跑过的按需检索足迹"
+    );
+    // 语言判定与历史有界化都挂在**同一条**主生成返回点上（都是"这一轮实际怎么
+    // 发出请求"的观测）。两栏都只记枚举与计数：语言那栏是判定 + 来源，历史那栏
+    // 是五个数字，一个字正文都不带——形状本身由纯类型定义，见下面的形状检查。
+    assert(
+      turnSrc.includes("language: observeLanguage(language),") &&
+        turnSrc.includes("consideredTurns: historyPlan.consideredTurns,") &&
+        turnSrc.includes("droppedChars: historyPlan.droppedChars,"),
+      "语言判定与有界历史的计数必须随主生成回执带出（只记枚举与数字）"
     );
     assert(
       turnSrc.includes("retrievalObservationsFrom") &&
@@ -8333,6 +8365,338 @@ async function main() {
       "HTML 报告必须把提示词组成 / 收据 / 本轮账并进 Context Engineering 面板"
     );
   });
+
+  /**
+   * ── 语言判定进回执：词汇表不许漂移、只认枚举、渲染不带正文 ──────────────
+   *
+   * 回执里那两栏（语言 / 历史）是**代码写死的枚举与计数**，报告 JSON 里塞什么
+   * 字符串都进不了渲染。这条检查钉住三点：
+   *  1. **词汇表一致性不靠比字符串**：直接跑语言层自己的判定（`decideLanguage`），
+   *     再把判定交给回执层归一化，断言**原样认下来**——新增一种 source 却被回执
+   *     静默丢掉，是这条设计真正的风险，只有跑一遍才证明得了；
+   *  2. 名单外的值（`fr` / `telepathy` / 缺字段）整栏记**未知**，不猜一种语言；
+   *  3. 渲染：认识的说人话、不认识的明说未知、真实的 0 照实写 0，且绝不出现
+   *     NaN / undefined / 任何正文。
+   */
+  check(
+    "语言判定进回执：三种来源 / 两种语言都能归一化，只认枚举、渲染不带正文",
+    () => {
+      const SAMPLE_SECRET = "SHOULD-NOT-SURVIVE-language";
+      const decisions = [
+        decideLanguage("Could you remind Alex not to run the dryer after 10 tonight?"),
+        decideLanguage("提醒 Alex 晚上别用烘干机"),
+        decideLanguage("ok", [
+          { role: "assistant", content: "Should I book the 18:00-20:00 slot for you?" },
+        ]),
+        decideLanguage("ok", []),
+      ];
+      assert.deepEqual(
+        [...new Set(decisions.map((d) => d.source))].sort(),
+        ["conversation-fallback", "default", "direct"],
+        "夹具必须真的覆盖三种判定来源，否则这条检查是空转"
+      );
+      assert.deepEqual(
+        [...new Set(decisions.map((d) => d.language))].sort(),
+        ["en", "zh"],
+        "夹具必须覆盖两种语言"
+      );
+      for (const d of decisions) {
+        const normalized = normalizeContextReceipt({
+          sections: [],
+          language: observeLanguage(d),
+          history: {
+            consideredTurns: 0,
+            keptTurns: 0,
+            droppedTurns: 0,
+            keptChars: 0,
+            droppedChars: 0,
+          },
+        });
+        assert.ok(normalized, "形状认识的收据要归一化");
+        assert.deepEqual(
+          normalized.language,
+          { language: d.language, source: d.source },
+          "语言层产出的判定必须被回执层原样认下来（两套词汇表不许漂移）"
+        );
+        assert.deepEqual(
+          Object.keys(normalized.language ?? {}).sort(),
+          ["language", "source"],
+          "语言那一栏只有判定与来源两个键"
+        );
+      }
+
+      // 只认枚举：名单外的值整栏记未知，且不残留任何正文。
+      assert.equal(
+        normalizeContextReceipt({
+          sections: [],
+          language: { language: "fr", source: "telepathy", text: SAMPLE_SECRET },
+        })?.language,
+        null,
+        "名单外的语言 / 来源整栏记未知，不替它猜一种语言出来"
+      );
+      assert.equal(
+        normalizeContextReceipt({ sections: [], language: { language: "en" } })
+          ?.language,
+        null,
+        "缺 source 也算形状不认识（不许半栏照收）"
+      );
+      assert.equal(
+        normalizeContextReceipt({ sections: [], language: "en" })?.language,
+        null,
+        "整栏不是对象也记未知"
+      );
+      assert(
+        !JSON.stringify(
+          normalizeContextReceipt({
+            sections: [],
+            language: { language: "fr", source: "telepathy", text: SAMPLE_SECRET },
+          })
+        ).includes(SAMPLE_SECRET),
+        "归一化后的回执不得残留任何正文"
+      );
+
+      const html = renderContextReceiptHtml({
+        sections: [],
+        language: { language: "en", source: "conversation-fallback" },
+        history: {
+          consideredTurns: 12,
+          keptTurns: 8,
+          droppedTurns: 4,
+          keptChars: 900,
+          droppedChars: 300,
+        },
+      });
+      assert(
+        html.includes("英文") && html.includes("conversation-fallback"),
+        "渲染要给出认识的语言与来源"
+      );
+      assert(
+        html.includes("12 条") && html.includes("8 条") && html.includes("4 条"),
+        "渲染要给出历史的考虑 / 保留 / 丢弃条数"
+      );
+      assert(
+        html.includes("900 字符") && html.includes("300 字符"),
+        "渲染要给出历史的保留 / 丢弃字符数"
+      );
+      // **真实的 0 照实写 0**：一条没丢 != 没记这件事，两者不许糊成一个。
+      const zero = renderContextReceiptHtml({
+        sections: [],
+        history: {
+          consideredTurns: 3,
+          keptTurns: 3,
+          droppedTurns: 0,
+          keptChars: 120,
+          droppedChars: 0,
+        },
+      });
+      assert(
+        zero.includes("有界化丢掉 0 条") && zero.includes("丢掉 0 字符"),
+        "真实的 0 要显示成 0，不许写成未知"
+      );
+      const legacy = renderContextReceiptHtml({ sections: [] });
+      assert(
+        legacy.includes("旧报告没记这一栏"),
+        "旧报告缺这两栏时明说是没记，不猜语言、也不按 0 条算"
+      );
+      for (const out of [html, zero, legacy]) {
+        assert(
+          !out.includes("NaN") && !out.includes("undefined"),
+          "回执块不许渲染出 NaN / undefined"
+        );
+        assert(!out.includes(SAMPLE_SECRET), "回执块不许带出任何正文");
+      }
+    }
+  );
+
+  /**
+   * ── 对话历史有界化：只吃对话文本、只记数字、结构化事实不经它手 ────────────
+   *
+   * 这条政策的成立条件是"它**只**作用在主生成的消息数组上"。最有价值的反例
+   * 不是"它会不会算错"，而是"它会不会哪天被接到结构化运行时事实上去"——
+   * 那才是真的会删掉未结的事 / 现行规则 / 在等谁回话。所以这里同时钉住：
+   *  1. 政策模块**零 import**（结构上碰不到 DB / 模型 / 出站，也就不可能新增
+   *     一次模型调用），且只接受对话数组；
+   *  2. `turn.ts` 里它只作用在 `history` 上，两处消息装配读同一份有界历史；
+   *  3. 结构化运行时事实照旧走 `system` 那一路（`buildContext` 拼的 `runtime`），
+   *     一个字都不经过这条政策；
+   *  4. 计数进回执只记数字，对话正文一个字都不进。
+   */
+  check(
+    "历史有界化：只作用在对话历史上（结构化运行时事实不经它手），计数进回执",
+    () => {
+      const policySrc = readFileSync(
+        "lib/chat/coliving/history-policy.ts",
+        "utf8"
+      );
+      assert.deepEqual(
+        policySrc
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => /^import\b/.test(line) || /^} from /.test(line)),
+        [],
+        "history-policy.ts 必须零 import（纯函数，碰不到数据库 / 模型 / 出站）"
+      );
+
+      const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+      assert(
+        turnSrc.includes("const historyPlan = planHistory(history, HISTORY_BUDGET);"),
+        "有界化只能作用在对话历史上（不是 ctx.text / runtime）"
+      );
+      assert.equal(
+        turnSrc.split("...boundedHistory,").length - 1,
+        2,
+        "主生成与强制补回复两条消息装配必须读同一份有界历史（口径不许分叉）"
+      );
+      assert(
+        turnSrc.includes("language: observeLanguage(language),") &&
+          turnSrc.includes("consideredTurns: historyPlan.consideredTurns,"),
+        "语言判定与历史有界化都要随主生成回执带出"
+      );
+      // 结构化运行时事实（未结的事 / 现行规则 / 在等谁回话）照旧整份进 system：
+      // 它们由 buildContext 拼成 `runtime`，压根不是这条政策的入参。
+      assert(
+        turnSrc.includes("system: buildGeneratorSystemMessages({") &&
+          turnSrc.includes("runtime,") &&
+          readFileSync("lib/chat/coliving/context.ts", "utf8").includes(
+            "receipt: { sections },"
+          ),
+        "结构化运行时事实走 system 那一路（buildContext 的 runtime），不经过历史政策"
+      );
+      // 注释里点 `repo.getRecentTurns` / `buildContext` 是文档（说明它为什么存在），
+      // 不算访问——只在去掉注释后的代码上查这些记号。
+      const policyBody = policySrc
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .split(/\r?\n/)
+        .map((line) => line.replace(/\/\/.*$/, ""))
+        .join("\n");
+      for (const forbidden of ["runtime", "repo.", "generateText", "await"]) {
+        assert(
+          !policyBody.includes(forbidden),
+          `历史政策的代码里不许出现 ${forbidden}（结构化事实与模型调用都不是它的射程）`
+        );
+      }
+
+      // 长历史：有界、最新一条留下、账目自洽；正文一个字都不进回执。
+      const longHistory = Array.from({ length: 40 }, (_, i) => ({
+        role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `第${i}条 对话正文不该进回执 ${"x".repeat(300)}`,
+      }));
+      const plan = planHistory(longHistory, HISTORY_BUDGET);
+      assert.ok(
+        plan.keptTurns <= HISTORY_BUDGET.maxTurns &&
+          plan.keptChars <= HISTORY_BUDGET.maxChars,
+        "长历史必须收在预算内（以前没有任何体量上限）"
+      );
+      assert.equal(plan.kept.at(-1), longHistory.at(-1), "最新那条必须留下");
+      assert.equal(
+        plan.keptTurns + plan.droppedTurns,
+        plan.consideredTurns,
+        "保留 + 丢弃 = 考虑（回执里那三个数字必须自洽）"
+      );
+      const normalized = normalizeContextReceipt({
+        sections: [],
+        history: {
+          consideredTurns: plan.consideredTurns,
+          keptTurns: plan.keptTurns,
+          droppedTurns: plan.droppedTurns,
+          keptChars: plan.keptChars,
+          droppedChars: plan.droppedChars,
+        },
+      });
+      assert.deepEqual(
+        normalized?.history,
+        {
+          consideredTurns: 40,
+          keptTurns: plan.keptTurns,
+          droppedTurns: plan.droppedTurns,
+          keptChars: plan.keptChars,
+          droppedChars: plan.droppedChars,
+        },
+        "有界化的计数原样进回执（只记数字）"
+      );
+      const historyHtml = renderContextReceiptHtml({
+        sections: [],
+        history: normalized?.history,
+      });
+      assert(
+        !JSON.stringify(normalized).includes("不该进回执") &&
+          !historyHtml.includes("不该进回执"),
+        "回执与渲染都不得带出任何一条对话正文"
+      );
+      // 坏计数记未知，不显示成 0。
+      const dirty = normalizeContextReceipt({
+        sections: [],
+        history: {
+          consideredTurns: Number.NaN,
+          keptTurns: -1,
+          droppedTurns: "4",
+          keptChars: Number.POSITIVE_INFINITY,
+        },
+      });
+      assert.deepEqual(
+        dirty?.history,
+        {
+          consideredTurns: null,
+          keptTurns: null,
+          droppedTurns: null,
+          keptChars: null,
+          droppedChars: null,
+        },
+        "坏计数一律记未知（不是 0）"
+      );
+      assert(
+        !renderContextReceiptHtml({ sections: [], history: dirty?.history }).includes(
+          "NaN"
+        ),
+        "坏计数渲染成未知，不许出现 NaN"
+      );
+    }
+  );
+
+  /**
+   * ── 排班落锤短句：三处读同一个轮次语言判定，turn.ts 里不再写死中文 ────────
+   *
+   * 这条路径**模型根本没被调用**，所以它是语言闸最容易被代码兜底打穿的地方
+   * （英文住户回一个 "ok"，收到的却是一句中文）。钉住两点：`turn.ts` 里不许再
+   * 出现写死的中文落锤短句；两处装配读的都是**轮次判定**（含会话回退），
+   * 而不是各自拿原话现推——同一个 "ok" 在两种会话下必须落成两种语言。
+   */
+  check(
+    "排班落锤短句：两处装配都读轮次语言判定，turn.ts 里不再写死中文",
+    () => {
+      const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+      assert.equal(
+        turnSrc.split("scheduleAffirmationReply(").length - 1,
+        2,
+        "短路闸与模型后收口两处都走同一个函数"
+      );
+      assert(
+        !turnSrc.includes("好，${slot} 就定给你了。") &&
+          !turnSrc.includes("好，时段定了，按这个来。"),
+        "turn.ts 里不许再写死中文落锤短句（那等于把语言闸打穿）"
+      );
+      assert(
+        turnSrc.includes("scheduleAffirmationReply(slot, language.language)"),
+        "落锤短句读的是轮次判定，不是拿这一句原话现推"
+      );
+      // 同一个 "ok"，会话回退不同 → 两种语言；都读不出来 → 默认中文逐字不变。
+      const enFallback = decideLanguage("ok", [
+        { role: "assistant", content: "Should I book the 18:00-20:00 slot for you?" },
+      ]);
+      const zhFallback = decideLanguage("ok", [
+        { role: "assistant", content: "那我把 18:00-20:00 这个时段定给你？" },
+      ]);
+      assert.equal(enFallback.source, "conversation-fallback");
+      assert.equal(zhFallback.source, "conversation-fallback");
+      assert.equal(scheduleAffirmationReply("18:00-20:00", enFallback.language), "Got it — 18:00-20:00 is yours.");
+      assert.equal(scheduleAffirmationReply("18:00-20:00", zhFallback.language), "好，18:00-20:00 就定给你了。");
+      assert.equal(
+        scheduleAffirmationReply("18:00-20:00", decideLanguage("ok", []).language),
+        "好，18:00-20:00 就定给你了。",
+        "都读不出来时默认中文，与加语言闸之前逐字一致"
+      );
+    }
+  );
 
   /**
    * ── 免费静态检查：分节收据只有安全 id + 有限计数，绝无 text/body ────────

@@ -419,14 +419,18 @@ export function renderPromptCompositionHtml(raw: unknown): string {
 
 // ── 上下文回执（观察层，与上面的 prompt 观测同一条纪律） ─────────────────
 //
-// 每轮上下文由哪些分节拼成、各占多少字符，以及本轮真跑过哪些**按需检索**
-// 工具、各调了几次、拉回的字符串有多少字符。**没有正文**——回执形状里根本
-// 没有承载正文的字段，所以渲染层也无从泄漏分节内容或工具返回；这里再防御三层：
+// 每轮上下文由哪些分节拼成、各占多少字符，本轮真跑过哪些**按需检索**工具、
+// 各调了几次、拉回的字符串有多少字符，本轮判成了哪种语言、依据是什么，
+// 以及本轮喂给主生成的对话历史有多少条 / 多少字符（有界化丢了多少）。
+// **没有正文**——回执形状里根本没有承载正文的字段，所以渲染层也无从泄漏分节
+// 内容、工具返回或住户原话；这里再防御四层：
 //   1. 分节只认 `id`（字符串）和 `chars`（有限非负数），多余字段一律不读；
 //   2. 检索工具名**只认代码写死在 `context-receipt.ts` 里的那几个名字**，
 //      报告 JSON 里即使被塞了别的字符串（例如某段正文），也不会渲染出来；
 //   3. 次数与字符数只接受有限非负数，其余（NaN/负数/字符串/缺席）记"未知"，
-//      **不显示成 0**。
+//      **不显示成 0**；
+//   4. 语言那一栏的两个字段都是**代码认识的枚举**（en/zh、三种来源），
+//      不匹配就整栏记未知——报告 JSON 里塞什么字符串都进不了渲染。
 // 未知照旧显示"未知"，不显示成 0；旧报告没这个字段就不展示（旧版回执只有
 // 名字数组 `retrievalToolNames`，照样认：名字照渲染，次数与字符数记未知）。
 
@@ -445,6 +449,21 @@ export type NormalizedRetrievalObservation = {
   returnedChars: number | null;
 };
 
+/** 归一化后的语言判定：两个字段都是**代码认识的枚举值**，不可能是任意字符串。 */
+export type NormalizedLanguageObservation = {
+  language: "en" | "zh";
+  source: "direct" | "conversation-fallback" | "default";
+};
+
+/** 归一化后的历史有界化观测：每个计数都可能"未知"（null），不是 0。 */
+export type NormalizedHistoryObservation = {
+  consideredTurns: number | null;
+  keptTurns: number | null;
+  droppedTurns: number | null;
+  keptChars: number | null;
+  droppedChars: number | null;
+};
+
 /** 归一化后的回执；`null` = 这一轮没构建上下文。 */
 export type NormalizedContextReceipt = {
   sections: NormalizedContextSection[];
@@ -454,6 +473,10 @@ export type NormalizedContextReceipt = {
    * 空数组 = 明确没跑任何按需检索。
    */
   retrievalObservations: NormalizedRetrievalObservation[] | null;
+  /** 本轮语言判定；`null` = 旧报告没记 / 形状不认识（未知，不猜一种语言出来）。 */
+  language: NormalizedLanguageObservation | null;
+  /** 本轮历史有界化；`null` = 旧报告没记这一栏（未知，不按 0 条算）。 */
+  history: NormalizedHistoryObservation | null;
 };
 
 /**
@@ -488,7 +511,58 @@ export function normalizeContextReceipt(
   // 只留代码认识的检索工具名：这是"渲染层绝不显示任意字符串"的结构性保证，
   // 也让工具的增删只发生在 `context-receipt.ts` 一处。
   const retrieval = normalizeRetrievalObservations(o);
-  return { sections: normalized, retrievalObservations: retrieval };
+  return {
+    sections: normalized,
+    retrievalObservations: retrieval,
+    language: normalizeLanguageObservation(o.language),
+    history: normalizeHistoryObservation(o.history),
+  };
+}
+
+/**
+ * 归一化"本轮语言判定"这一栏。
+ *
+ * **只认代码写死的枚举**，做法与检索工具名同一条：报告 JSON 里即使被塞了任意
+ * 字符串（`language: "住户原话……"`），也进不了渲染——两个字段各自按白名单取值，
+ * 不匹配就整栏记**未知**（`null`）。旧报告没有这一栏，同样是未知，
+ * **绝不替它猜一种语言**。
+ */
+function normalizeLanguageObservation(
+  raw: unknown
+): NormalizedLanguageObservation | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const language = o.language;
+  const source = o.source;
+  if (language !== "en" && language !== "zh") return null;
+  if (
+    source !== "direct" &&
+    source !== "conversation-fallback" &&
+    source !== "default"
+  ) {
+    return null;
+  }
+  // 显式逐字段取值：多出来的字段（哪怕名字叫 text）一律不带出去。
+  return { language, source };
+}
+
+/**
+ * 归一化"本轮历史有界化"这一栏：五个计数各自归一化，坏了记**未知**（null），
+ * **不显示成 0**（"0 条被丢"和"没记这件事"是两件事）。整栏形状不认识（旧报告
+ * 没有这一栏）→ `null`。
+ */
+function normalizeHistoryObservation(
+  raw: unknown
+): NormalizedHistoryObservation | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  return {
+    consideredTurns: finiteNonNegative(o.consideredTurns),
+    keptTurns: finiteNonNegative(o.keptTurns),
+    droppedTurns: finiteNonNegative(o.droppedTurns),
+    keptChars: finiteNonNegative(o.keptChars),
+    droppedChars: finiteNonNegative(o.droppedChars),
+  };
 }
 
 /**
@@ -631,9 +705,38 @@ export function renderContextReceiptHtml(raw: unknown): string {
         : `本轮真正跑过的按需检索工具：调用次数 ${callsTotalText}、` +
           `返回字符串字符数 ${charsTotalText}`;
 
+  // 语言那一栏只渲染**代码认识的枚举**：显示名在这里翻译，绝不放任意字符串。
+  const LANGUAGE_LABELS: Record<string, string> = { en: "英文", zh: "中文" };
+  const LANGUAGE_SOURCE_LABELS: Record<string, string> = {
+    direct: "原话自己就能定",
+    "conversation-fallback": "原话定不了，读会话里最近判得出来的那条",
+    default: "原话与会话都定不了，用默认",
+  };
+  const language = receipt.language;
+  const languageSummary =
+    language === null
+      ? `本轮回复语言：${PCOMP_UNKNOWN}（旧报告没记这一栏，不猜是哪种语言）`
+      : `本轮回复语言：${language.language}（${
+          LANGUAGE_LABELS[language.language] ?? PCOMP_UNKNOWN
+        }）· 判定来源：${language.source}（${
+          LANGUAGE_SOURCE_LABELS[language.source] ?? PCOMP_UNKNOWN
+        }）`;
+
+  const history = receipt.history;
+  const count = (v: number | null) => (v === null ? PCOMP_UNKNOWN : String(v));
+  const historySummary =
+    history === null
+      ? `本轮对话历史：${PCOMP_UNKNOWN}（旧报告没记这一栏，不按 0 条算）`
+      : `本轮对话历史：仓库给了 ${count(history.consideredTurns)} 条 / ` +
+        `进主生成 ${count(history.keptTurns)} 条 / 有界化丢掉 ` +
+        `${count(history.droppedTurns)} 条；保留正文 ${count(
+          history.keptChars
+        )} 字符 / 丢掉 ${count(history.droppedChars)} 字符`;
+
   return (
     `<details class="cost ctx-receipt">` +
-    `<summary>上下文回执（只记分节 id / 字符数与检索工具名 / 次数 / 返回字符数，不含正文）</summary>` +
+    `<summary>上下文回执（只记分节 id / 字符数、检索工具名 / 次数 / 返回字符数、` +
+    `语言判定与来源、历史条数 / 字符数，不含正文）</summary>` +
     `<div class="cost-body">` +
     `<ul class="ctx-sections">${items}</ul>` +
     `<div class="cost-note">运行时上下文分节合计：${
@@ -645,6 +748,8 @@ export function renderContextReceiptHtml(raw: unknown): string {
             `（份额按这个合计算）`
     }</div>` +
     `<div class="cost-note">${escapeHtml(retrievalSummary)}</div>` +
+    `<div class="cost-note">${escapeHtml(languageSummary)}</div>` +
+    `<div class="cost-note">${escapeHtml(historySummary)}</div>` +
     (retrievalItems
       ? `<ul class="ctx-sections">${retrievalItems}</ul>` +
         `<div class="cost-note">检索三列依次是：工具名 / 本轮调用次数 / 返回内容里的` +

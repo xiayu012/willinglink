@@ -23,6 +23,7 @@ import {
   blacklistedReply,
   type BlacklistedCapability,
 } from "./blacklist";
+import type { LanguageDecision } from "./language";
 import { nightLaundryFeature } from "./night-laundry-reminder";
 import { personalItemFeature } from "./personal-item-reminder";
 import { generateReplyOnlyReply } from "./reply-only";
@@ -166,7 +167,8 @@ function routeSystem(): string {
  */
 export async function routeApprovedFeature(
   text: string,
-  llm: FeatureLlm
+  llm: FeatureLlm,
+  language?: LanguageDecision
 ): Promise<{
   match: ApprovedFeature | null;
   replyOnly: boolean;
@@ -178,6 +180,7 @@ export async function routeApprovedFeature(
     name: FEATURE_ROUTE_NAME,
     system: routeSystem(),
     user: text,
+    language,
     // 输出只是一个词，但**推理 token 也计入这个上限**（DeepSeek V4.1 Flash）：
     // 128 会在输出前耗尽 → 截断。给足「推理 + 极短输出」的空间。
     maxOutputTokens: FEATURE_ROUTE_MAX_OUTPUT_TOKENS,
@@ -242,6 +245,12 @@ export type ApprovedFeatureRun = {
 export type ApprovedFeatureRunOptions = {
   /** 精确 id 集合（只接受只读数组）。只做**精确相等**匹配，不做前缀 / 邻近 id 放行。 */
   grantedFeatureIds?: readonly string[];
+  /**
+   * 本轮住户语言判定（`turn.ts` 在轮次边界判一次）。前门内部每一次模型调用、
+   * 以及命中/保留/黑名单三类**代码写死的回复**都按它选语言。缺省时退化为
+   * 「按原话现推」，既有离线调用一行不改。
+   */
+  language?: LanguageDecision;
 };
 
 export async function runApprovedFeature(
@@ -264,7 +273,7 @@ export async function runApprovedFeature(
   let replyOnly: boolean;
   let blacklisted: BlacklistedCapability | null;
   try {
-    const routed = await routeApprovedFeature(text, deps.llm);
+    const routed = await routeApprovedFeature(text, deps.llm, options.language);
     usage = addFeatureUsage(usage, routed.usage);
     match = routed.match;
     replyOnly = routed.replyOnly;
@@ -307,7 +316,7 @@ export async function runApprovedFeature(
       mode: "blacklisted",
       handling: {
         status: "handled",
-        reply: blacklistedReply(blacklisted),
+        reply: blacklistedReply(blacklisted, options.language?.language),
         sms: null,
         decisionId: null,
       },
@@ -321,7 +330,7 @@ export async function runApprovedFeature(
   // 一两句；失败不落回主生成（那会重新走到 proposeRule / recordPosition），而是用
   // 中性兜底收尾，并把已发生的真实用量照记。
   if (replyOnly) {
-    const reply = await generateReplyOnlyReply(text, deps.llm);
+    const reply = await generateReplyOnlyReply(text, deps.llm, options.language);
     usage = addFeatureUsage(usage, reply.usage);
     return {
       mode: "reply_only",
@@ -349,7 +358,7 @@ export async function runApprovedFeature(
 
   let extraction: FeatureExtraction;
   try {
-    extraction = await match.extract(text, deps.llm);
+    extraction = await match.extract(text, deps.llm, options.language);
   } catch (error) {
     return failed(error);
   }
@@ -357,7 +366,10 @@ export async function runApprovedFeature(
 
   let execution: FeatureExecution;
   try {
-    execution = await match.execute(extraction, ctx, deps);
+    // **语言判定随上下文进功能模块**：`execute` 里的生成步骤拿到的 `user` 是拼出来的
+    // 字段清单（不是住户原话），它只能靠这里注入的判定说住户这一轮的语言——在功能模块
+    // 里从 `user` 现推会必然推成中文（见 `feature-llm.ts` 的 `language` 说明）。
+    execution = await match.execute(extraction, { ...ctx, language: options.language }, deps);
   } catch (error) {
     return failed(error);
   }

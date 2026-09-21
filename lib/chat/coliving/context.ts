@@ -15,7 +15,7 @@ import {
   rosterStatus,
   type Sender,
 } from "./repo";
-import { residentLanguageInstruction } from "./language";
+import { languageInstruction, type LanguageDecision } from "./language";
 import type {
   ContextReceiptSection,
   ContextSectionsReceipt,
@@ -75,7 +75,12 @@ export async function buildContext(
   opts: {
     justJoined?: boolean;
     answering?: { purpose: string | null; body: string; sentAt: Date; act?: string | null } | null;
-    incomingText?: string;
+    /**
+     * 本轮的**住户语言判定**（`language.ts` 的 `decideLanguage`）。由 `turn.ts`
+     * 在轮次边界判一次后传进来——**这里不重算、也不看 `incomingText`**：
+     * 判定的依据不止这一句原话（还有会话回退），在这里重算就只剩原话那一半。
+     */
+    language?: LanguageDecision;
   } = {}
 ): Promise<ColivingContext> {
   const [
@@ -134,8 +139,8 @@ export async function buildContext(
     sectionStart = lines.length;
   };
 
-  if (opts.incomingText) {
-    lines.push(residentLanguageInstruction(opts.incomingText));
+  if (opts.language) {
+    lines.push(languageInstruction(opts.language));
     lines.push("");
   }
   // 住民语言指令是**每轮跟着原话变的动态前导**，不是稳定分节，不进收据——

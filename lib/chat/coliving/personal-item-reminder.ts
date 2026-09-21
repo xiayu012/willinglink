@@ -12,6 +12,7 @@ import type {
   FeatureExecution,
   FeatureExtraction,
 } from "./feature-types";
+import type { LanguageDecision, ResidentLanguage } from "./language";
 import { deliverSms, resolveNamedRecipient, smsRecipientIneligibleReply } from "./sms-delivery";
 
 /**
@@ -111,15 +112,41 @@ function composeUser(name: string, item: string, notPutBack: boolean): string {
   ].join("\n");
 }
 
-/** 模型回执不可用时的兜底短句（只在模型没写出安全短句时用）。 */
-export function personalItemFallbackReceipt(recipientName: string): string {
+/**
+ * 模型回执不可用时的兜底短句（只在模型没写出安全短句时用）。
+ *
+ * `language` 是本轮住户语言判定（缺省中文，与加语言闸之前逐字一致）：英文写法与中文
+ * 同义、同分寸，**不是另一套话术**。住户用英文交办、模型又没写出可用回执时回一段中文，
+ * 正是「用对方的语言回答」最容易被代码兜底破坏的地方。
+ */
+export function personalItemFallbackReceipt(
+  recipientName: string,
+  language: ResidentLanguage = "zh"
+): string {
+  if (language === "en") {
+    return `Okay — I've asked ${recipientName} to check with you before using your things.`;
+  }
   return `好，已经提醒${recipientName}了，让他用你的个人物品前先跟你说一声。`;
 }
 
-/** 回执可用性：非空且不长；生成阶段只看到收窄字段，不做中文大正则。 */
-function safeReceipt(receipt: string, fallback: string): string {
+/**
+ * 回执可用性：非空且不长；生成阶段只看到收窄字段，不做中文大正则。
+ *
+ * 上限**按语言取**：同一条「一句短回执」在英文里字符数本来就多，按中文上限卡会让
+ * 英文回执几乎必然被换成兜底——与 `feature-qa.ts` 的 `FEATURE_QA_MAX_CHARS_EN` 同一
+ * 条口径，只放宽英文，中文一字不动。
+ */
+const RECEIPT_MAX_CHARS = 80;
+const RECEIPT_MAX_CHARS_EN = 160;
+
+function safeReceipt(
+  receipt: string,
+  fallback: string,
+  language: ResidentLanguage = "zh"
+): string {
   const t = receipt.trim();
-  return t && t.length <= 80 ? t : fallback;
+  const max = language === "en" ? RECEIPT_MAX_CHARS_EN : RECEIPT_MAX_CHARS;
+  return t && t.length <= max ? t : fallback;
 }
 
 export const personalItemFeature: ApprovedFeature = {
@@ -127,13 +154,14 @@ export const personalItemFeature: ApprovedFeature = {
   label: PERSONAL_ITEM_FEATURE_LABEL,
   routeDescription: "提醒某位同住人：用这位住户的个人物品之前先问一声",
 
-  async extract(text, llm): Promise<FeatureExtraction> {
+  async extract(text, llm, language): Promise<FeatureExtraction> {
     const { value, usage } = await structuredCall(llm, {
       stage: `feature:${PERSONAL_ITEM_FEATURE_ID}:extract`,
       name: "personal_item_extract",
       schema: personalItemExtractionSchema,
       system: extractSystem(),
       user: text,
+      language,
       // 推理 token 计入上限：给足「推理 + 两个短字段的 JSON」。
       maxOutputTokens: FEATURE_EXTRACT_MAX_OUTPUT_TOKENS,
     });
@@ -184,6 +212,9 @@ export const personalItemFeature: ApprovedFeature = {
       schema: personalItemComposeSchema,
       system: composeSystem(),
       user: composeUser(recipient.name, fields.item ?? "", fields.notPutBack ?? false),
+      // `user` 是拼出来的中文字段清单、**不是住户原话**：语言只能取轮次判定（经前门
+      // 注入 `ctx.language`），从 `user` 现推必然推成中文。
+      language: ctx.language,
       // 推理 token 计入上限：给足「推理 + 一条短信正文 + 一句回执」。
       maxOutputTokens: FEATURE_COMPOSE_MAX_OUTPUT_TOKENS,
     });
@@ -206,7 +237,11 @@ export const personalItemFeature: ApprovedFeature = {
     return {
       handling: {
         status: "handled",
-        reply: safeReceipt(out.receipt ?? "", personalItemFallbackReceipt(recipient.name)),
+        reply: safeReceipt(
+          out.receipt ?? "",
+          personalItemFallbackReceipt(recipient.name, ctx.language?.language),
+          ctx.language?.language
+        ),
         sms: {
           to: sent.to,
           personId: recipient.personId,

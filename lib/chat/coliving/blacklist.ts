@@ -58,6 +58,10 @@
  * 模式切换——见 `docs/FEATURE_RUNTIME_ARCHITECTURE.md`。
  */
 
+// 纯类型导入（编译后不产生 require）：语言判定的类型只有 `language.ts` 一处，
+// 这里不重写一份 `"en" | "zh"`。（`language.ts` 自身零 import，不成环。）
+import type { ResidentLanguage } from "./language";
+
 /** 一条**住户可感知的、老板明确批准拒绝**的请求：具名 + 代码站得住的原因。 */
 export type BlacklistedCapability = {
   /** 稳定 id（台账 / 结构化状态用）：**直接表达这一个具体动作**，不用大类命名 */
@@ -226,7 +230,17 @@ export function blacklistedCapabilityById(
  * **黑名单命中时的纯代码真话回复**（只在表非空、且那次路由选中了该条目、且资格复核
  * 通过时走到）。不调模型、不列内部术语、不编处理方案：只如实说这件事目前办不了，
  * 给出老板给的理由。正文短、中性，和两条受约束回复路径同一分寸。
+ *
+ * `language` 是本轮住户语言判定（缺省按中文，与加语言闸之前逐字一致）。英文只是把
+ * **同一句式**换一种语言说出来：`label` 与 `reason` 是**老板登记的原话**，照旧原样引用、
+ * 不另翻一份（与 `feature-qa.ts` 的英文兜底同一条口径）。
  */
-export function blacklistedReply(cap: BlacklistedCapability): string {
+export function blacklistedReply(
+  cap: BlacklistedCapability,
+  language: ResidentLanguage = "zh"
+): string {
+  if (language === "en") {
+    return `There's one thing I can't do for you — ${cap.label}: ${cap.reason}.`;
+  }
   return `「${cap.label}」这件事我目前没法替你办：${cap.reason}。`;
 }
