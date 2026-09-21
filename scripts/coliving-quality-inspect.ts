@@ -7878,22 +7878,21 @@ async function main() {
     assert(start > 0, "ContextReceiptSection 必须导出");
     const sectionType = src.slice(start, src.indexOf("};", start));
     // 只认**字段声明行**，其余一律忽略：空行、注释（说明字符数口径时会引 `text`，
-    // 那不是承载字段）、类型声明头 `export type ... = {`、以及花括号本身。所以按
-    // 换行**和花括号**切，并用锚定正则只留 `标识符: 类型;` 这种字段行——声明行与
-    // 收尾括号不管怎么排版都不会被当成字段。
+    // 那不是承载字段）、类型声明头 `export type ... = {`、以及花括号本身。按换行 /
+    // 花括号 / 分号切词，再用锚定正则只留 `标识符: 类型` 形态的字段——声明头与收尾
+    // 括号无论怎么排版（单独一行、与字段同行）都不会被当成字段。
     const fieldLines = sectionType
-      .split(/[\r\n{}]/)
-      .map((line) => line.trim())
+      .split(/[\r\n{};]/)
+      .map((t) => t.trim())
       .filter(
         (t) =>
           t.length > 0 &&
           !t.startsWith("//") &&
           !t.startsWith("*") &&
           !t.startsWith("/*") &&
-          !t.startsWith("export ") &&
-          !t.startsWith("type ") &&
-          /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*[^;{}]+;$/.test(t)
-      );
+          /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*[^;{}]+$/.test(t)
+      )
+      .map((t) => `${t};`);
     assert(
       fieldLines.every((line) => !/\b(text|body)\b/.test(line)),
       "ContextReceiptSection 不得有任何 text / body 之类的正文承载字段"
@@ -7935,6 +7934,139 @@ async function main() {
       );
     }
   });
+
+  /**
+   * ── corpus-045 英文烘干机规则：合法语料 + 全英文住户轮次 + 只有主生成带安全回执 ──
+   *
+   * 这是英文响应层与上下文收据的**开发-验收环**（离线、确定性、不调模型）：
+   *  1. 语料本身要合法——直接走 `validateScenario`，不在这里另立一套格式判断；
+   *  2. 住户轮次必须真的是英文原话——直接复用语言层自己的判定
+   *     （`residentLanguage`），**不在这里另写一套"按关键词猜语言"的业务逻辑**，
+   *     也不翻译、不改写场景对话；
+   *  3. 评测逐轮记录里的 `ContextReceipt` **只在主生成那条路径上有值**（早返回 /
+   *     功能前门一律显式 null），结构上只可能有安全字段（id/chars + 代码认识的
+   *     检索工具名），稳定分节非空。
+   * **不硬编码任何模型句子**：整条检查只认语法结构与归一化后的形状。
+   */
+  check(
+    "corpus-045 英文烘干机规则：语料合法、住户轮次全英文、只有主生成带安全回执",
+    () => {
+      const file =
+        "lib/chat/coliving/evals/scenarios/corpus-045-english-dryer-rule-2026-09-20.json";
+      const scenario = validateScenario(
+        JSON.parse(readFileSync(file, "utf8")),
+        file
+      );
+      assert.ok(scenario.turns.length > 0, "corpus-045 至少一轮住户原话");
+
+      // 住户轮次全英文：直接用语言层自己的判定（`residentLanguage` 返回 "en"），
+      // 不在这里另写一套按关键词猜语言的逻辑；被翻回中文（Han 字符）会立刻变 "zh"。
+      for (const [i, t] of scenario.turns.entries()) {
+        assert.ok(t.text.trim().length > 0, `corpus-045 turns[${i}] 不得为空`);
+        assert.equal(
+          residentLanguage(t.text),
+          "en",
+          `corpus-045 turns[${i}] 必须是英文住户原话（不得被翻译）`
+        );
+      }
+      // 预置的住户可见历史用同一口径（都是住户看得到的英文正文）。
+      for (const [i, m] of (scenario.setup?.priorMessages ?? []).entries()) {
+        assert.equal(
+          residentLanguage(m.body),
+          "en",
+          `corpus-045 setup.priorMessages[${i}] 必须是英文住户可见正文`
+        );
+      }
+
+      // ── 回执只随主生成带出：早返回 / 功能前门显式 null ─────────────────
+      const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+      assert(
+        turnSrc.includes("contextReceipt: ContextReceipt | null;"),
+        "回合结果必须带可空 ContextReceipt（null=没走主生成）"
+      );
+      assert.equal(
+        turnSrc.split("contextReceipt: {").length - 1,
+        1,
+        "只有主生成那一条返回路径能带 ContextReceipt 对象"
+      );
+      assert.equal(
+        turnSrc.split("contextReceipt: null,").length - 1,
+        6,
+        "六条非主生成返回点都必须显式 null（与 promptComposition 同一批）"
+      );
+      assert(
+        turnSrc.includes("...ctx.receipt,") &&
+          turnSrc.includes("retrievalToolNames: retrievalToolNamesUsed(toolsUsed),"),
+        "主生成回执必须来自 buildContext 的分节 + 本轮真跑过的按需检索工具名"
+      );
+
+      // 评测（eval）逐轮记录：契约里有**文档化的可空** ContextReceipt，且只从
+      // 主生成结果的 `last.contextReceipt` 原样带进报告 JSON。
+      const evalSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
+      assert(
+        evalSrc.includes("contextReceipt: ContextReceipt | null;") &&
+          evalSrc.includes("contextReceipt: last.contextReceipt,"),
+        "评测逐轮记录必须沿用可空 ContextReceipt，并只从主生成结果带进报告"
+      );
+      // 报告：字段**可缺省**（旧报告不展示），原样透传给三态渲染。
+      const reportSrc = readFileSync("scripts/coliving-report.ts", "utf8");
+      assert(
+        /contextReceipt\?: unknown;/.test(reportSrc) &&
+          reportSrc.includes("contextReceipt: t?.contextReceipt,"),
+        "报告契约必须把 ContextReceipt 标成可缺省（旧报告不展示）并原样透传"
+      );
+
+      // ── 只可能有安全字段：拿一份**故意塞进正文**的收据归一化 ───────────
+      const SAMPLE_SECRET = "SHOULD-NOT-SURVIVE-corpus-045";
+      const safe = normalizeContextReceipt({
+        sections: [
+          { id: "unknowns", chars: 120, text: SAMPLE_SECRET },
+          { id: "now", chars: 42, body: SAMPLE_SECRET },
+        ],
+        retrievalToolNames: ["recall", SAMPLE_SECRET, "not-a-tool"],
+      });
+      assert.ok(safe, "形状认识的收据要归一化");
+      assert.deepEqual(
+        safe.sections,
+        [
+          { id: "unknowns", chars: 120 },
+          { id: "now", chars: 42 },
+        ],
+        "归一化后只能留下安全字段 id/chars，正文与额外字段一律丢弃"
+      );
+      assert.deepEqual(
+        safe.retrievalToolNames,
+        ["recall"],
+        "按需检索工具名只留代码认识的名单，名单外字符串丢弃"
+      );
+      assert(
+        !JSON.stringify(safe).includes(SAMPLE_SECRET),
+        "归一化后的收据不得残留任何正文"
+      );
+
+      // ── 稳定分节非空：主生成回执的 sections 来自 buildContext ──────────
+      const ctxSrc = readFileSync("lib/chat/coliving/context.ts", "utf8");
+      assert(
+        ctxSrc.includes("receipt: { sections },"),
+        "分节回执必须随上下文一起返回（主生成回执的 sections 由此而来）"
+      );
+      // 顶层（两空格缩进）无条件收尾的稳定分节每轮都在 → sections 必然非空；
+      // 条件分节是更深的缩进，没出现就不进列表。
+      for (const id of [
+        "unknowns",
+        "now",
+        "channel",
+        "roster",
+        "house-rules",
+        "open-cases",
+      ]) {
+        assert(
+          new RegExp(`^  endSection\\("${id}"\\);`, "m").test(ctxSrc),
+          `主生成回执的非空稳定分节必须无条件收尾：${id}`
+        );
+      }
+    }
+  );
 
   /**
    * ── outreach.ts 的裸 generateText 不在评测路径上 ───────────────────────

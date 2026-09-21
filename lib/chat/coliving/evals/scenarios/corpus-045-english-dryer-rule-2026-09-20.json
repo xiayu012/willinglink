@@ -1,0 +1,36 @@
+{
+  "id": "corpus-045-english-dryer-rule-2026-09-20",
+  "source": "2026-09-20 的纯虚构英文多轮语料，用于观察英文住户的共同规则协商，以及每一轮的隐私安全上下文收据。三位虚构室友 Maya、Jordan、Priya 讨论一条精确规则：晚上十点之后烘干机结束，使用者应在十分钟内清空机器，避免夜间提示音和下一位住户等待。\n\n这不是生产规则、不是黑名单条目、不是新增功能，也不授权任何额外出站能力。它不测试中文窄识别的共同规则状态机；它刻意走通用协调路径，验证英文输入不会被生硬翻译成中文，且评测报告能展示无正文的上下文收据。\n\n边界：只讨论夜间烘干机结束后的清空时限。洗衣、噪音、罚款、访客、公共区域和任何其他规则均不在本场景内。名字与对话均为虚构，不能当作真实住户或真实事件。",
+  "household": { "label": "Eval-045 English dryer clearing rule" },
+  "people": [
+    { "phone": "+15550450001", "name": "Maya", "role": "tenant" },
+    { "phone": "+15550450002", "name": "Jordan", "role": "tenant" },
+    { "phone": "+15550450003", "name": "Priya", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["Maya", "Jordan", "Priya"],
+    "priorMessages": [
+      { "person": "Maya", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." },
+      { "person": "Jordan", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." },
+      { "person": "Priya", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550450001",
+      "text": "Could we make a house rule for the dryer? After 10 p.m., whoever uses it should empty it within ten minutes of the cycle ending, so the beeping doesn't keep people up and the next person isn't stuck waiting. Does that work for everyone?"
+    },
+    {
+      "from": "+15550450002",
+      "text": "That works for me. Ten minutes after a late dryer cycle is reasonable."
+    },
+    {
+      "from": "+15550450003",
+      "text": "I agree too. Let's keep the ten-minute limit after 10 p.m."
+    },
+    {
+      "from": "+15550450001",
+      "text": "Jordan's dryer finished a few minutes ago and it is still full. Please remind Jordan about the rule we agreed on."
+    }
+  ]
+}
