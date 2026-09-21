@@ -9,6 +9,10 @@
  * **不调 LLM、不连 DB、不发送**：只跑纯函数 + 一个把调用参数记下来的离线 mock。
  *
  * 覆盖（对应任务要求）：
+ * - **短英文原话表驱动矩阵**：`introduce yourself` 这类**只有一两个词**的英文短句必须由
+ *   原话直接判成英文（`direct`），并且真的走通「认出 → 功能问答 → **既有英文事实**
+ *   （`COORDINATOR_ROLE_NOTE_EN`）」；人名 / 号码 / 日期 / 短标签 / 单个 `ok` 继续是
+ *   歧义，落会话回退 / 默认中文——这是本文件新增的核心回归；
  * - **英文自称问句**：`What does this AI do?` 必须被认成自称问句、走进问答，且兜底用的是
  *   **既有的英文事实措辞**（`COORDINATOR_ROLE_NOTE_EN`），不是中文那段；
  * - **中文一字不动**：同一入口的中文问句仍回中文事实（`COORDINATOR_ROLE_NOTE`）；
@@ -17,15 +21,21 @@
  * - **贯通**：正文上限、模型硬指令、代码兜底都读**轮次判定**（含回退），
  *   不是各自拿这一句文本再推一遍——`"ok"` 单看是定不了的，但回退能定；
  * - **判定差遣**：`direct` 与回退给模型的措辞不同（不谎称原话就是那种语言），正文一字不差；
- * - **观测不带正文**：`observeLanguage` 只记判定与来源。
+ * - **观测不带正文**：`observeLanguage` 只记判定与来源；
+ * - **功能名的本地化显示名**（本文件第二轮新增）：`introduce yourself` 的**完整兜底正文里
+ *   一个汉字都没有**，且两个功能的**英文显示名**都在；英文轮次交给模型的事实包与
+ *   grounding 校验认的是**同一份**英文显示名（写中文登记名的英文正文判不通过），
+ *   中文轮次的登记名与既有断言一字不动。
  */
 
 import assert from "node:assert/strict";
 import { blacklistedCapabilityById, blacklistedReply } from "./blacklist";
 import {
   asksAboutSelf,
+  asksWhatIsAvailable,
   featureQaFallback,
   featureQaMaxChars,
+  findUngroundedFeatureQaFacts,
   isFeatureQaQuestion,
   runFeatureQa,
   FEATURE_QA_MAX_CHARS,
@@ -36,6 +46,9 @@ import {
   COORDINATOR_ROLE_NOTE,
   COORDINATOR_ROLE_NOTE_EN,
   FULL_FLOW_NOTE,
+  blacklistFact,
+  buildFeatureQaFacts,
+  featureDisplayName,
 } from "./feature-facts";
 import {
   EMPTY_FEATURE_USAGE,
@@ -44,18 +57,27 @@ import {
 } from "./feature-llm";
 import {
   classifyDirectLanguage,
+  containsHan,
   decideLanguage,
+  isExplicitEnglishShortUtterance,
   languageInstruction,
   observeLanguage,
+  type LanguageSource,
+  type ResidentLanguage,
 } from "./language";
 import { REPLY_ONLY_FALLBACK, REPLY_ONLY_FALLBACK_EN, replyOnlyFallback } from "./reply-only";
 
-/** 与 `APPROVED_FEATURES` 同形的最小型夹具（只用来跑纯函数，不引功能模块）。 */
+/**
+ * 与 `APPROVED_FEATURES` 同形的最小型夹具（只用来跑纯函数，不引功能模块）。
+ * **两个显示名都带**：`label` 是老板登记的中文名（台账 / 中文正文），`labelEn` 是
+ * 只在住户说英文时用的自然英文显示名——这正是本文件第二轮要钉住的机制。
+ */
 const OPEN_FEATURES = [
-  { id: "personal_item", label: "个人物品使用提醒" },
-  { id: "night_laundry", label: "夜间洗衣提醒" },
+  { id: "personal_item", label: "个人物品使用提醒", labelEn: "personal item reminder" },
+  { id: "night_laundry", label: "夜间洗衣提醒", labelEn: "night-time laundry reminder" },
 ] as const;
 const OPEN_LABELS = OPEN_FEATURES.map((f) => f.label);
+const OPEN_LABELS_EN = OPEN_FEATURES.map((f) => f.labelEn);
 
 /** 英文住户问句（任务点名的那一句）与它的中文对照。 */
 const EN_SELF_INTRO_QUESTION = "What does this AI do?";
@@ -76,6 +98,72 @@ const EN_HISTORY = [
 const ZH_HISTORY = [
   { role: "user" as const, content: EN_TURN },
   { role: "assistant" as const, content: "好，已经提醒阿川了，让他晚上十点后别用烘干机。" },
+];
+
+/**
+ * ── 任务点名的**六句短英文自称问句**（只有 `introduce yourself` 真的掉了词数下限）──
+ *
+ * 每一句都必须走通同一条链路：`asksAboutSelf` 认出 → `isFeatureQaQuestion` 进问答 →
+ * `decideLanguage` 判成英文 → 兜底给的是**既有的那段英文事实**。
+ */
+const SELF_INTRO_SHORT_UTTERANCES = [
+  "introduce yourself",
+  "who are you",
+  "what are you",
+  "tell me about yourself",
+  "how do you work",
+  "what can you do",
+] as const;
+
+/**
+ * ── 表驱动矩阵：**一句话 → 轮次判定**（一律空历史，逼原话自己给出判定）──────
+ *
+ * 正例行是「整句就是一句英文短话」的那一档：`introduce yourself` 两词，正是任务里
+ * 复现出来的真实故障（两词 < 三个词的下限 → 原话定不了 → 无历史 → 默认中文 →
+ * 英文住户收到中文自我介绍）。
+ *
+ * **负例行是同一个 bug 的另一半**：修词数下限最容易的错法是把「短拉丁串」一律当英文，
+ * 于是人名、号码、日期、`Wi-Fi` 这种短标签和住户随手回的一个 `ok` 都会把回复语言
+ * 翻成英文。每一行都钉住「它**没有**被翻过去」。
+ */
+const LANGUAGE_MATRIX: readonly {
+  text: string;
+  language: ResidentLanguage;
+  source: LanguageSource;
+  note: string;
+}[] = [
+  // —— 短英文自称 / 元问题：原话自己就定得了 ——
+  { text: "introduce yourself", language: "en", source: "direct", note: "两词，任务里的真实故障" },
+  { text: "Introduce yourself!", language: "en", source: "direct", note: "首字母大写 + 句尾叹号，同一条" },
+  { text: "who are you", language: "en", source: "direct", note: "自称短问句" },
+  { text: "what are you", language: "en", source: "direct", note: "自称短问句" },
+  { text: "tell me about yourself", language: "en", source: "direct", note: "自称短问句" },
+  { text: "how do you work", language: "en", source: "direct", note: "自称短问句" },
+  { text: "what can you do", language: "en", source: "direct", note: "自称短问句" },
+  { text: "what’s this?", language: "en", source: "direct", note: "弯撇号 + 问号仍要认出来" },
+  // —— 两个词以上、整句是一句英文的招呼 / 确认 ——
+  { text: "good morning", language: "en", source: "direct", note: "两词英文招呼" },
+  { text: "thank you", language: "en", source: "direct", note: "两词英文道谢" },
+  { text: "sounds good", language: "en", source: "direct", note: "两词英文确认" },
+
+  // —— 负例：这些**不许**被当成英文（空历史 → 默认中文，不是 direct）——
+  { text: "Mary", language: "zh", source: "default", note: "一个词的人名" },
+  { text: "Ah Chuan", language: "zh", source: "default", note: "两个词的人名" },
+  { text: "13800138000", language: "zh", source: "default", note: "电话号码" },
+  { text: "+86 138 0013 8000", language: "zh", source: "default", note: "带国家码的电话号码" },
+  { text: "2026-09-20", language: "zh", source: "default", note: "日期" },
+  { text: "ok", language: "zh", source: "default", note: "孤零零一个 ok：中文住户也这么回，交给会话回退" },
+  { text: "OK!", language: "zh", source: "default", note: "大写 + 叹号的 ok 同样不算英文" },
+  { text: "yes", language: "zh", source: "default", note: "单词确认不收（单词原话一律留给会话回退）" },
+  { text: "hi", language: "zh", source: "default", note: "单词招呼不收（中文住户也会打 hi）" },
+  { text: "Wi-Fi", language: "zh", source: "default", note: "短拉丁标签，不是一句话" },
+  { text: "Room 3B", language: "zh", source: "default", note: "短拉丁标签，不是一句话" },
+
+  // —— 中文：同一入口中文口径一字不动 ——
+  { text: "你是谁？", language: "zh", source: "direct", note: "中文自称问句" },
+  { text: "介绍你自己", language: "zh", source: "direct", note: "中文自称问句" },
+  { text: "提醒 Alex 晚上别用烘干机", language: "zh", source: "direct", note: "中文 + 一个英文人名仍算中文" },
+  { text: "ok 那就这样", language: "zh", source: "direct", note: "中文句首一个 ok 不改判定" },
 ];
 
 /** 只记调用参数、按 `name` 返回预置文本的离线 mock（解析 / 校验照跑）。 */
@@ -110,10 +198,10 @@ async function check(name: string, fn: () => void | Promise<void>): Promise<void
   console.log(`  ✓ ${name}`);
 }
 
-/** 英文自称正文（含身份锚点 AI + 全功能名 + 完整流程那条）。 */
+/** 英文自称正文（含身份锚点 AI + 两个**英文显示名** + 完整流程那条，通篇无汉字）。 */
 const EN_SELF_INTRO_REPLY =
-  "I'm the AI coordinator for this house — not a person, not the landlord. I've got " +
-  `dedicated shortcuts for ${OPEN_LABELS.join(" and ")}, which run faster and cheaper; ` +
+  "I'm the AI coordinator for this house — not a person, not the landlord. I handle " +
+  `${OPEN_LABELS_EN.join(" and ")}, which run faster and cheaper; ` +
   "anything else that needs coordinating between the people who live here goes through " +
   "the full coordination flow, so it's not that I can't do it.";
 
@@ -131,6 +219,49 @@ async function main(): Promise<void> {
     assert.equal(classifyDirectLanguage(BARE_OK), null, "一个 'ok' 不足以证明在说英文");
     assert.equal(classifyDirectLanguage("Ah Chuan 2026-09-20 22:00"), null, "人名 + 数字不算英文");
     assert.equal(classifyDirectLanguage(MIXED_TURN), null, "中英混写 = 歧义，不就地猜");
+  });
+
+  await check("表驱动矩阵：短英文整句按原话定；人名 / 号码 / 日期 / 短标签 / 单词仍不行", () => {
+    for (const row of LANGUAGE_MATRIX) {
+      const d = decideLanguage(row.text);
+      assert.equal(d.language, row.language, `「${row.text}」语言判错（${row.note}）`);
+      assert.equal(d.source, row.source, `「${row.text}」判定来源错（${row.note}）`);
+      assert.equal(
+        d.direct,
+        row.source === "direct" ? row.language : null,
+        `「${row.text}」direct 字段与来源不一致（${row.note}）`
+      );
+    }
+    // 矩阵必须真的两种语言、两种来源都覆盖到，否则这条检查是空转。
+    assert.deepEqual(
+      [...new Set(LANGUAGE_MATRIX.map((r) => r.language))].sort(),
+      ["en", "zh"],
+      "矩阵必须覆盖两种语言"
+    );
+    assert.ok(
+      LANGUAGE_MATRIX.some((r) => r.source === "direct") &&
+        LANGUAGE_MATRIX.some((r) => r.source === "default"),
+      "矩阵必须同时覆盖 direct 与 default"
+    );
+  });
+
+  await check("短英文清单是**整句相等**，不是关键词表（不靠包含匹配）", () => {
+    // 整句相等 → 一个字不同就不匹配：人名 / 标签 / 「挂着一件别的事」的问句都不会被吞。
+    assert.equal(isExplicitEnglishShortUtterance("introduce yourself to my roommate"), false);
+    assert.equal(isExplicitEnglishShortUtterance("who are you exactly"), false);
+    // 单独一个词不匹配——这正是「不是关键词表」的证据。
+    assert.equal(isExplicitEnglishShortUtterance("introduce"), false);
+    assert.equal(isExplicitEnglishShortUtterance("yourself"), false);
+    // 人名 / 号码 / 日期 / 一个 ok / 带汉字 / 空串。
+    assert.equal(isExplicitEnglishShortUtterance("Ah Chuan"), false);
+    assert.equal(isExplicitEnglishShortUtterance("13800138000"), false);
+    assert.equal(isExplicitEnglishShortUtterance("2026-09-20"), false);
+    assert.equal(isExplicitEnglishShortUtterance(BARE_OK), false);
+    assert.equal(isExplicitEnglishShortUtterance("你是谁"), false);
+    assert.equal(isExplicitEnglishShortUtterance(""), false);
+    // 归一化只动两端标点与大小写，不动任何一个实词。
+    assert.equal(isExplicitEnglishShortUtterance("  INTRODUCE YOURSELF?  "), true);
+    assert.equal(isExplicitEnglishShortUtterance("introduce yourself"), true);
   });
 
   await check("歧义原话回退读会话里最近的、判得出来的那一条；都读不出来才落默认中文", () => {
@@ -201,7 +332,7 @@ async function main(): Promise<void> {
     assert.equal(asksAboutSelf(ZH_SELF_INTRO_QUESTION), true);
   });
 
-  await check("英文自称兜底用既有的英文事实措辞；中文问句仍回中文事实", () => {
+  await check("英文自称兜底用既有的英文事实措辞与英文功能显示名；中文问句口径一字不动", () => {
     const en = featureQaFallback({
       question: EN_SELF_INTRO_QUESTION,
       openFeatures: OPEN_FEATURES,
@@ -209,8 +340,12 @@ async function main(): Promise<void> {
     assert(en.includes(COORDINATOR_ROLE_NOTE_EN), "必须用既有英文身份事实");
     assert(en.includes("AI"), "不冒充真人：AI 两字不能省");
     assert(
-      OPEN_LABELS.every((l) => en.includes(l)),
-      "功能名照旧原样引用老板登记的原话（不另翻一份）"
+      OPEN_LABELS_EN.every((l) => en.includes(l)),
+      "英文兜底要用英文显示名列全功能（不再是老板登记的中文原话）"
+    );
+    assert(
+      !OPEN_LABELS.some((l) => en.includes(l)),
+      "英文兜底不得夹带中文功能名——中英混排不是可接受的英文体验"
     );
     assert(!en.includes(COORDINATOR_ROLE_NOTE), "不得混进中文身份事实");
 
@@ -220,7 +355,200 @@ async function main(): Promise<void> {
     });
     assert(zh.includes(COORDINATOR_ROLE_NOTE));
     assert(zh.includes(FULL_FLOW_NOTE));
+    assert(OPEN_LABELS.every((l) => zh.includes(l)), "中文兜底仍用登记名");
     assert(!zh.includes(COORDINATOR_ROLE_NOTE_EN), "中文问句不得回英文事实");
+  });
+
+  await check("六句短英文自称问句真的走进功能问答，兜底一律是**既有英文事实**", async () => {
+    for (const question of SELF_INTRO_SHORT_UTTERANCES) {
+      const decision = decideLanguage(question);
+      assert.equal(decision.language, "en", `「${question}」必须是英文轮次`);
+      assert.equal(decision.source, "direct", `「${question}」的依据必须是原话`);
+      assert.equal(asksAboutSelf(question), true, `「${question}」必须被认成自称问句`);
+      assert.equal(isFeatureQaQuestion(question), true, `「${question}」必须进功能问答`);
+
+      // ① 兜底本身（生产里 `turn.ts` 传的就是这个判定）。
+      const fallback = featureQaFallback({
+        question,
+        openFeatures: OPEN_FEATURES,
+        language: decision,
+      });
+      assert(fallback.includes(COORDINATOR_ROLE_NOTE_EN), `「${question}」兜底必须是既有英文身份事实`);
+      assert(!fallback.includes(COORDINATOR_ROLE_NOTE), `「${question}」兜底不得回中文身份事实`);
+      assert(fallback.includes("full coordination flow"), `「${question}」兜底要保留完整流程那条`);
+      assert(
+        OPEN_LABELS_EN.every((l) => fallback.includes(l)),
+        `「${question}」兜底要列全专门优化功能的英文显示名`
+      );
+
+      // ② **真的跑一遍问答链路**：模型一个字都写不出来 → 真落到那个兜底上
+      //    （不是假设"应该会落到"，是让 `runFeatureQa` 走完整条路）。
+      const { llm, calls } = mockFeatureLlm({
+        [FEATURE_QA_NAME]: JSON.stringify({ reply: "" }),
+      });
+      const qa = await runFeatureQa({
+        text: question,
+        openFeatures: OPEN_FEATURES,
+        language: decision,
+        llm,
+      });
+      assert(qa, `「${question}」必须进功能问答`);
+      assert("error" in qa!, `「${question}」空正文必须被换掉，不得放出去`);
+      assert.equal(qa!.reply, fallback, `「${question}」实际落到的兜底就是那句英文事实`);
+      assert.equal(calls.length, 1, `「${question}」只花一次模型调用`);
+      assert.equal(calls[0].language?.language, "en", `「${question}」模型那侧的硬指令也是英文`);
+    }
+  });
+
+  await check("对照组：同样的兜底入口，中文问句仍回中文事实（没被英文口径带跑）", async () => {
+    for (const question of ["你是谁？", "介绍你自己"]) {
+      const decision = decideLanguage(question);
+      assert.equal(decision.language, "zh", `「${question}」必须是中文轮次`);
+      const fallback = featureQaFallback({
+        question,
+        openFeatures: OPEN_FEATURES,
+        language: decision,
+      });
+      assert(fallback.includes(COORDINATOR_ROLE_NOTE), `「${question}」要回中文身份事实`);
+      assert(!fallback.includes(COORDINATOR_ROLE_NOTE_EN), `「${question}」不得回英文身份事实`);
+    }
+  });
+
+  await check("功能显示名按本轮语言取：中文登记名 / 英文显示名，同一个函数一处取", () => {
+    const [personalItem, nightLaundry] = OPEN_FEATURES;
+    assert.equal(featureDisplayName(personalItem, "zh"), OPEN_LABELS[0]);
+    assert.equal(featureDisplayName(nightLaundry, "zh"), OPEN_LABELS[1]);
+    assert.equal(featureDisplayName(personalItem, "en"), OPEN_LABELS_EN[0]);
+    assert.equal(featureDisplayName(nightLaundry, "en"), OPEN_LABELS_EN[1]);
+    // 两个名字都是登记好的数据，不是现翻的：英文显示名里不许有汉字。
+    for (const name of OPEN_LABELS_EN) {
+      assert.equal(containsHan(name), false, `英文显示名不得含汉字：${name}`);
+    }
+  });
+
+  await check("『introduce yourself』的完整兜底正文里一个汉字都没有，且两个英文显示名都在", () => {
+    const question = "introduce yourself";
+    const decision = decideLanguage(question);
+    assert.equal(decision.language, "en");
+    assert.equal(decision.source, "direct");
+
+    const fb = featureQaFallback({
+      question,
+      openFeatures: OPEN_FEATURES,
+      language: decision,
+    });
+    // 这一条是**整段正文**的断言：英文住户拿到的兜底里不许出现任何汉字（身份、功能名、
+    // 完整流程那条都算在内）。
+    assert.equal(containsHan(fb), false, `英文兜底里不许有汉字：${fb}`);
+    for (const name of OPEN_LABELS_EN) {
+      assert(fb.includes(name), `英文兜底必须含英文显示名：${name}`);
+    }
+    for (const label of OPEN_LABELS) {
+      assert(!fb.includes(label), `英文兜底不得夹带中文登记名：${label}`);
+    }
+    assert(fb.includes(COORDINATOR_ROLE_NOTE_EN), "英文兜底仍用既有英文身份事实");
+    assert(fb.includes("full coordination flow"), "英文兜底仍保留完整流程那条");
+    assert(fb.includes("AI"), "不冒充真人：AI 两字不能省");
+
+    // 同一个入口的中文问句：仍是登记名，口径一字不动。
+    const zhDecision = decideLanguage("介绍你自己");
+    const zhFb = featureQaFallback({
+      question: "介绍你自己",
+      openFeatures: OPEN_FEATURES,
+      language: zhDecision,
+    });
+    assert.equal(containsHan(zhFb), true, "中文兜底本来就是中文");
+    for (const label of OPEN_LABELS) {
+      assert(zhFb.includes(label), `中文兜底仍用登记名：${label}`);
+    }
+    for (const name of OPEN_LABELS_EN) {
+      assert(!zhFb.includes(name), `中文兜底不得冒出英文显示名：${name}`);
+    }
+  });
+
+  await check("英文轮次的事实包与 grounding 认英文显示名；写中文登记名的英文正文判不通过", async () => {
+    const question = "introduce yourself";
+    const decision = decideLanguage(question);
+
+    // ① 交给模型的那份事实包按本轮语言取显示名。
+    const enBundle = buildFeatureQaFacts({
+      openFeatures: OPEN_FEATURES,
+      question,
+      selfIntro: true,
+      language: decision,
+    });
+    assert.deepEqual(
+      enBundle.openFeatures.map((f) => f.displayName),
+      [...OPEN_LABELS_EN],
+      "英文事实包只给英文显示名（不把中文名丢给模型自己译）"
+    );
+    const zhBundle = buildFeatureQaFacts({
+      openFeatures: OPEN_FEATURES,
+      question: "介绍你自己",
+      selfIntro: true,
+      language: decideLanguage("介绍你自己"),
+    });
+    assert.deepEqual(
+      zhBundle.openFeatures.map((f) => f.displayName),
+      [...OPEN_LABELS],
+      "中文事实包仍只给登记名，一字不动"
+    );
+
+    // ② grounding 与兜底读的是同一个名字：英文事实包认英文名，中文名判缺。
+    const enFb = featureQaFallback({
+      question,
+      openFeatures: OPEN_FEATURES,
+      language: decision,
+    });
+    assert.deepEqual(
+      findUngroundedFeatureQaFacts(enFb, enBundle, { requireOpenLabels: true }),
+      [],
+      "英文兜底自己必须过英文事实包的 grounding"
+    );
+    const mixedReply = enFb
+      .replace(OPEN_LABELS_EN[0], OPEN_LABELS[0])
+      .replace(OPEN_LABELS_EN[1], OPEN_LABELS[1]);
+    assert.equal(
+      findUngroundedFeatureQaFacts(mixedReply, enBundle, { requireOpenLabels: true }).length,
+      2,
+      "英文正文里写中文登记名 = 两项都算没列出来，必须判缺"
+    );
+    // 反过来：中文事实包不认英文显示名（两边各认各的名字，不互相放过）。
+    assert.equal(
+      findUngroundedFeatureQaFacts(enFb, zhBundle, { requireOpenLabels: true }).length,
+      2,
+      "中文事实包不认英文显示名"
+    );
+
+    // ③ 真的跑一遍问答：英文名正文接受；夹中文名的英文正文回落兜底。
+    const ok = mockFeatureLlm({
+      [FEATURE_QA_NAME]: JSON.stringify({ reply: EN_SELF_INTRO_REPLY }),
+    });
+    const okQa = await runFeatureQa({
+      text: question,
+      openFeatures: OPEN_FEATURES,
+      language: decision,
+      llm: ok.llm,
+    });
+    assert.equal(okQa!.reply, EN_SELF_INTRO_REPLY, "全英文正文必须原样接受");
+    assert(!("error" in okQa!));
+    assert(
+      OPEN_LABELS_EN.every((n) => ok.calls[0].system.includes(n)) &&
+        !OPEN_LABELS.some((l) => ok.calls[0].system.includes(l)),
+      "英文轮次给模型的事实清单里只有英文显示名"
+    );
+
+    const mixed = mockFeatureLlm({
+      [FEATURE_QA_NAME]: JSON.stringify({ reply: mixedReply }),
+    });
+    const mixedQa = await runFeatureQa({
+      text: question,
+      openFeatures: OPEN_FEATURES,
+      language: decision,
+      llm: mixed.llm,
+    });
+    assert.equal(mixedQa!.reply, enFb, "夹中文功能名的英文正文必须换成纯英文兜底");
+    assert(mixedQa!.error, "回落时要把原因带出来");
   });
 
   await check("正文上限 / 兜底 / 发给模型的硬指令都读轮次判定（含会话回退），不是各自再推一次", async () => {
@@ -285,12 +613,168 @@ async function main(): Promise<void> {
     const zh = blacklistedReply(drainHair!);
     const en = blacklistedReply(drainHair!, "en");
     assert.notEqual(en, zh);
-    assert(en.includes(drainHair!.label) && en.includes(drainHair!.reason));
+    // 中文一字不动：仍是老板登记的原话与安全事实。
     assert(zh.includes(drainHair!.label) && zh.includes(drainHair!.reason));
+    // 英文取的是**同一份登记的英文说法**：整句一个汉字都没有，名称与理由都在。
+    // （原先这里钉的是 `en.includes(cap.label)`——那正是要修的中文泄漏，别再钉回去。）
+    assert.equal(containsHan(en), false, `黑名单英文真话不得夹汉字：${en}`);
+    assert(en.includes(drainHair!.labelEn) && en.includes(drainHair!.reasonEn));
+    assert(!en.includes(drainHair!.label) && !en.includes(drainHair!.reason));
 
     assert.equal(replyOnlyFallback(), REPLY_ONLY_FALLBACK, "缺省中文一字不动");
     assert.equal(replyOnlyFallback("zh"), REPLY_ONLY_FALLBACK);
     assert.equal(replyOnlyFallback("en"), REPLY_ONLY_FALLBACK_EN);
+  });
+
+  /**
+   * ── 表驱动：**「办不了」这条事实在两种语言下的贯通** ────────────────────────
+   *
+   * 每一行 = 一个住户问句 + 那一轮的轮次判定 + 引用（`referencedBlacklistedId`）。
+   * 三件事一起钉住：
+   *
+   * 1. **名称、理由、grounding 锚点是同一次按语言取用的结果**（`blacklistFact`）——
+   *    中文行取老板登记的中文原话，英文行取登记的英文说法；绝不出现"名称换成英文、
+   *    理由还是中文"的半截英文；
+   * 2. **代码兜底整段一个汉字都没有**（英文行）：英文住户被这条黑名单拒过、接着用英文
+   *    追问「那你到底能做什么」时，兜底正文里夹中文名称 / 理由正是要修的；
+   * 3. **grounding 用同一份锚点核对**：两种语言的兜底自己都必须判通过（否则每一句都会
+   *    被换掉），而**英文句式 + 中文登记名**的正文必须判**不**通过——这条正是英文住户
+   *    那个"永远过不了 grounding"的结构性 bug 的回归哨兵。
+   *
+   * 四行的语言来源刻意各不相同：direct（原话自己判得出）+ conversation-fallback
+   * （住户只回一个 `ok`，依据在会话回退里，中英各一行）。
+   */
+  const BLACKLISTED_ID = "ask-named-roommate-clean-shower-drain-hair";
+  const BLACKLIST_MATRIX: readonly {
+    label: string;
+    question: string;
+    history: readonly { role: "user" | "assistant"; content: string }[];
+    /** 问题本身带中文关键词 + 资格信号时走 `fromQuestion`，否则靠结构化引用回填 */
+    referencedId: string | null;
+    language: ResidentLanguage;
+    source: LanguageSource;
+  }[] = [
+    {
+      label: "中文 + 直接判定（问题本身就命中条目）",
+      question: "为什么不能让他清理地漏的头发？",
+      history: [],
+      referencedId: null,
+      language: "zh",
+      source: "direct",
+    },
+    {
+      label: "中文 + 会话回退（只回一个 ok）",
+      question: BARE_OK,
+      history: ZH_HISTORY,
+      referencedId: BLACKLISTED_ID,
+      language: "zh",
+      source: "conversation-fallback",
+    },
+    {
+      label: "英文 + 直接判定",
+      question: "what can you do",
+      history: [],
+      referencedId: BLACKLISTED_ID,
+      language: "en",
+      source: "direct",
+    },
+    {
+      label: "英文 + 会话回退（只回一个 ok）",
+      question: BARE_OK,
+      history: EN_HISTORY,
+      referencedId: BLACKLISTED_ID,
+      language: "en",
+      source: "conversation-fallback",
+    },
+  ];
+
+  await check("表驱动：黑名单事实的名称 / 理由 / 锚点 / 兜底正文都按轮次语言取同一份", () => {
+    const drainHair = blacklistedCapabilityById(BLACKLISTED_ID);
+    assert(drainHair, "夹具：黑名单那一项必须还在");
+    for (const row of BLACKLIST_MATRIX) {
+      const decision = decideLanguage(row.question, row.history);
+      assert.equal(decision.language, row.language, `[${row.label}] 轮次语言`);
+      assert.equal(decision.source, row.source, `[${row.label}] 判定来源`);
+
+      // 1) 事实包：名称、理由、锚点三者同语言。
+      const bundle = buildFeatureQaFacts({
+        openFeatures: OPEN_FEATURES,
+        question: row.question,
+        referencedBlacklistedId: row.referencedId,
+        selfIntro: asksAboutSelf(row.question),
+        language: decision,
+      });
+      assert.equal(bundle.blacklisted.length, 1, `[${row.label}] 必须关联到那一条`);
+      const fact = bundle.blacklisted[0];
+      assert.equal(fact.id, BLACKLISTED_ID, `[${row.label}] 关联的是哪一条`);
+      if (row.language === "en") {
+        assert.equal(fact.displayName, drainHair!.labelEn, `[${row.label}] 英文显示名`);
+        assert.equal(fact.reason, drainHair!.reasonEn, `[${row.label}] 英文理由`);
+        assert.deepEqual(
+          fact.reasonAnchors,
+          drainHair!.validation.reasonAnchorsEn,
+          `[${row.label}] 英文锚点`
+        );
+        assert.equal(containsHan(fact.displayName + fact.reason), false);
+        for (const a of fact.reasonAnchors) assert.equal(containsHan(a), false);
+      } else {
+        assert.equal(fact.displayName, drainHair!.label, `[${row.label}] 中文登记名`);
+        assert.equal(fact.reason, drainHair!.reason, `[${row.label}] 中文登记理由`);
+        assert.deepEqual(
+          fact.reasonAnchors,
+          drainHair!.validation.reasonAnchors,
+          `[${row.label}] 中文锚点`
+        );
+      }
+      // `blacklistFact` 是唯一取用处：事实包里的三个字段必须与它逐字相同。
+      assert.deepEqual(fact, blacklistFact(drainHair!, row.language), `[${row.label}] 取用一致`);
+
+      // 2) 代码兜底：说住户这一轮的语言，英文行一个汉字都没有。
+      const fallback = featureQaFallback({
+        question: row.question,
+        openFeatures: OPEN_FEATURES,
+        referencedBlacklistedId: row.referencedId,
+        language: decision,
+      });
+      assert(
+        fallback.includes(fact.displayName),
+        `[${row.label}] 兜底必须说出条目名称：${fallback}`
+      );
+      assert.equal(
+        containsHan(fallback),
+        row.language === "zh",
+        `[${row.label}] 兜底正文的语言：${fallback}`
+      );
+
+      // 3) grounding：本语言的兜底必须判通过（否则每次都会被换掉）。
+      assert.deepEqual(
+        findUngroundedFeatureQaFacts(fallback, bundle, {
+          requireOpenLabels: asksWhatIsAvailable(row.question) || asksAboutSelf(row.question),
+        }),
+        [],
+        `[${row.label}] 自家兜底必须过 grounding：${fallback}`
+      );
+    }
+
+    // 4) 回归哨兵：**英文轮次的事实包**喂一段中文兜底 → 必须判不通过（缺英文名 + 英文锚点）。
+    const enDecision = decideLanguage("what can you do");
+    const enBundle = buildFeatureQaFacts({
+      openFeatures: OPEN_FEATURES,
+      question: "what can you do",
+      referencedBlacklistedId: BLACKLISTED_ID,
+      selfIntro: true,
+      language: enDecision,
+    });
+    const zhFallback = featureQaFallback({
+      question: "你有什么功能？",
+      openFeatures: OPEN_FEATURES,
+      referencedBlacklistedId: BLACKLISTED_ID,
+      language: decideLanguage("你有什么功能？"),
+    });
+    assert(
+      findUngroundedFeatureQaFacts(zhFallback, enBundle, { requireOpenLabels: false }).length > 0,
+      "英文轮次里出现中文登记名 / 中文锚点的正文必须判不通过"
+    );
   });
 
   console.log(`\nlanguage gate：${passed} 项检查全部通过`);

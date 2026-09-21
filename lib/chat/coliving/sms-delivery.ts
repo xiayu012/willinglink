@@ -1,6 +1,7 @@
 import "server-only";
 
 import { assertCanWrite } from "./guard";
+import type { ResidentLanguage } from "./language";
 import * as repo from "./repo";
 
 /**
@@ -48,38 +49,78 @@ export const AMBIGUOUS_SMS_RECIPIENT_REPLY =
   "这条消息里提到了不止一位室友，请写清楚要提醒谁。";
 
 /**
+ * 上面那句的英文说法。**这一层是"收件人绑不上"的澄清句，会被当成本轮回复发给住户**
+ * （见各功能模块的 `reply`），所以它和正文一样要按本轮语言说——`language` 由轮次判定
+ * 一路传下来（缺省中文，既有调用逐字不变）。中文那句是既有口径，一字不动。
+ */
+export const AMBIGUOUS_SMS_RECIPIENT_REPLY_EN =
+  "That message mentions more than one roommate — tell me clearly who you mean.";
+
+/** 原话没有点名任何同住人时的澄清句（同样是住户可见的回复）。 */
+export const NO_NAMED_RECIPIENT_REPLY =
+  "住户这句话里没有点名任何一位同住人，我不知道要发给谁。";
+
+/** 上面那句的英文说法。 */
+export const NO_NAMED_RECIPIENT_REPLY_EN =
+  "Nobody in this message is named as the person to reach, so I don't know who " +
+  "to send it to.";
+
+/**
  * **收件人绑定：只能绑住户原话里点名且唯一的那位同住人。**
  *
  * 没点名、点了不止一位（或点到自己）都不成立——返回可读原因、零写入。**这个判定
  * 完全不依赖模型**：功能模块把原话交给这里，模型没有机会改收件人。
+ *
+ * `language` 是本轮住户语言判定（`turn.ts` 在轮次边界判一次，各功能模块照传，
+ * **不在这里重算**）：这两句 `reason` 是设计成住户可见的澄清句，功能模块会把它们
+ * 当本轮回复发出去，所以按同一份判定取中文原句或登记英文句。缺省中文。
  */
 export function resolveNamedRecipient(
   text: string,
   members: readonly repo.Member[],
-  senderPersonId: string
+  senderPersonId: string,
+  language: ResidentLanguage = "zh"
 ): SmsRecipientResult {
   const named = namedRoommates(text, members, senderPersonId);
   if (named.length === 0) {
     return {
       ok: false,
-      reason: "住户这句话里没有点名任何一位同住人，我不知道要发给谁。",
+      reason:
+        language === "en" ? NO_NAMED_RECIPIENT_REPLY_EN : NO_NAMED_RECIPIENT_REPLY,
     };
   }
   if (named.length > 1) {
-    return { ok: false, reason: AMBIGUOUS_SMS_RECIPIENT_REPLY };
+    return {
+      ok: false,
+      reason:
+        language === "en"
+          ? AMBIGUOUS_SMS_RECIPIENT_REPLY_EN
+          : AMBIGUOUS_SMS_RECIPIENT_REPLY,
+    };
   }
   return { ok: true, recipient: named[0] };
 }
 
-/** 收件人在**当前**渠道是否可达的真话说明；可发返回 null。 */
+/**
+ * 收件人在**当前**渠道是否可达的真话说明；可发返回 null。
+ *
+ * 姓名是**住户名册里的名字**（不是文案），中英两句都原样嵌在句中——英文句里出现一个
+ * 中文人名是正常的，要防的是整句没被翻译。`language` 口径同 `resolveNamedRecipient`：
+ * 由轮次判定传下来，不在这里重算。
+ */
 export function smsRecipientIneligibleReply(
-  target: Pick<repo.Member, "name" | "nameConfirmed" | "address">
+  target: Pick<repo.Member, "name" | "nameConfirmed" | "address">,
+  language: ResidentLanguage = "zh"
 ): string | null {
   if (!target.nameConfirmed) {
-    return `${target.name} 的姓名还没确认，我暂时没法把提醒发给他。`;
+    return language === "en"
+      ? `${target.name}'s name hasn't been confirmed yet, so I can't send them a reminder for now.`
+      : `${target.name} 的姓名还没确认，我暂时没法把提醒发给他。`;
   }
   if (!target.address) {
-    return `${target.name} 在当前渠道还没有登记地址，我暂时联系不上。`;
+    return language === "en"
+      ? `${target.name} has no address registered on this channel yet, so I can't reach them right now.`
+      : `${target.name} 在当前渠道还没有登记地址，我暂时联系不上。`;
   }
   return null;
 }
@@ -126,6 +167,9 @@ export async function deliverSms(
   },
   deps: SmsDeliveryDeps = smsDeliveryDeps
 ): Promise<SmsDelivery> {
+  // 可达性在功能模块里**已经查过一次**（查出来就把那句真话当本轮回复发出去、不投递）；
+  // 走到这里说明情况在本轮内变了，是**内部异常**、不是住户可见的回复——所以按内部
+  // 错误口径固定用中文，不跟住户语言走（内部错误不进正文，见 CLAUDE.md 的分工）。
   const ineligible = smsRecipientIneligibleReply(args.recipient);
   if (ineligible) {
     throw new Error(ineligible);

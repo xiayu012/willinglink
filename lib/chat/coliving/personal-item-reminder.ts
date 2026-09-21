@@ -34,6 +34,12 @@ import { deliverSms, resolveNamedRecipient, smsRecipientIneligibleReply } from "
 
 export const PERSONAL_ITEM_FEATURE_ID = "personal_item";
 export const PERSONAL_ITEM_FEATURE_LABEL = "个人物品使用提醒";
+/**
+ * 同一个功能的**自然英文显示名**（`feature-types.ts` 的 `labelEn`）。只在住户这一轮
+ * 说英文时用于给住户看的正文与 grounding 校验；台账、`purposeLabel`、数据库那一侧仍用
+ * `label`。**与 `label` 并排登记在这一处**，不是第二份清单。
+ */
+export const PERSONAL_ITEM_FEATURE_LABEL_EN = "personal item reminder";
 
 /**
  * 抽取阶段的小 schema：只保留本功能获准字段，不再回答 match（路由已判定）。
@@ -152,6 +158,7 @@ function safeReceipt(
 export const personalItemFeature: ApprovedFeature = {
   id: PERSONAL_ITEM_FEATURE_ID,
   label: PERSONAL_ITEM_FEATURE_LABEL,
+  labelEn: PERSONAL_ITEM_FEATURE_LABEL_EN,
   routeDescription: "提醒某位同住人：用这位住户的个人物品之前先问一声",
 
   async extract(text, llm, language): Promise<FeatureExtraction> {
@@ -180,16 +187,19 @@ export const personalItemFeature: ApprovedFeature = {
     ctx: FeatureContext,
     deps: FeatureDeps
   ): Promise<FeatureExecution> {
-    // 收件人只由代码从原话绑定；模型没有机会改人。
+    // 收件人只由代码从原话绑定；模型没有机会改人。语言取轮次判定（经前门注入
+    // `ctx.language`），因为这两句澄清句会被当成本轮回复发给住户。
+    const language = ctx.language?.language ?? "zh";
     const resolved = resolveNamedRecipient(
       ctx.text,
       ctx.members,
-      ctx.senderPersonId
+      ctx.senderPersonId,
+      language
     );
     if (!resolved.ok) return { handling: null, usage: EMPTY_FEATURE_USAGE };
     const { recipient } = resolved;
 
-    const ineligible = smsRecipientIneligibleReply(recipient);
+    const ineligible = smsRecipientIneligibleReply(recipient, language);
     if (ineligible) {
       return {
         handling: {

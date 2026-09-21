@@ -17,6 +17,7 @@ import {
 import { bestSchedulePlans } from "../lib/chat/coliving/scheduling";
 import { CHANNELS } from "../lib/chat/types";
 import {
+  containsHan,
   decideLanguage,
   observeLanguage,
   residentLanguage,
@@ -55,11 +56,22 @@ import {
   isSimpleAffirmation,
   isUnsolicitedContactClaim,
   uncoveredBlockedPersonIds,
+  coordinationReplyForSender,
+  ruleNoticeFallback,
+  RULE_NOTICE_FALLBACK,
+  RULE_NOTICE_FALLBACK_EN,
   scheduleInquiryConfirmation,
   selectUnsentContactFallback,
+  STANCE_ACK_REPLY,
+  STANCE_ACK_REPLY_EN,
   TRUTHFUL_UNSENT_REPLY,
+  TRUTHFUL_UNSENT_REPLY_EN,
+  UNKNOWN_REPLY,
+  UNKNOWN_REPLY_EN,
+  unknownSenderReply,
   type FeatureFinalizeDeps,
 } from "../lib/chat/coliving/turn";
+import type { OutboundAction, State } from "../lib/coordination/types";
 // 已开放的两项受约束第三方出站：**功能是代码里写死的清单，功能不是工具**。
 // 主生成的工具表里既没有短信工具、也没有功能工具；`features.ts` 的功能前门在
 // `buildContext` 之后、主生成之前对照清单，用**一次内部白名单路由调用**判「是不是明确
@@ -124,7 +136,9 @@ import {
   COORDINATOR_ROLE_NOTE_EN,
   FULL_FLOW_NOTE,
   buildFeatureQaFacts,
+  featureDisplayName,
   selectBlacklistedCapabilities,
+  type FeatureDisplayName,
 } from "../lib/chat/coliving/feature-facts";
 // 显式黑名单事实源（当前一项：单方面叫别人在洗完澡后清理地漏头发）：复用那一次功能路由的
 // `blocked:<id>` token，不按关键词阻断；纯代码解析 + 条目自己的 qualifier 资格复核，
@@ -162,6 +176,9 @@ import {
 import type { RuleEvent, RuleIntent } from "../lib/coordination/rule-consultation";
 import {
   AMBIGUOUS_SMS_RECIPIENT_REPLY,
+  AMBIGUOUS_SMS_RECIPIENT_REPLY_EN,
+  NO_NAMED_RECIPIENT_REPLY,
+  NO_NAMED_RECIPIENT_REPLY_EN,
   deliverSms,
   resolveNamedRecipient,
   smsRecipientIneligibleReply,
@@ -2783,6 +2800,543 @@ async function main() {
     );
   });
 
+  /**
+   * ── 表驱动：**收件人绑不上时那两句澄清按轮次语言说** ──────────────────────
+   *
+   * 这两句 `reason` 会被功能模块当**本轮回复**发给住户（`personal-item-reminder.ts` /
+   * `night-laundry-reminder.ts` 的 `reply`），所以和正文一样必须说住户这一轮的语言。
+   * 语言由轮次判定（经前门注入 `ctx.language`）传进来，**不在这里重算**：
+   * `BARE_OK`（住户只回一个 `ok`）那一行的依据全在会话回退里，从原话现推只会推成中文。
+   *
+   * 中文那两行是既有口径，一字不动；英文那两行**不得夹汉字**（收件人姓名除外——那是
+   * 名册里的名字，不是文案）。
+   */
+  check("表驱动：收件人澄清句跟随轮次判定（直接英文 / 中文一字不动 / 只回一个 ok 的会话回退）", () => {
+    const zhDirect = decideLanguage("帮我提醒阿川小美深夜别开洗衣机");
+    const enDirect = decideLanguage("please remind Alex and Xiaomei about the dryer");
+    const zhFallback = decideLanguage("ok", [{ role: "user", content: "提醒阿川别开洗衣机" }]);
+    const enFallback = decideLanguage("ok", [
+      { role: "assistant", content: "Sure — I've asked Achuan to avoid the dryer." },
+    ]);
+    assert.equal(zhDirect.language, "zh");
+    assert.equal(enDirect.language, "en");
+    assert.equal(zhFallback.source, "conversation-fallback");
+    assert.equal(zhFallback.language, "zh");
+    assert.equal(enFallback.source, "conversation-fallback");
+    assert.equal(enFallback.language, "en");
+
+    const three: GateMember[] = [
+      gateMember(GATE_SENDER, "小禾"),
+      gateMember(GATE_ACHUAN, "阿川"),
+      gateMember(GATE_XIAOMEI, "小美"),
+    ];
+    const ambiguous = "帮我提醒阿川小美深夜别开洗衣机";
+    const unnamed = "提醒一下，深夜别开洗衣机";
+
+    // 缺省 = 中文，与加语言闸之前逐字一致（既有调用一行不改）。
+    const ambDefault = resolveNamedRecipient(ambiguous, three, GATE_SENDER);
+    assert.equal(ambDefault.ok, false);
+    assert.equal(ambDefault.ok === false && ambDefault.reason, AMBIGUOUS_SMS_RECIPIENT_REPLY);
+    const unnamedDefault = resolveNamedRecipient(unnamed, three, GATE_SENDER);
+    assert.equal(unnamedDefault.ok === false && unnamedDefault.reason, NO_NAMED_RECIPIENT_REPLY);
+
+    const rows: readonly {
+      language: "zh" | "en";
+      ambiguous: string;
+      unnamed: string;
+      han: boolean;
+    }[] = [
+      {
+        language: "zh",
+        ambiguous: AMBIGUOUS_SMS_RECIPIENT_REPLY,
+        unnamed: NO_NAMED_RECIPIENT_REPLY,
+        han: true,
+      },
+      {
+        language: "en",
+        ambiguous: AMBIGUOUS_SMS_RECIPIENT_REPLY_EN,
+        unnamed: NO_NAMED_RECIPIENT_REPLY_EN,
+        han: false,
+      },
+    ];
+    for (const row of rows) {
+      // **逐字相等**：中文行仍是既有那两句（一字不动），英文行是登记好的英文句——
+      // 不是"碰巧没汉字"的任意一句。
+      const amb = resolveNamedRecipient(ambiguous, three, GATE_SENDER, row.language);
+      assert.equal(amb.ok, false, `[${row.language}] 点名不止一位不得绑定`);
+      assert.equal(amb.ok === false && amb.reason, row.ambiguous, `[${row.language}] 不唯一澄清句`);
+
+      const unnamedRow = resolveNamedRecipient(unnamed, three, GATE_SENDER, row.language);
+      assert.equal(unnamedRow.ok, false, `[${row.language}] 没点名不得绑定`);
+      assert.equal(
+        unnamedRow.ok === false && unnamedRow.reason,
+        row.unnamed,
+        `[${row.language}] 未点名澄清句`
+      );
+
+      // 可达性真话说明同样是住户可见的回复：按语言取，姓名原样嵌在句中。
+      const unconfirmed = smsRecipientIneligibleReply(
+        { name: "Alex", nameConfirmed: false, address: "+1555" },
+        row.language
+      );
+      const noAddress = smsRecipientIneligibleReply(
+        { name: "Alex", nameConfirmed: true, address: null },
+        row.language
+      );
+      assert(unconfirmed && noAddress, `[${row.language}] 两种不可达都要给真话说明`);
+      assert(unconfirmed!.includes("Alex") && noAddress!.includes("Alex"), "姓名原样保留");
+      // 姓名（Alex）之外不得有汉字（中文行则必须仍是中文）。
+      assert.equal(
+        /[一-龥]/.test(unconfirmed! + noAddress!),
+        row.han,
+        `[${row.language}] 不可达说明的语言`
+      );
+      assert.notEqual(unconfirmed, noAddress, `[${row.language}] 两种原因不得混成同一句`);
+    }
+  });
+
+  /**
+   * ── 表驱动：**轮次里那几处代码写死的住户可见回复都跟随轮次判定** ──────────────
+   *
+   * 覆盖四条被点名的硬路径：
+   *
+   * 1. `unknownSenderReply`（认不出的号码）——**唯一允许按原话现推的地方**：认不出人就
+   *    没有会话线，没有 `history` 可回退。判得出就按判出来的说，判不出仍是中文。
+   * 2. `selectUnsentContactFallback`（假完成替换）——两个维度：本人立场是否记账 × 语言。
+   * 3. `ruleNoticeFallback`（共同规则文案没写出来时的兜底）。
+   * 4. `coordinationReplyForSender`（厨房排班状态机的四个模板 + 终态短句）——这条路径
+   *    **英文可以走到**（识别看的是系统发出去的那条征询，与住户这一句的语言无关）。
+   *
+   * 中文每一格都必须**逐字**等于加语言闸之前的既有口径；英文每一格都不得夹汉字。
+   */
+  check("表驱动：认不出的号码 / 假完成替换 / 规则协商兜底 / 排班模板都跟随轮次判定", () => {
+    const han = (s: string) => /[一-龥]/.test(s);
+
+    // 1) 认不出的号码：按原话现推（如实测：英文原话回英文，中文 / 读不出的回中文）。
+    assert.equal(unknownSenderReply("这个号码我这边没有记录"), UNKNOWN_REPLY);
+    assert.equal(unknownSenderReply("Hi, who is this?"), UNKNOWN_REPLY_EN);
+    assert.equal(
+      unknownSenderReply("ok"),
+      UNKNOWN_REPLY,
+      "读不出的原话仍回中文（与加语言闸之前逐字一致）"
+    );
+    assert.equal(han(UNKNOWN_REPLY_EN), false);
+
+    // 2) 假完成替换：本人立场记账 × 语言，四格。
+    assert.equal(
+      selectUnsentContactFallback({ recordedOwnStance: false }),
+      TRUTHFUL_UNSENT_REPLY,
+      "缺省中文、未记账：既有泛化未发送真话一字不动"
+    );
+    assert.equal(
+      selectUnsentContactFallback({ recordedOwnStance: false, language: "en" }),
+      TRUTHFUL_UNSENT_REPLY_EN
+    );
+    assert.equal(han(TRUTHFUL_UNSENT_REPLY_EN), false);
+    assert.equal(
+      selectUnsentContactFallback({ recordedOwnStance: true, language: "zh" }),
+      STANCE_ACK_REPLY,
+      "中文、已记账：既有短确认一字不动"
+    );
+    assert.equal(
+      selectUnsentContactFallback({ recordedOwnStance: true, language: "en" }),
+      STANCE_ACK_REPLY_EN,
+      "英文、已记账：登记好的英文短确认"
+    );
+    assert.equal(han(STANCE_ACK_REPLY_EN), false);
+    assert.equal(
+      /联系|转给|转告|发给|生效|定下来|定了|通过|全员|都说好了|contacted|told|passed|effective|agreed/.test(
+        selectUnsentContactFallback({ recordedOwnStance: true, language: "en" })
+      ),
+      false,
+      "英文短确认同样不得声称联系过人或规则已定案"
+    );
+
+    // 3) 共同规则兜底：中文一字不动，英文是登记好的那一句。
+    assert.equal(ruleNoticeFallback("zh"), RULE_NOTICE_FALLBACK);
+    assert.equal(ruleNoticeFallback("en"), RULE_NOTICE_FALLBACK_EN);
+    assert.equal(han(ruleNoticeFallback("en")), false);
+
+    // 4) 厨房排班模板：五个分支 × 两种语言。中文逐字对照既有模板，英文不得夹汉字。
+    const slot = { start: 18 * 60, end: 20 * 60 };
+    const cases: readonly {
+      label: string;
+      actions: readonly OutboundAction[];
+      state: State;
+      zh: RegExp;
+    }[] = [
+      {
+        label: "settle",
+        actions: [{ type: "settle", person: "阿川", slot }],
+        state: "settled",
+        zh: /^定案：你 /,
+      },
+      {
+        label: "propose",
+        actions: [{ type: "propose", person: "阿川", slot }],
+        state: "proposed",
+        zh: /^关于厨房排班，先排你用 /,
+      },
+      {
+        label: "remind",
+        actions: [{ type: "remind", person: "阿川" }],
+        state: "gathering",
+        zh: /^还没收到你的做饭时间/,
+      },
+      {
+        label: "blocked",
+        actions: [
+          {
+            type: "blocked",
+            reasons: [{ kind: "duration_over_window", message: "所有人合计需占用 900 分钟" }],
+          },
+        ],
+        state: "gathering",
+        zh: /^暂时排不开：/,
+      },
+      { label: "none/gathering", actions: [{ type: "none" }], state: "gathering", zh: /^收到，我记下了。$/ },
+      { label: "none/settled", actions: [{ type: "none" }], state: "settled", zh: /^收到。$/ },
+    ];
+    for (const c of cases) {
+      const zh = coordinationReplyForSender(c.actions, c.state, "阿川");
+      assert.match(zh, c.zh, `[${c.label}] 中文模板一字不动`);
+      const en = coordinationReplyForSender(c.actions, c.state, "阿川", "en");
+      assert.equal(han(en), false, `[${c.label}] 英文模板不得夹汉字：${en}`);
+      assert.notEqual(en, zh, `[${c.label}] 英文模板必须真的换了一种语言`);
+    }
+    // blocked 的英文分支**不转发**状态机的内部诊断（那是 `machine.ts` 的诊断文案，
+    // 按 CLAUDE.md 的分工不翻译、也不该念给住户）：诊断串不得出现在英文回复里。
+    const blockedEn = coordinationReplyForSender(
+      [
+        {
+          type: "blocked",
+          reasons: [{ kind: "duration_over_window", message: "所有人合计需占用 900 分钟" }],
+        },
+      ],
+      "gathering",
+      "阿川",
+      "en"
+    );
+    assert.equal(
+      blockedEn.includes("所有人合计需占用"),
+      false,
+      "英文 blocked 回复不得把中文内部诊断夹进英文句子"
+    );
+    // 中文 blocked 仍是既有口径：前缀 + 状态机的诊断原样带出。
+    assert(
+      coordinationReplyForSender(
+        [
+          {
+            type: "blocked",
+            reasons: [{ kind: "duration_over_window", message: "所有人合计需占用 900 分钟" }],
+          },
+        ],
+        "gathering",
+        "阿川"
+      ).includes("所有人合计需占用 900 分钟"),
+      "中文 blocked 回复仍照旧带出状态机诊断"
+    );
+  });
+
+  /**
+   * ── 静态审计闸：**指定模块里不许再出现新的「没被本地化的住户可见字面量」** ─────
+   *
+   * 它拦的不是"出现汉字"（中文本来就是一等公民），而是**住户可见的回复字面量没有成对的
+   * 语言版本**：`language === "en" ? A_EN : A` 这种成对取用是允许的形状；单独写一句
+   * 中文正文直接当回复返回，才是要拦的新债。
+   *
+   * 做法：把指定模块的**源码去掉注释**后逐行扫，凡是被当成 `reply` / `reason` 返回、
+   * 或在 `return` 里直接写出的**字符串字面量**含汉字，就必须在同文件里能找到它的
+   * 英文对应（同名前缀 + `_EN`，或同一表达式里的 `language === "en"` 三元）。
+   *
+   * **具名例外**（每一条都必须写明为什么英文走不到）：见下面的 `AUDIT_EXCEPTIONS`。
+   * 例外表是**闭合**的：新增一条就必须在这里登记并说明理由，`assert` 会核对每条例外
+   * 仍然真的存在于源码里，防止"例外表烂掉、实际早就不需要例外"。
+   */
+  check("静态审计闸：指定模块里住户可见的回复字面量必须有成对的语言版本", () => {
+    const AUDITED_MODULES = [
+      "lib/chat/coliving/turn.ts",
+      "lib/chat/coliving/sms-delivery.ts",
+      "lib/chat/coliving/blacklist.ts",
+      "lib/chat/coliving/feature-facts.ts",
+      "lib/chat/coliving/feature-qa.ts",
+      "lib/chat/coliving/reply-only.ts",
+      "lib/chat/coliving/schedule-affirmation.ts",
+      "lib/chat/coliving/rule-consultation-notice.ts",
+      "lib/chat/coliving/personal-item-reminder.ts",
+      "lib/chat/coliving/night-laundry-reminder.ts",
+    ] as const;
+
+    /**
+     * **具名例外**：这些含汉字的字面量没有成对的语言版本，但**它们根本不是说给住户的**。
+     * 每一条都必须写明理由；理由站不住就该修代码，而不是往这张表里加一行。
+     *
+     * 表是**闭合**的：每条例外都必须仍然真的在源码里被命中，否则下面会断言失败、
+     * 逼你把它删掉（防止表烂掉、例外的范围悄悄变大）。
+     */
+    const AUDIT_EXCEPTIONS: readonly {
+      file: string;
+      literals: readonly string[];
+      why: string;
+    }[] = [
+      {
+        file: "lib/chat/coliving/night-laundry-reminder.ts",
+        literals: ["洗衣机", "烘干机", "深夜", "凌晨"],
+        why:
+          "`machineLabel` / `timeWindowLabel` 是**枚举到中性类别词的映射**，返回值只喂给 " +
+          "`composeUser` 拼出的**提示词事实清单**（生成阶段看的收窄字段），不是发给住户的正文。" +
+          "发给室友的正文由模型按 `composeSystem` 写、语言由 `structuredCall` 的语言指令定。",
+      },
+    ];
+
+    /**
+     * 去注释，但**保住行号**（块注释里的换行原样留着，行注释只删到行尾）：
+     * 报错信息里的行号必须能直接在编辑器里跳过去，否则这条闸没法用。
+     */
+    const strip = (s: string) =>
+      s
+        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ""))
+        .replace(/\/\/[^\n]*/g, "");
+    const literalsOf = (line: string): string[] => {
+      const out: string[] = [];
+      const re = /"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(line))) out.push(m[1] ?? m[2] ?? "");
+      return out;
+    };
+    /** 一句话里有没有"看得出是英文"的字面量（≥3 个连续 ASCII 字母）。 */
+    const hasLatinLiteral = (text: string) =>
+      literalsOf(text).some((l) => /[A-Za-z]{3}/.test(l) && !/[一-龥]/.test(l));
+    /**
+     * 这段话里有没有**语言分支**。两种写法都认：
+     * `language === "en" ? A_EN : A`（三元，prettier 常拆成多行），
+     * `if (language === "en") { return A_EN } return A`（提前返回），
+     * 以及本文件惯用的 `const en = language === "en"` 之后再 `en ? … : …`。
+     *
+     * **这是启发式**：它证明"附近有一段按语言取用的代码"，不证明"这条字面量就在那条分支
+     * 里"。所以它只当**新债的烟雾报警器**用——真要判断英文走不走得到，看下面的具名例外
+     * 与 `language.test.ts` 的行为断言。
+     */
+    const hasLanguageBranch = (text: string) =>
+      /language\s*(===|!==)\s*"(en|zh)"/.test(text) || /\ben\s*\?/.test(text);
+
+    /**
+     * 另一种允许的形状：**登记数据**。同一条事实的中英文并排登记，取用只经
+     * `blacklistDisplayName` 这类解析函数（`label` / `labelEn`、`reason` / `reasonEn`），
+     * 所以中文字面量旁边紧挨着就是一个 `…En` 标识符。
+     */
+    const hasRegisteredSibling = (text: string) => /\b\w*En\b/.test(text);
+
+    /**
+     * **顶层块**（顶格声明到下一个顶格声明之间）：这个项目里一个函数 / 一个功能对象就是
+     * 一块。语言分支通常写成 `if (language === "en") { return … }` 再 `return 中文`，
+     * 两者相隔可能十几行，所以"成对"要按**块**判，不能只看行或只看前后三行。
+     */
+    const topLevelBlocks = (lines: string[]) => {
+      const starts: number[] = [];
+      for (let i = 0; i < lines.length; i += 1) if (/^\S/.test(lines[i])) starts.push(i);
+      return starts.map((start, idx) => ({
+        start,
+        end: (idx + 1 < starts.length ? starts[idx + 1] : lines.length) - 1,
+      }));
+    };
+    const blockTextAt = (lines: string[], i: number): string => {
+      const b = topLevelBlocks(lines).find((x) => x.start <= i && i <= x.end);
+      return b ? lines.slice(b.start, b.end + 1).join("\n") : "";
+    };
+
+    /**
+     * 这段话是不是**正则源码**（`new RegExp("…")` 里的模板串）。住户可见的正文里不会
+     * 出现 `\s` / `[abc]` / `{1,3}` 这类元字符，所以按形状就能把它们排除掉——不然
+     * 满篇中文的正则会被这条闸当成"没翻的回复"。
+     */
+    const looksLikeRegexSource = (l: string) =>
+      /\\[sdwbSDWB]|\[[^\]]*\]|\{\d+,\d*\}|\(\?:/.test(l);
+
+    /**
+     * **内部记录字段**：这些字段的值进台账 / 数据库 / 报告，不是住户看到的字。
+     * 任务明确不翻译数据库标签与内部报告，所以它们不在这条闸的范围里（**只列字段名，
+     * 不列文件**：同一个字段名出现在哪个模块都是内部记录）。
+     */
+    const INTERNAL_RECORD_FIELDS = ["purposeLabel", "decisionIntent"] as const;
+
+    /**
+     * 这段字面量**所属的那一小段源码**：从它自己往上走到最近的语句边界（`return`、
+     * 声明、闭合大括号、以 `;` 结尾的行），最多看 12 行。
+     *
+     * 为什么要往上走：prettier 会把一个字段的值（尤其是多行三元）拆到下面好几行，
+     * 判定"这段字面量属于哪个字段 / 是不是工具返回值"必须看整段，只看一行会看漏。
+     */
+    const owningSpan = (lines: string[], i: number): string => {
+      let start = i;
+      for (let k = i; k >= 0 && k > i - 12; k -= 1) {
+        const l = lines[k];
+        start = k;
+        if (
+          /^\s*return\b/.test(l) ||
+          /^\s*(export|const|let|var|function|async|class|declare)\b/.test(l) ||
+          /^\s*\}/.test(l) ||
+          /;\s*$/.test(l)
+        ) {
+          break;
+        }
+      }
+      return lines.slice(start, i + 1).join("\n");
+    };
+
+    /**
+     * 这段源码是不是**说给模型听的结果对象**——工具返回值（`{ ok, note }` /
+     * `{ ok, reason }`）与纯代码闸的诊断（`checkSourcePrivacy` 的 `{ why }`）。
+     * 按任务与 CLAUDE.md 的分工，这些**不翻译**：它们是内部诊断 / 报告，不是住户
+     * 看到的字，所以整段不在这条闸的范围里。
+     *
+     * **这个判据有一个已知代价**：`{ ok: false, reason }` 也是某些**辅助函数**的返回形状
+     * （`resolveNamedRecipient` 就是），而那种 `reason` 是设计成住户可见的。所以下面
+     * 额外钉了一条：在 `sms-delivery.ts` 里，这类段中**一个中文字面量都不许有**——
+     * 那个模块的 `reason` 必须走登记常量（`NO_NAMED_RECIPIENT_REPLY` 这类），
+     * 一旦有人图省事写成内联中文，那条钉死会先响。
+     */
+    const isModelFacingSpan = (span: string) =>
+      /\bok\s*:\s*(true|false)\b/.test(span) || /\bwhy\s*:/.test(span);
+
+    /**
+     * **工具定义的行范围**（`someTool: tool({ … })`）。
+     *
+     * 整个 `tool({ … })` 块——描述、schema、`execute` 里的返回值——都是**说给模型听的**：
+     * 工具描述是提示词，`ok` / `note` / `reason` / `basis` 这些是回执与诊断。按任务与
+     * CLAUDE.md 的分工一律不翻译，所以整块跳过。
+     *
+     * 范围怎么定：起头是缩进 `ind` 的 `<名字>: tool({`，收尾是**同样缩进**的 `}),`。
+     * 用缩进相等（而不是"第一个 `}),`"）是为了不被 `execute` 里更深一层的 `}),` 提前截断。
+     */
+    const toolBlockEnds = (lines: string[]): number[] => {
+      const ends = new Set<number>();
+      for (let i = 0; i < lines.length; i += 1) {
+        const m = /^(\s*)\w+\s*:\s*tool\(\{\s*$/.exec(lines[i]);
+        if (!m) continue;
+        const indent = m[1].length;
+        for (let k = i + 1; k < lines.length; k += 1) {
+          const c = /^(\s*)\}\),\s*$/.exec(lines[k]);
+          if (c && c[1].length === indent) {
+            for (let j = i; j <= k; j += 1) ends.add(j);
+            i = k;
+            break;
+          }
+        }
+      }
+      return [...ends];
+    };
+
+    /**
+     * 一段源码片段里所有住户可见的、含汉字的字面量（带行号，另把"工具返回值"单列出来）。
+     *
+     * "住户可见"的判据是**语句级**的，不是行级的：一段字面量只要落在
+     * `reply:` / `reason:` 字段，或者落在一条 `return` 语句里（含 prettier 拆到下面
+     * 好几行的三元分支），就算住户可见；落在 `const` 声明、`.push(...)`、函数参数里的
+     * 中文（结构化事实、给批判器的报告、工具错误）都不算。所以先按 `owningSpan`
+     * 找到整条语句，再判。
+     */
+    const hanLiteralsIn = (lines: string[]) => {
+      const found: { line: number; literal: string }[] = [];
+      const toolResult: { line: number; literal: string }[] = [];
+      const inToolBlock = new Set(toolBlockEnds(lines));
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        // `tool({ … })` 整块是说给模型听的（描述 / schema / 回执 / 诊断）。
+        if (inToolBlock.has(i)) continue;
+        // 造正则 / 跑正则的行不是住户可见的回复行。
+        if (/new RegExp|matchAll\(|\.test\(|\.exec\(/.test(line)) continue;
+        // zod 的 `.describe("…")` 是**给模型看的字段说明**，不是住户看到的字。
+        if (/\.describe\(/.test(line)) continue;
+        const lits = literalsOf(line).filter(
+          (l) => /[一-龥]/.test(l) && l.trim().length >= 2 && !looksLikeRegexSource(l)
+        );
+        if (lits.length === 0) continue;
+        const span = owningSpan(lines, i);
+        const statementHead = span.split("\n")[0];
+        // `return [ "…", "…" ].join("\n")` 是这个项目写**提示词**的固定形状（每一行一句
+        // 系统提示），它整段都是说给模型听的，不是住户可见的回复。
+        if (/^\s*return\s*\[/.test(statementHead)) continue;
+        const isResidentFacing =
+          /reply\s*[:=]/.test(line) ||
+          /reason\s*[:=]/.test(line) ||
+          /^\s*return\b/.test(line) ||
+          /^\s*return\b/.test(statementHead);
+        if (!isResidentFacing) continue;
+        // 内部记录字段（台账 / 数据库 / 报告）的值不是住户可见的字。
+        if (INTERNAL_RECORD_FIELDS.some((f) => new RegExp(`\\b${f}\\b`).test(span))) continue;
+        // 说给模型听的结果对象也不是——但它们被单独记下来，供下面那条钉死的断言用。
+        if (isModelFacingSpan(span)) {
+          for (const literal of lits) toolResult.push({ line: i + 1, literal });
+          continue;
+        }
+        for (const literal of lits) found.push({ line: i + 1, literal });
+      }
+      return { found, toolResult };
+    };
+
+    let audited = 0;
+    const seen: { file: string; literal: string }[] = [];
+    const toolResultSkips: { file: string; line: number; literal: string }[] = [];
+    for (const file of AUDITED_MODULES) {
+      const lines = strip(readFileSync(file, "utf8")).split("\n");
+      const { found, toolResult } = hanLiteralsIn(lines);
+      for (const s of toolResult) toolResultSkips.push({ file, ...s });
+      for (const { line, literal } of found) {
+        audited += 1;
+        // 允许的形状一：**所在的那一块**里有语言分支——这条覆盖了绝大多数写法，
+        // 因为 `if (language === "en") { return … }` 与后面的 `return 中文` 常常相隔
+        // 十几行（中间还夹着别的语句），只看紧邻几行会误判。
+        if (hasLanguageBranch(blockTextAt(lines, line - 1))) continue;
+        // 允许的形状二：登记数据里中英文并排（`label` / `labelEn`），中文字面量旁边
+        // 紧挨着就是一个 `…En` 标识符。
+        const window = lines
+          .slice(Math.max(0, line - 4), Math.min(lines.length, line + 3))
+          .join("\n");
+        if (hasRegisteredSibling(window)) continue;
+        // 或这段字面量本身只是拼进一个成对常量（同一行内出现 `_EN`）。
+        if (/_EN\b/.test(lines[line - 1])) continue;
+        const ex = AUDIT_EXCEPTIONS.find(
+          (e) => e.file === file && e.literals.some((l) => literal.includes(l))
+        );
+        if (ex) {
+          seen.push({ file, literal });
+          continue;
+        }
+        assert.fail(
+          `${file} 第 ${line} 行出现了**没有成对语言版本**的住户可见字面量：` +
+            `「${literal}」。请给它一个登记好的英文对应（` +
+            `\`language === "en" ? X_EN : X\` 这种成对取用），` +
+            `或在这条检查的具名例外里登记并写明英文为什么走不到。`
+        );
+      }
+    }
+    assert(audited > 0, "审计闸自己必须真的扫到了住户可见字面量（否则是空转）");
+    // 钉死上面那条"工具返回值整段跳过"的代价：`sms-delivery.ts` 的
+    // `{ ok: false, reason }` 是**住户可见**的澄清句，所以那个模块里 `ok:` 段中不允许
+    // 出现任何中文字面量——`reason` 必须走登记常量。谁要是图省事写成内联中文，
+    // 就会先撞上这条（否则它会被"工具返回值不翻译"那条静默放过）。
+    const smsLeak = toolResultSkips.filter(
+      (s) => s.file === "lib/chat/coliving/sms-delivery.ts"
+    );
+    assert.equal(
+      smsLeak.length,
+      0,
+      `sms-delivery.ts 的 ok: 段里不许有内联中文字面量（reason 必须走登记常量）：` +
+        smsLeak.map((s) => `第 ${s.line} 行「${s.literal}」`).join("；")
+    );
+    // 例外表是**闭合**的：每一条登记过的例外都必须仍然真的在源码里被命中，
+    // 否则它就是一条烂掉的例外（代码早改了、表还留着），必须删掉。
+    for (const ex of AUDIT_EXCEPTIONS) {
+      for (const literal of ex.literals) {
+        assert(
+          seen.some((s) => s.file === ex.file && s.literal.includes(literal)),
+          `具名例外已经不再命中源码了，请把它从例外表里删掉：${ex.file} / 「${literal}」`
+        );
+      }
+    }
+  });
+
   check("受约束出站源码闸：功能不是工具、边界纯代码、旧模块清干净", () => {
     for (const gone of [
       "approved-reminder.ts",
@@ -3024,8 +3578,11 @@ async function main() {
    * `runFeatureQa` / `generateFeatureQaReply`，断言触发范围、grounding 校验、兜底与
    * 「通用边界不靠编」——不是拿源码里出现过常量冒充行为。
    */
-  const OPEN_FEATURES = APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label }));
+  // 直接给登记好的功能本身：两个显示名（`label` / `labelEn`）并排登记在功能模块里，
+  // 由事实源按本轮语言取用——不是在这里另抄一份中英对照表。
+  const OPEN_FEATURES: readonly FeatureDisplayName[] = APPROVED_FEATURES;
   const openLabels = OPEN_FEATURES.map((f) => f.label);
+  const openLabelsEn = OPEN_FEATURES.map((f) => f.labelEn);
   const listOpen = `我目前对${openLabels.join("、")}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`;
   const combinedQuestion = "请问为什么连这么简单的功能都没有?那你有什么功能？";
 
@@ -3038,6 +3595,14 @@ async function main() {
         assert(c.validation.reasonAnchors.length > 0, `${c.id} 必须有理由锚点`);
         for (const a of c.validation.reasonAnchors) {
           assert(c.reason.includes(a), `${c.id} 的锚点「${a}」必须取自它自己的 reason`);
+        }
+        // 英文说法与英文锚点是**并排登记的数据**（不是运行时翻译），同样要成对且自洽：
+        // 锚点必须取自它自己的英文理由，否则英文轮次的 grounding 永远判不通过。
+        assert(c.labelEn.length > 0, `${c.id} 必须有英文说法（英文住户不该收到中文名称）`);
+        assert(c.reasonEn.length > 0, `${c.id} 必须有英文理由`);
+        assert(c.validation.reasonAnchorsEn.length > 0, `${c.id} 必须有英文理由锚点`);
+        for (const a of c.validation.reasonAnchorsEn) {
+          assert(c.reasonEn.includes(a), `${c.id} 的英文锚点「${a}」必须取自它自己的 reasonEn`);
         }
         assert(c.routeDescription.length > 0, `${c.id} 必须有路由定义（执行阻断的唯一依据）`);
         assert(c.keywords.length > 0, `${c.id} 必须保留关键词（只供问答关联预筛）`);
@@ -3056,9 +3621,11 @@ async function main() {
         "当前黑名单只登记「单方面叫别人在洗完澡后清理地漏头发」一项"
       );
       const drainHair = BLACKLISTED_CAPABILITIES[0];
-      // 住户可见的内容（名称 + 理由）不得出现任何内部术语。
+      // 住户可见的内容（名称 + 理由，**两种语言都是**）不得出现任何内部术语。
       assert(
-        !/未开放|白名单|黑名单|路由|模型|提示词/.test(drainHair.label + drainHair.reason),
+        !/未开放|白名单|黑名单|路由|模型|提示词/.test(
+          drainHair.label + drainHair.reason + drainHair.labelEn + drainHair.reasonEn
+        ),
         "黑名单条目对住户可见的内容不得含内部术语"
       );
       // 名称必须表达**具体动作**，不得退回「卫生整改」这类大类叫法。
@@ -3066,6 +3633,10 @@ async function main() {
         !/卫生整改|一类|这类/.test(drainHair.label),
         "黑名单名称不得用「一类主题」式的大类说法"
       );
+      // 英文说法必须是**英文**：不含汉字，且与中文原话不是同一串（防"登记了但抄了中文"）。
+      assert(!/[一-龥]/.test(drainHair.labelEn + drainHair.reasonEn), "英文说法不得含汉字");
+      assert.notEqual(drainHair.labelEn, drainHair.label);
+      assert.notEqual(drainHair.reasonEn, drainHair.reason);
       // 复用同一次路由：只有精确的 `blocked:<id>` 才命中；裸 id / 表外 id 都不算。
       assert.equal(
         blacklistedCapabilityByRouteToken(blacklistRouteToken(drainHair.id))?.id,
@@ -3114,6 +3685,14 @@ async function main() {
         "黑名单回复不得含内部术语"
       );
       assert.deepEqual(findGroundingViolations(reply), [], "黑名单真话回复必须过 grounding 闸");
+      // 英文轮次取**登记的英文说法**：整句无汉字、名称与理由都在，中文原话不出现。
+      const replyEn = blacklistedReply(drainHair, "en");
+      assert(!/[一-龥]/.test(replyEn), `黑名单英文真话不得夹汉字：${replyEn}`);
+      assert(
+        replyEn.includes(drainHair.labelEn) && replyEn.includes(drainHair.reasonEn),
+        "黑名单英文回复必须含英文名称与英文理由"
+      );
+      assert.deepEqual(findGroundingViolations(replyEn), [], "黑名单英文真话同样要过 grounding 闸");
       // 事实源：问到黑名单主题时带出该条目；问到能力清单时不带任何「办不了」条目。
       const drainHairBundle = buildFeatureQaFacts({
         openFeatures: OPEN_FEATURES,
@@ -3453,11 +4032,15 @@ async function main() {
 
   await checkAsync("自称问答：英文问句用英文回答，中文问句口径不变", async () => {
     const enQuestion = "Who are you?";
-    // 英文正文：说身份（含 AI）+ 两个功能名 + 完整流程那条 —— 长度按英文上限放宽后要能过。
+    // 英文正文：说身份（含 AI）+ 两个**英文显示名** + 完整流程那条 —— 长度按英文上限放宽后要能过。
     const enReply =
-      "I'm the AI coordinator for this house — not a person, not the landlord. I've got dedicated shortcuts " +
-      "for 夜间洗衣提醒 and 个人物品使用提醒, which run faster and cheaper; anything else that needs " +
+      "I'm the AI coordinator for this house — not a person, not the landlord. I handle " +
+      `${openLabelsEn.join(" and ")}, which run faster and cheaper; anything else that needs ` +
       "coordinating goes through the full coordination flow, so it's not that I can't do it.";
+    assert(
+      !containsHan(enReply),
+      "英文自称正文里不得出现任何汉字（功能名取英文显示名）"
+    );
     assert(
       enReply.length > FEATURE_QA_MAX_CHARS && enReply.length <= FEATURE_QA_MAX_CHARS_EN,
       "这条英文正文正好落在「中文上限之外、英文上限之内」，用来证明上限是按语言取的"
@@ -3465,21 +4048,39 @@ async function main() {
     assert.equal(featureQaMaxChars(enQuestion), FEATURE_QA_MAX_CHARS_EN);
     assert.equal(featureQaMaxChars("你是谁？"), FEATURE_QA_MAX_CHARS, "中文上限一字不动");
     const en = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: enReply }) });
-    const enQa = await runFeatureQa({ text: enQuestion, openFeatures: OPEN_FEATURES, llm: en.llm });
+    const enQa = await runFeatureQa({
+      text: enQuestion,
+      openFeatures: OPEN_FEATURES,
+      language: decideLanguage(enQuestion),
+      llm: en.llm,
+    });
     assert(enQa, "英文自称问句必须进功能问答");
-    assert.equal(enQa!.reply, enReply, "含身份 + 全功能 + 完整流程的英文正文要原样接受");
+    assert.equal(enQa!.reply, enReply, "含身份 + 全英文功能名 + 完整流程的英文正文要原样接受");
     assert(!("error" in enQa!), "英文正文不得因为中文口径的长度上限被误换兜底");
     assert.equal(en.calls.length, 1, "自称问答只花一次模型调用");
     assert.equal(en.calls[0].name, FEATURE_QA_NAME);
-    // 英文兜底也是英文（不是一个中文字符串），且同样含身份与两个功能名。
-    const enFb = featureQaFallback({ question: enQuestion, openFeatures: OPEN_FEATURES });
+    // 交给模型的事实清单里也必须是英文显示名：不给中文名让它自己译。
+    assert(
+      openLabelsEn.every((l) => en.calls[0].system.includes(l)) &&
+        !openLabels.some((l) => en.calls[0].system.includes(l)),
+      "英文轮次的事实包只给英文显示名"
+    );
+    // 英文兜底也是英文（一个汉字都没有），且同样含身份与两个功能名。
+    const enFb = featureQaFallback({
+      question: enQuestion,
+      openFeatures: OPEN_FEATURES,
+      language: decideLanguage(enQuestion),
+    });
     assert(
       enFb.includes(COORDINATOR_ROLE_NOTE_EN) && enFb.includes("AI coordinator"),
       "英文自称兜底必须是英文身份事实"
     );
+    assert(!containsHan(enFb), "英文自称兜底里一个汉字都不许有");
     assert(
-      openLabels.every((l) => enFb.includes(l)) && !/办不了|没法|不是做不到/.test(enFb),
-      "英文兜底仍要列全专门优化功能，且不得编造办不了"
+      openLabelsEn.every((l) => enFb.includes(l)) &&
+        !openLabels.some((l) => enFb.includes(l)) &&
+        !/办不了|没法|不是做不到/.test(enFb),
+      "英文兜底要用英文显示名列全专门优化功能，且不得编造办不了"
     );
     // 中文问句走中文兜底（口径与扩展前一字不差）。
     assert(

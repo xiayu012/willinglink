@@ -68,8 +68,22 @@ export type BlacklistedCapability = {
   id: string;
   /** 住户可见的名称：**精确、允许很长**的最小行为，不是主题类别 */
   label: string;
+  /**
+   * 同一个名称的**自然英文说法**：只在住户这一轮说英文时进入给住户看的正文与
+   * grounding 校验，**与已批准功能的 `labelEn` 是同一条口径**（取用只经
+   * `blacklistDisplayName`，不在任何地方现翻）。
+   *
+   * 为什么黑名单也要有：中文 `label` 是老板登记的原话，但"原话照引"只有在对中文住户
+   * 说时才成立——对英文住户说时，正文里夹一句中文名称，等于**这一段干脆没被翻译**，
+   * 比不给理由更糟。所以英文说法与中文原话一样是**登记好的数据**，不是运行时翻译。
+   *
+   * 它**只**是住户可见的名称：`id`、内部路由 token、台账与结构化引用一律仍用 `id`。
+   */
+  labelEn: string;
   /** 为什么办不了——**代码能站得住的原因**，不是说辞 */
   reason: string;
+  /** 同一条原因的**自然英文说法**（口径同 `labelEn`）。 */
+  reasonEn: string;
   /**
    * 给**那一次内部功能路由**看的一句话定义：只在模型判定住户**正在交办**这项功能时
    * 才选它，用 `blocked:<id>` token 返回。**不是关键词表**。
@@ -91,8 +105,15 @@ export type BlacklistedCapability = {
   /**
    * 数据：通用 grounding 校验（`feature-qa.ts`）用同一段逻辑核对正文有没有保留
    * 这条事实的理由——主题差异全在这份数据里，引擎里没有任何 `if (id === …)` 分支。
+   *
+   * `reasonAnchors` / `reasonAnchorsEn` 分别是**中文理由与英文理由里「换句话也绕不开」
+   * 的核心词**，与各自的 `reason` 成对：英文轮次的正文核对英文锚点，中文轮次核对中文
+   * 锚点。两份都要有，否则英文正文永远凑不出中文锚点，grounding 会把每一句英文都判不通过。
    */
-  validation: { reasonAnchors: readonly string[] };
+  validation: {
+    reasonAnchors: readonly string[];
+    reasonAnchorsEn: readonly string[];
+  };
 };
 
 // ── 「单方面叫别人在洗完澡后清理地漏头发」的确定性资格信号（纯函数用，很小） ──
@@ -178,9 +199,18 @@ export const BLACKLISTED_CAPABILITIES: readonly BlacklistedCapability[] = [
   {
     id: "ask-named-roommate-clean-shower-drain-hair",
     label: "单方面叫别人在洗完澡后清理地漏头发",
+    // 同一件事的自然英文说法：住户这一轮说英文时用它，中文住户那边一个字都不变。
+    labelEn:
+      "one person asking me, on their own, to make a named roommate clear the " +
+      "hair out of the shower drain",
     // 老板给的原因，原样保留：看不到现场程度 + 当前技术不能可靠判断整改门槛。
     reason:
       "我看不到现场的严重程度，就算你描述了情况，我现在也还没办法可靠判断到什么程度才该替你去要求对方整改",
+    // 同一条原因的英文说法：事实一字不增、一字不减，只是换成英文讲。
+    reasonEn:
+      "I can't see on site how bad it actually is, and even if you describe it, " +
+      "I still can't reliably tell how bad it has to be before I should go and " +
+      "ask someone to fix it for you",
     routeDescription:
       "住户点名某位同住人、要你去**要求对方清掉**他洗完澡 / 用完浴室后留在**地漏里的头发**。" +
       "只在住户把这件事**交给你去办**时才选；浴室**墙面**的头发、地漏维修或疏通、" +
@@ -190,7 +220,11 @@ export const BLACKLISTED_CAPABILITIES: readonly BlacklistedCapability[] = [
     keywords: ["地漏", "头发", "毛发"],
     qualifier: qualifiesShowerDrainCleanupRequest,
     // 通用 grounding 校验用的「换句话也绕不开」的核心词，必须取自上面的 reason。
-    validation: { reasonAnchors: ["看不到", "程度", "整改"] },
+    validation: {
+      reasonAnchors: ["看不到", "程度", "整改"],
+      // 英文锚点取自上面的 reasonEn，与它成对（英文轮次核对这一份）。
+      reasonAnchorsEn: ["can't see", "how bad", "fix"],
+    },
   },
 ];
 
@@ -227,20 +261,54 @@ export function blacklistedCapabilityById(
 }
 
 /**
+ * **按本轮语言取条目名称**——住户那一侧唯一的取名函数（执行阻断的回复、问答兜底、
+ * 事实包、grounding 四处读的都是它，与 `feature-facts.ts` 的 `featureDisplayName`
+ * 同一条口径）。**不在这里翻译任何东西**：两个名字都是登记好的数据，中文轮次取中文
+ * 原话、英文轮次取英文说法。
+ */
+export function blacklistDisplayName(
+  cap: BlacklistedCapability,
+  language: ResidentLanguage
+): string {
+  return language === "en" ? cap.labelEn : cap.label;
+}
+
+/** 同一条原因的按语言取用（与 `blacklistDisplayName` 成对）。 */
+export function blacklistReason(
+  cap: BlacklistedCapability,
+  language: ResidentLanguage
+): string {
+  return language === "en" ? cap.reasonEn : cap.reason;
+}
+
+/** grounding 用的理由锚点：与上面两个函数取的是**同一份语言**，不能各取各的。 */
+export function blacklistReasonAnchors(
+  cap: BlacklistedCapability,
+  language: ResidentLanguage
+): readonly string[] {
+  return language === "en"
+    ? cap.validation.reasonAnchorsEn
+    : cap.validation.reasonAnchors;
+}
+
+/**
  * **黑名单命中时的纯代码真话回复**（只在表非空、且那次路由选中了该条目、且资格复核
  * 通过时走到）。不调模型、不列内部术语、不编处理方案：只如实说这件事目前办不了，
  * 给出老板给的理由。正文短、中性，和两条受约束回复路径同一分寸。
  *
- * `language` 是本轮住户语言判定（缺省按中文，与加语言闸之前逐字一致）。英文只是把
- * **同一句式**换一种语言说出来：`label` 与 `reason` 是**老板登记的原话**，照旧原样引用、
- * 不另翻一份（与 `feature-qa.ts` 的英文兜底同一条口径）。
+ * `language` 是本轮住户语言判定（缺省按中文，与加语言闸之前逐字一致）。名称与理由
+ * **按这份判定一起取**（`blacklistDisplayName` / `blacklistReason`）：中文轮次是老板
+ * 登记的原话，逐字不变；英文轮次是同一条事实的**登记英文说法**，不是运行时翻译，也
+ * 不会把中文原话夹进英文正文。
  */
 export function blacklistedReply(
   cap: BlacklistedCapability,
   language: ResidentLanguage = "zh"
 ): string {
+  const label = blacklistDisplayName(cap, language);
+  const reason = blacklistReason(cap, language);
   if (language === "en") {
-    return `There's one thing I can't do for you — ${cap.label}: ${cap.reason}.`;
+    return `There's one thing I can't do for you — ${label}: ${reason}.`;
   }
-  return `「${cap.label}」这件事我目前没法替你办：${cap.reason}。`;
+  return `「${label}」这件事我目前没法替你办：${reason}。`;
 }

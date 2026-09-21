@@ -28,7 +28,13 @@ import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
 import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
 import { HISTORY_BUDGET, planHistory } from "./history-policy";
-import { decideLanguage, observeLanguage } from "./language";
+import {
+  decideLanguage,
+  observeLanguage,
+  residentLanguage,
+  type LanguageDecision,
+  type ResidentLanguage,
+} from "./language";
 import { scheduleAffirmationReply } from "./schedule-affirmation";
 import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
@@ -284,6 +290,21 @@ export const TRUTHFUL_UNSENT_REPLY =
   "这件事我还没发出去——我没有替你把话转给对方。";
 
 /**
+ * 上面那句的**登记英文说法**：同一件事、同一分寸，只是用英文讲。假完成替换是
+ * **模型那一侧出错后的代码兜底**，它不知道住户这一轮说什么语言，只能靠轮次判定
+ * （`decideLanguage`，含会话回退）传进来——所以两句都要登记好，不能临场翻。
+ */
+export const TRUTHFUL_UNSENT_REPLY_EN =
+  "I haven't sent this out — I didn't pass your words on to the other person.";
+
+/**
+ * 「你的表态我记下了」的**登记说法**（上一句的唯一例外分支，见下）：中文与英文并排
+ * 登记在这一处，取值只经 `selectUnsentContactFallback`，不在任何地方现翻。
+ */
+export const STANCE_ACK_REPLY = "好，你的表态我已经记下了。";
+export const STANCE_ACK_REPLY_EN = "Okay — I've noted your position.";
+
+/**
  * **假完成替换的上下文选择（纯函数，可离线断言）。**
  *
  * 默认一律用 `TRUTHFUL_UNSENT_REPLY`。唯一例外：这一轮**真的为当前发信人本人
@@ -303,10 +324,19 @@ export function selectUnsentContactFallback(args: {
    * 只有工具回执为真才算，模型口头说记了不算。
    */
   recordedOwnStance: boolean;
+  /**
+   * 本轮住户语言判定（`decideLanguage`，含会话回退）。**由调用方在轮次边界判一次
+   * 后传进来**，不在这里从任何一句原话现推——替换发生时手里只有模型那句（可能是
+   * 中文、也可能什么语言都不是），从它推只会推出错的那一半。缺省中文，既有离线调用
+   * 一行不改。
+   */
+  language?: ResidentLanguage;
 }): string {
-  return args.recordedOwnStance
-    ? "好，你的表态我已经记下了。"
-    : TRUTHFUL_UNSENT_REPLY;
+  const en = args.language === "en";
+  if (args.recordedOwnStance) {
+    return en ? STANCE_ACK_REPLY_EN : STANCE_ACK_REPLY;
+  }
+  return en ? TRUTHFUL_UNSENT_REPLY_EN : TRUTHFUL_UNSENT_REPLY;
 }
 
 /** case.kind 是开放文本；只有明确属于同住人或共享资源争用的未结事项才算。 */
@@ -1134,7 +1164,23 @@ export type TurnOutcome = {
  * （见 CLAUDE.md「不要替大脑写话术」：硬编码只留给不过大脑的路径）。
  * 短、中性、不透露任何住户信息。
  */
-const UNKNOWN_REPLY = "这个号码我这边没有记录，先确认一下你是哪一位。";
+export const UNKNOWN_REPLY = "这个号码我这边没有记录，先确认一下你是哪一位。";
+
+/** 上面那句的登记英文说法（同一件事、同一分寸）。 */
+export const UNKNOWN_REPLY_EN =
+  "I don't have this number on file — can you confirm who you are?";
+
+/**
+ * 认不出的号码回哪一句。**这一处按原话现推语言，不走轮次判定**：认不出人就没有
+ * 会话线，也就没有 `history` 可回退——`decideLanguage` 在"没有已知对话历史"时能给
+ * 的只有默认中文，回退那半本来就无从谈起。所以这里直接 `residentLanguage(text)`：
+ * 判得出就按判出来的说，判不出仍然是中文（与加语言闸之前逐字一致）。
+ *
+ * **只在这一处**允许这样取语言（任务给定的例外）：有已知轮次的地方一律用轮次判定。
+ */
+export function unknownSenderReply(text: string): string {
+  return residentLanguage(text) === "en" ? UNKNOWN_REPLY_EN : UNKNOWN_REPLY;
+}
 
 /**
  * coordination 替换分支的总入口（默认关闭，`COLIVING_COORDINATION_REPLACE=1` 才开）。
@@ -1154,6 +1200,14 @@ async function maybeCoordinationReply(args: {
   history: Array<{ role: "user" | "assistant"; content: string }>;
   conversationId: string;
   turnStartedAt: Date;
+  /**
+   * 本轮住户语言判定（调用方在轮次边界判一次）。这条路径的**识别**是中文独有的
+   * （`hasKitchenWord` 是中文正则、`isScheduleSlotInquiry` 认的是库里的中文征询模板），
+   * 但**英文住户可以触到它**：`isScheduleSlotInquiry` 只看系统发出去的那条征询、
+   * 不看住户这一句是什么语言。所以他一旦触到，回复模板就得按他的语言说——判定照传，
+   * **识别范围不因此放宽**（那是另一件事）。
+   */
+  language: ResidentLanguage;
 }): Promise<TurnOutcome | null> {
   const { sender, channel, text, history, conversationId, turnStartedAt } = args;
   try {
@@ -1184,7 +1238,12 @@ async function maybeCoordinationReply(args: {
     );
 
     // 3) 把状态机 actions 转成给发信人的回复文本（硬编码模板，够用即可）。
-    const reply = coordinationReplyForSender(res.actions, res.state, sender.name);
+    const reply = coordinationReplyForSender(
+      res.actions,
+      res.state,
+      sender.name,
+      args.language
+    );
 
     // 4) 落库与正常回合一致：先把这条入站消息写下，再把它接回它正在回答的沟通。
     const inboundId = await repo.appendMessage({
@@ -1263,43 +1322,77 @@ async function maybeCoordinationReply(args: {
  * 把 coordination 状态机这轮产出的 `actions` 按「发信人本人」的视角转成一句短信回复：
  * 只挑发给这个人的 settle/propose/remind；blocked 是全局诊断；其余按终态给短句。
  * 模板是硬编码的（模型没被调用来写措辞，见「不要替大脑写话术」对硬编码的边界）。
+ *
+ * `language` 是本轮住户语言判定。这条路径**英文可以走到**：识别闸里的
+ * `isScheduleSlotInquiry` 看的是**系统发出去的那条中文征询**（历史遗留在库的 pending），
+ * 跟住户这一句是什么语言无关——英文住户回它一句，就会落到这里。所以模板两种语言各备
+ * 一份（中文那份一字不动），由轮次判定选。
+ *
+ * `blocked` 分支**不翻译状态机给的原因**：`blocked.reasons[0].message` 是
+ * `lib/coordination/machine.ts` 的内部诊断（「自由人 / 锚点 / 共享窗口」这些词、
+ * 还带原始分钟数），按 CLAUDE.md 的分工**内部诊断不翻译、也不该念给住户**。中文那句
+ * 的历史行为保持不变（既有口径不动）；英文那一支改成一句**说同一件事的住户口径**，
+ * 而不是把中文诊断夹进英文句子里（那等于这一段根本没翻）。
  */
-function coordinationReplyForSender(
+export function coordinationReplyForSender(
   actions: readonly OutboundAction[],
   state: State,
-  self: string
+  self: string,
+  language: ResidentLanguage = "zh"
 ): string {
+  const en = language === "en";
   const settleForSelf = actions.find(
     (a): a is Extract<OutboundAction, { type: "settle" }> =>
       a.type === "settle" && a.person === self
   );
   if (settleForSelf) {
-    return `定案：你 ${formatMinutes(settleForSelf.slot.start)}-${formatMinutes(settleForSelf.slot.end)}。`;
+    const slot = `${formatMinutes(settleForSelf.slot.start)}-${formatMinutes(settleForSelf.slot.end)}`;
+    return en ? `Settled: you have ${slot}.` : `定案：你 ${slot}。`;
   }
   const proposeForSelf = actions.find(
     (a): a is Extract<OutboundAction, { type: "propose" }> =>
       a.type === "propose" && a.person === self
   );
   if (proposeForSelf) {
-    return `关于厨房排班，先排你用 ${formatMinutes(proposeForSelf.slot.start)}-${formatMinutes(proposeForSelf.slot.end)}，这不是定案，愿意吗？`;
+    const slot = `${formatMinutes(proposeForSelf.slot.start)}-${formatMinutes(proposeForSelf.slot.end)}`;
+    return en
+      ? `For the kitchen schedule, I've put you down for ${slot} — that's not settled yet, does that work?`
+      : `关于厨房排班，先排你用 ${slot}，这不是定案，愿意吗？`;
   }
   if (actions.some((a) => a.type === "remind" && a.person === self)) {
-    return `还没收到你的做饭时间，方便报一下吗？`;
+    return en
+      ? "I still don't have your cooking time — can you tell me when?"
+      : `还没收到你的做饭时间，方便报一下吗？`;
   }
   const blocked = actions.find(
     (a): a is Extract<OutboundAction, { type: "blocked" }> => a.type === "blocked"
   );
   if (blocked) {
-    return `暂时排不开：${blocked.reasons[0].message}`;
+    return en
+      ? "I can't work out a kitchen schedule that fits everyone's times as they stand."
+      : `暂时排不开：${blocked.reasons[0].message}`;
   }
-  return state === "gathering" ? `收到，我记下了。` : `收到。`;
+  if (state === "gathering") return en ? "Got it — I've noted that." : `收到，我记下了。`;
+  return en ? "Got it." : `收到。`;
 }
 
 /**
  * 文案生成失败时的**兜底短句**（模型根本没被调成功，硬编码只留给不过大脑的路径）。
  * 中性、简短、不多说一个字，**绝不**声称规则已经生效。
  */
-const RULE_NOTICE_FALLBACK = "收到，我记下了。";
+export const RULE_NOTICE_FALLBACK = "收到，我记下了。";
+
+/** 上面那句的登记英文说法（同一件事、同一分寸）。 */
+export const RULE_NOTICE_FALLBACK_EN = "Got it — I've noted that.";
+
+/**
+ * 共同规则这条路径的兜底短句按本轮语言取（住户语言判定由 `turn.ts` 在轮次边界判一次
+ * 后传进 `maybeSharedRuleReply`）。**英文住户回一个 "ok" 触发这条路径时**，回一段中文
+ * 就等于这一轮没被翻译——这正是要修的。
+ */
+export function ruleNoticeFallback(language: ResidentLanguage): string {
+  return language === "en" ? RULE_NOTICE_FALLBACK_EN : RULE_NOTICE_FALLBACK;
+}
 
 /**
  * 纯代码真话闸：一句话有没有**假称这条共同规则已经生效 / 定案 / 全员通过**。
@@ -1344,8 +1437,17 @@ async function maybeSharedRuleReply(args: {
   text: string;
   conversationId: string;
   turnStartedAt: Date;
+  /**
+   * 本轮住户语言判定（调用方在轮次边界判一次）。这条路径的识别是**中文独有的**
+   * （`shared-rule-definitions.ts` 的信号全是中文），但英文住户**可以**触到它：
+   * 表态识别里的 `AGREE_SIGNAL` 收 ASCII 的 `ok` / `OK` / `okay`——他在一条英文会话里
+   * 只回一个 "ok" 时，轮次判定走会话回退判成英文，这里就必须说英文。判定照传，
+   * **不在这条路径里重算**（也不去放宽那条中文识别器：识别范围是另一件事）。
+   */
+  language: LanguageDecision;
 }): Promise<TurnOutcome | null> {
   const { sender, channel, text, conversationId, turnStartedAt } = args;
+  const fallbackReply = ruleNoticeFallback(args.language.language);
   const describeError = (error: unknown): string =>
     error instanceof Error ? error.message : String(error);
 
@@ -1411,7 +1513,11 @@ async function maybeSharedRuleReply(args: {
     // 1) 文案由模型按**收窄后的字段**（这条规则 + 这一步是什么）写；代码只绑定收件人。
     let notices: RuleNotices | null = null;
     try {
-      const composed = await composeRuleNotices(rule, productionFeatureLlm(modelId));
+      const composed = await composeRuleNotices(
+        rule,
+        productionFeatureLlm(modelId),
+        args.language
+      );
       notices = composed.notices;
       noticesUsage = addFeatureUsage(noticesUsage, composed.usage);
     } catch (error) {
@@ -1440,7 +1546,7 @@ async function maybeSharedRuleReply(args: {
     //    收件人**按 personId** 解析（`resolveRuleActionRecipients`），显示名只用于文案；
     //    同名住户各归各的 id，不会串收。
     const outbound: OutboundMessage[] = [];
-    let replyText = RULE_NOTICE_FALLBACK;
+    let replyText = fallbackReply;
     let senderAction: RuleAction | null = null;
     const external: Array<{ action: RuleAction; target: repo.Member; body: string }> = [];
     for (const { action, member } of resolveRuleActionRecipients(res.actions, members)) {
@@ -1457,7 +1563,7 @@ async function maybeSharedRuleReply(args: {
     if (!senderAction) {
       // 没有发给本人的动作：定案后回「规则已生效」，否则回一句进度确认。定案后仍可能被
       // 问进度（此时 actions 可能是 `none`）——不能因此落回旧主流程，也不重复通知别人。
-      replyText = (settled ? notices?.announce : notices?.ack) ?? RULE_NOTICE_FALLBACK;
+      replyText = (settled ? notices?.announce : notices?.ack) ?? fallbackReply;
     }
 
     // 3a) 发给别人：逐条发；`deliverRuleActions` **只在 send 成功后才记 consulted /
@@ -1492,7 +1598,7 @@ async function maybeSharedRuleReply(args: {
 
     // 4) 纯代码真话闸：未定案绝不说规则已经生效（在落库之前改好回复）。
     if (!settled && claimsSharedRuleSettled(replyText)) {
-      replyText = RULE_NOTICE_FALLBACK;
+      replyText = fallbackReply;
     }
 
     // 5) 回复本人的收据（一条 reply_only decision + communication + message）。
@@ -1549,7 +1655,7 @@ async function maybeSharedRuleReply(args: {
     // 做过任何事的安全结果（零第三方出站、中性兜底）。
     console.log("[shared-rule] 推进过程中出错（已不回落旧流程）：", describeError(error));
     return {
-      reply: RULE_NOTICE_FALLBACK,
+      reply: fallbackReply,
       replyReview: { mode: "generation-only", verified: false, pass: true, broke: "", why: "" },
       scheduleFacts: [],
       replyCommunicationId: null,
@@ -1817,7 +1923,7 @@ export async function runColivingTurn(args: {
 
   if (!sender) {
     return {
-      reply: UNKNOWN_REPLY,
+      reply: unknownSenderReply(args.text),
       // 硬编码文案，压根没过大脑，也就没有审稿这回事——当合格处理，
       // 不能让调用方误以为这是一条没验证过的模型输出。
       replyReview: { mode: "generation-only", verified: false, pass: true, broke: "", why: "" },
@@ -1929,6 +2035,7 @@ export async function runColivingTurn(args: {
       history,
       conversationId,
       turnStartedAt,
+      language: language.language,
     });
     if (replaced) return replaced;
   }
@@ -1959,6 +2066,7 @@ export async function runColivingTurn(args: {
       text: args.text,
       conversationId,
       turnStartedAt,
+      language,
     });
     if (sharedRule) return sharedRule;
   }
@@ -2112,7 +2220,10 @@ export async function runColivingTurn(args: {
    * 路由 none 的一律不执行、零出站。也正因如此，**当前黑名单只覆盖"对点名的同住人执行
    * 某个功能"这一类**请求（和两条快路径同一类），不假装覆盖别的形态。
    */
-  if (resolveNamedRecipient(args.text, ctx.members, sender.personId).ok) {
+  if (
+    resolveNamedRecipient(args.text, ctx.members, sender.personId, language.language)
+      .ok
+  ) {
     // 本户已定案共同规则落成的精确授权：只在共同规则路径开启时读盘（关闭时完全不读
     // 文件）；读取异常只记日志并当作未授权，保持黑名单拒绝，不让整轮失败。
     let grantedFeatureIds: readonly string[] = [];
@@ -2214,7 +2325,9 @@ export async function runColivingTurn(args: {
     });
     const qa = await runFeatureQa({
       text: args.text,
-      openFeatures: APPROVED_FEATURES.map((f) => ({ id: f.id, label: f.label })),
+      // 直接给登记好的功能（`label` + `labelEn` 并排登记在功能模块里）：显示名由事实源
+      // 按本轮语言取，英文问句因此列出英文功能名，中文口径一字不动。
+      openFeatures: APPROVED_FEATURES,
       referencedBlacklistedId: blacklistRef?.capabilityId ?? null,
       // 与主生成、功能前门共用同一次轮次判定：住户用英文问「What does this AI do?」
       // 时正文上限、模型指令与兜底都说英文，中文问句的口径一字不动。
@@ -4374,6 +4487,7 @@ export async function runColivingTurn(args: {
     // 对他那句表态的短确认；其余一律保留泛化的未发送真话。
     reply = selectUnsentContactFallback({
       recordedOwnStance: ownRuleStance.recorded,
+      language: language.language,
     });
   }
 

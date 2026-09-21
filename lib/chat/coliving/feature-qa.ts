@@ -8,12 +8,16 @@ import {
   type FeatureUsage,
 } from "./feature-llm";
 import {
+  blacklistFact,
   buildFeatureQaFacts,
   COORDINATOR_ROLE_NOTE,
   COORDINATOR_ROLE_NOTE_EN,
+  featureDisplayName,
   FULL_FLOW_NOTE,
   OPTIMIZED_FAST_PATH_NOTE,
   selectBlacklistedCapabilities,
+  type FeatureDisplayName,
+  type FeatureQaBlacklistFact,
   type FeatureQaFactBundle,
 } from "./feature-facts";
 import { findGroundingViolations } from "./feature-grounding";
@@ -54,7 +58,9 @@ import { residentLanguage, type LanguageDecision } from "./language";
  *
  * 本入口**不装载旧 doctrine、不进主生成、没有任何工具、零第三方出站**（由 `turn.ts`
  * 调 `finalizeFeatureTurn` 早返回）。生成阶段**只看到三样**：住户的问题、事实源里
- * **与这个问题有关**的事实（`buildFeatureQaFacts`）、当前专门优化的功能清单。模型只
+ * **与这个问题有关**的事实（`buildFeatureQaFacts`）、当前专门优化的功能清单——**功能名
+ * 按本轮语言取显示名**（`feature-facts.ts` 的 `featureDisplayName`：中文登记名 / 英文
+ * 显示名），所以英文问句里不会夹着中文功能名，模型也不必自己译。模型只
  * 负责把事实说成自然、简短的、**住户这一轮语言**的回应（语言由轮次判定给出，见
  * `language.ts`）；**不得补充处理方案、虚构能力、或承诺立刻去联系 / 跟进**。写出内部
  * 术语 / 假承诺，或**把球踢回住户（「你自己去找他」「换个渠道」「以后再说」）**，或
@@ -269,7 +275,7 @@ export function isFeatureQaQuestion(text: string): boolean {
  */
 export function featureQaFallback(args: {
   question: string;
-  openFeatures: readonly { id: string; label: string }[];
+  openFeatures: readonly FeatureDisplayName[];
   /** 本人上一轮刚被黑名单拒绝的条目 id（结构化引用；没有则 null） */
   referencedBlacklistedId?: string | null;
   /**
@@ -279,25 +285,31 @@ export function featureQaFallback(args: {
    */
   language?: LanguageDecision;
 }): string {
+  // 语言判定复用 `language.ts`，不在这里另写一套关键词。
+  const language = args.language?.language ?? residentLanguage(args.question);
+  // 黑名单条目**按这同一份判定展开**：名称、理由、grounding 锚点三者一起取到同一份
+  // 语言，不会出现"名称换成英文、理由还是中文"的半截英文。中文轮次逐字不变。
   const blacklisted = selectBlacklistedCapabilities(
     args.question,
     args.referencedBlacklistedId
-  );
-  const open = args.openFeatures.map((f) => f.label).join("、");
+  ).map((c) => blacklistFact(c, language));
+  // 功能名**按同一份判定取显示名**：英文轮次取自然英文显示名（与交给模型的事实包、
+  // grounding 校验读的是同一个函数），中文轮次取登记名、逐字不变。
+  const openNames = args.openFeatures.map((f) => featureDisplayName(f, language));
   // **兜底也要说住户那一轮的语言**：住户用英文问、模型那侧又没写出可用正文时，回一段
-  // 中文正是「用对方的语言回答」最容易被代码兜底破坏的地方（语言判定复用 `language.ts`，
-  // 不在这里另写一套关键词）。
-  if ((args.language?.language ?? residentLanguage(args.question)) === "en") {
+  // 中文（或一段夹着中文功能名的英文）正是「用对方的语言回答」最容易被代码兜底破坏的地方。
+  if (language === "en") {
     return englishFeatureQaFallback({
       blacklisted,
-      openLabels: args.openFeatures.map((f) => f.label),
+      openLabels: openNames,
       selfIntro: asksAboutSelf(args.question),
     });
   }
+  const open = openNames.join("、");
   if (blacklisted.length) {
     const f = blacklisted[0];
     const fast = open ? `${OPTIMIZED_FAST_PATH_NOTE}。` : "";
-    return `「${f.label}」这件事我目前没法替你办：${f.reason}。${fast}${FULL_FLOW_NOTE}。`;
+    return `「${f.displayName}」这件事我目前没法替你办：${f.reason}。${fast}${FULL_FLOW_NOTE}。`;
   }
   // 问起我自己：先说清身份（镜像 doctrine 的「AI 协调员」那段），再说能帮上什么忙。
   const facts = args.openFeatures.length
@@ -313,25 +325,37 @@ export function featureQaFallback(args: {
 }
 
 /**
- * 兜底的英文写法，**事实与中文兜底同一份**（角色说明取 `COORDINATOR_ROLE_NOTE_EN`；
- * 黑名单条目的名称与理由照旧原样引用数据，不另翻一份——那是老板登记的原话）。
+ * 英文列举（`a` / `a and b` / `a, b and c`）——**只服务于下面这一段代码兜底**，不是通用
+ * 工具：显示名是单数名词短语，简单 `join(", ")` 接在句子成分里读不顺。
+ */
+function englishList(items: readonly string[]): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * 兜底的英文写法，**事实与中文兜底同一份**（角色说明取 `COORDINATOR_ROLE_NOTE_EN`）。
+ *
+ * `openLabels` 与 `blacklisted` 拿到的都是**已经按语言取好的字段**（调用方走
+ * `featureDisplayName` / `blacklistFact`，英文轮次即登记好的英文说法）——这里不翻译、
+ * 不拼词，只把它们摆进句子；于是整段英文兜底里一个汉字都不会有。**理由与名称必须是
+ * 同一次取用的结果**：名称取英文、理由还是中文原话，读起来就是一段没翻完的英文。
  */
 function englishFeatureQaFallback(args: {
-  blacklisted: readonly { label: string; reason: string }[];
+  blacklisted: readonly FeatureQaBlacklistFact[];
   openLabels: readonly string[];
   selfIntro: boolean;
 }): string {
   const role = args.selfIntro ? `${COORDINATOR_ROLE_NOTE_EN}. ` : "";
   const shortcuts = args.openLabels.length
-    ? `I've got dedicated shortcuts for ${args.openLabels.join(", ")} — those run ` +
-      "faster and cheaper to handle; "
+    ? `I handle ${englishList(args.openLabels)} on a faster, cheaper dedicated path; `
     : "";
   const fullFlow =
     "anything else that needs coordinating between the people who live here goes " +
     "through the full coordination flow, so it's not that I can't do it";
   if (args.blacklisted.length) {
     const f = args.blacklisted[0];
-    return `${role}There's one thing I can't do for you — ${f.label}: ${f.reason}. ${shortcuts}${fullFlow}.`;
+    return `${role}There's one thing I can't do for you — ${f.displayName}: ${f.reason}. ${shortcuts}${fullFlow}.`;
   }
   return `${role}${shortcuts}${fullFlow}.`;
 }
@@ -340,11 +364,15 @@ function englishFeatureQaFallback(args: {
  * **通用 grounding 校验——只读事实源的验证元数据，引擎里没有任何主题分支。**
  *
  * 接受的正文必须：
- * 1. 含**每一条**被选中的黑名单条目的 `label`；
- * 2. 保留它的**理由**——含该条目 `validation.reasonAnchors` 里的**每一个**锚点词
- *    （允许自然改写措辞：锚点是数据里「换句话也绕不开」的核心词）；
+ * 1. 含**每一条**被选中的黑名单条目的 `displayName`；
+ * 2. 保留它的**理由**——含该条目 `reasonAnchors` 里的**每一个**锚点词
+ *    （允许自然改写措辞：锚点是数据里「换句话也绕不开」的核心词）。名称、理由与锚点
+ *    是**同一次按语言取用的结果**（`blacklistFact`），所以英文轮次核的是英文说法与
+ *    英文锚点，中文轮次逐字不变；
  * 3. 当住户明确在问「你能做什么」或问起「你是谁」（`asksWhatIsAvailable` /
- *    `asksAboutSelf`）时，含**当前全部**专门优化功能的 `label`，一项不漏；
+ *    `asksAboutSelf`）时，含**当前全部**专门优化功能的**显示名**，一项不漏；名字由
+ *    `bundle` 按本轮语言取好（英文轮次是英文显示名），所以英文正文里凑不出中文登记名
+ *    就判不通过——**这正是要防的**：英文住户不该收到夹着中文功能名的英文回应；
  * 4. 问起我自己时，含 `selfIntro.anchors` 里的每一个锚点——doctrine 的硬规则是
  *    「AI」两字不能省（不冒充真人），住户用中文还是英文问都得说出来。
  *
@@ -359,13 +387,13 @@ export function findUngroundedFeatureQaFacts(
   const text = reply ?? "";
   const missing: string[] = [];
   for (const fact of bundle.blacklisted) {
-    if (!text.includes(fact.label)) {
-      missing.push(`未提到事项「${fact.label}」`);
+    if (!text.includes(fact.displayName)) {
+      missing.push(`未提到事项「${fact.displayName}」`);
       continue;
     }
-    const absent = fact.validation.reasonAnchors.filter((a) => !text.includes(a));
+    const absent = fact.reasonAnchors.filter((a) => !text.includes(a));
     if (absent.length) {
-      missing.push(`未保留「${fact.label}」的原因（缺：${absent.join("、")}）`);
+      missing.push(`未保留「${fact.displayName}」的原因（缺：${absent.join("、")}）`);
     }
   }
   if (bundle.selfIntro) {
@@ -376,7 +404,9 @@ export function findUngroundedFeatureQaFacts(
   }
   if (opts.requireOpenLabels) {
     for (const f of bundle.openFeatures) {
-      if (!text.includes(f.label)) missing.push(`未列出优化功能「${f.label}」`);
+      if (!text.includes(f.displayName)) {
+        missing.push(`未列出优化功能「${f.displayName}」`);
+      }
     }
   }
   return missing;
@@ -386,11 +416,13 @@ function featureQaSystem(
   bundle: FeatureQaFactBundle,
   requireOpenLabels: boolean
 ): string {
+  // 功能名用**已经按本轮语言取好的显示名**：英文轮次这里是英文名，模型照抄即可，
+  // 不需要自己把中文登记名译成自然英文（那正是要避免的即兴发挥）。
   const open = bundle.openFeatures.length
-    ? bundle.openFeatures.map((f) => `- ${f.label}`)
+    ? bundle.openFeatures.map((f) => `- ${f.displayName}`)
     : ["（目前没有）"];
   const blacklisted = bundle.blacklisted.length
-    ? bundle.blacklisted.map((c) => `- ${c.label}：${c.reason}`)
+    ? bundle.blacklisted.map((c) => `- ${c.displayName}：${c.reason}`)
     : ["（没有与这个问题对应的、明确办不了的事项）"];
   return [
     "你是这套房子的 AI 协调员。住户正在问你跟你自己有关的问题：你是谁、你是干什么的、你怎么工作、你有哪些功能、某件事能不能做、为什么某件事做不了、或者刚才为什么没给他办。",
@@ -446,13 +478,17 @@ function featureQaSystem(
 export async function generateFeatureQaReply(
   args: {
     question: string;
-    openFeatures: readonly { id: string; label: string }[];
+    /**
+     * 已批准功能（`APPROVED_FEATURES`）。**两个显示名都带着**（`label` 登记名 +
+     * `labelEn` 英文显示名），由事实源按本轮语言取用——引擎里不翻译、不拼名字。
+     */
+    openFeatures: readonly FeatureDisplayName[];
     /**
      * 本人**上一轮刚被黑名单拒绝**的条目 id（结构化引用；`repo.latestBlacklistReference`
      * 的收窄查询结果）。问题本身对不上条目、但这是紧接被拒的追问时，据此说出名称与原因。
      */
     referencedBlacklistedId?: string | null;
-    /** 本轮住户语言判定（`turn.ts` 判一次）——正文上限、模型指令、兜底都由它定语言。 */
+    /** 本轮住户语言判定（`turn.ts` 判一次）——正文上限、模型指令、显示名、兜底都由它定。 */
     language?: LanguageDecision;
   },
   llm: FeatureLlm
@@ -465,6 +501,8 @@ export async function generateFeatureQaReply(
     question: args.question,
     referencedBlacklistedId: args.referencedBlacklistedId ?? null,
     selfIntro,
+    // 显示名按本轮语言取：英文轮次的事实包与 grounding 用英文显示名。
+    language: args.language,
   });
   // 住户明确问「你能做什么」或问起「你是谁」时必须逐项列出全部专门优化功能名；
   // 只问「为什么某件事办不了」则不强制全列。
@@ -532,7 +570,7 @@ export async function generateFeatureQaReply(
  */
 export async function runFeatureQa(args: {
   text: string;
-  openFeatures: readonly { id: string; label: string }[];
+  openFeatures: readonly FeatureDisplayName[];
   /** 本人上一轮刚被黑名单拒绝的条目 id（结构化引用；没有则 null） */
   referencedBlacklistedId?: string | null;
   /**

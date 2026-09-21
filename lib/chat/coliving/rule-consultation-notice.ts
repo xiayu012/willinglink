@@ -7,6 +7,7 @@ import {
   type FeatureLlm,
   type FeatureUsage,
 } from "./feature-llm";
+import type { LanguageDecision } from "./language";
 
 /**
  * **共同规则协商的措辞层——只写文案，不决定「该不该发」。**
@@ -51,6 +52,11 @@ export const RULE_NOTICE_NAME = "rule_consultation_notice";
 /**
  * 措辞系统提示：**只给这一次协商的规则事实**，要求简短、中性、说清合理理由、
  * 不念流程、不指名任何人、不透露是谁提出的。
+ *
+ * **不写死"用中文"**：说哪种语言由 `structuredCall` 的轮次语言指令给（`call.language`，
+ * 见 `language.ts`），这里再写一句"都用中文"只会跟那条硬指令打架——英文住户回一个
+ * "ok" 触发这条路径时，提示词会一边说"用英文"、一边说"都用中文"。所以这里只说
+ * "用住户这一轮说话的那种语言"，把语言交给唯一的那个判定。
  */
 export function ruleNoticeSystem(rule: string): string {
   return [
@@ -58,7 +64,7 @@ export function ruleNoticeSystem(rule: string): string {
     `这条规则是：「${rule}」。`,
     "住户们正在一起确认这条规则，必须**所有人都同意**才算定案。",
     "",
-    "请写三种短信，都用中文、简短（一两句）、自然、第三人称中性的口吻，各说清一个合理理由；",
+    "请写三种短信，都用**住户这一轮说话的那种语言**、简短（一两句）、自然、第三人称中性的口吻，各说清一个合理理由；",
     "不许念流程，不许出现「状态机 / 协商 / 投票 / 征询 / 流程」这类系统词：",
     "- consult：发给一位还没表态的室友，请他就这条规则表个态（同意或不同意都可以）。",
     "- announce：发给一位室友，告诉他这条规则已经**所有人都同意、正式生效**。",
@@ -74,16 +80,25 @@ export function ruleNoticeSystem(rule: string): string {
  * 一次模型调用，产出这三种文案。失败时抛 `FeatureCallError`（已带真实用量，不重试），
  * 由调用方安全不发送：`turn.ts` 在**事实推进之后绝不回落**普通流程，而是**零第三方出站**、
  * 给当前住户一句中性安全回复——**绝不用兜底文案假称已经通知**。
+ *
+ * `language` 是本轮的住户语言判定（`turn.ts` 在轮次边界判一次后传进来），照原样交给
+ * `structuredCall`，由 `languageInstruction` 变成给模型的**硬指令**。**已知边界**：这条
+ * 路径的三种文案里，只有 `ack` 是回给当前说话人的，`consult` / `announce` 发给别的住户，
+ * 而这一轮手上只有当前说话人的语言判定——同屋通常说同一种语言，用他的判定是这里唯一
+ * 拿得到的依据，也比一律写中文更接近事实。缺省由 `structuredCall` 从 `user` 现推
+ * （既有离线调用一行不改）。
  */
 export async function composeRuleNotices(
   rule: string,
-  llm: FeatureLlm
+  llm: FeatureLlm,
+  language?: LanguageDecision
 ): Promise<{ notices: RuleNotices; usage: FeatureUsage }> {
   const { value, usage } = await structuredCall(llm, {
     stage: RULE_NOTICE_STAGE,
     name: RULE_NOTICE_NAME,
     system: ruleNoticeSystem(rule),
     user: "请按上面的要求写这三种通知。",
+    language,
     maxOutputTokens: FEATURE_COMPOSE_MAX_OUTPUT_TOKENS,
     schema: RuleNoticesSchema,
   });
