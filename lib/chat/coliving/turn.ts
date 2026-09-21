@@ -6,6 +6,10 @@ import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import { assembleSystemPrompt } from "@/lib/ai/brains";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { buildContext } from "./context";
+import {
+  retrievalToolNamesUsed,
+  type ContextReceipt,
+} from "./context-receipt";
 import { kitchenEveningWindow } from "./coordination-bridge";
 import { advanceCoordinationSession } from "./coordination-session";
 import type { OutboundAction, State } from "../../coordination/types";
@@ -1093,6 +1097,14 @@ export type TurnOutcome = {
    * 没有构建提示词——那几个数字不是 0，是"没有这一层"。
    */
   promptComposition: PromptComposition | null;
+  /**
+   * 本轮上下文的**回执**（只记分节 id / 字符数与按需检索工具名，不记正文），
+   * 见 `context-receipt.ts` 的 `ContextReceipt`。与 `promptComposition` 同一批
+   * 返回点、同一条纪律：**只在主提示词真正跑起来的那条路径上有值**（上下文就是
+   * 那时构建的，模型调了哪些工具也是那时才知道）；其余路径显式 `null`——那几个
+   * "没构建上下文"的轮次不是"0 个分节"。
+   */
+  contextReceipt: ContextReceipt | null;
   toolsUsed: string[];
   /** 认不出这个号码时为 true，调用方应当只回一句而不做任何记录 */
   unknownSender: boolean;
@@ -1218,6 +1230,7 @@ async function maybeCoordinationReply(args: {
       modules: [],
       promptChars: 0,
       promptComposition: null,
+      contextReceipt: null,
       toolsUsed: [],
       unknownSender: false,
       usage: {
@@ -1518,6 +1531,7 @@ async function maybeSharedRuleReply(args: {
       modules: [],
       promptChars: 0,
       promptComposition: null,
+      contextReceipt: null,
       toolsUsed: [],
       unknownSender: false,
       usage: noticesUsage,
@@ -1538,6 +1552,7 @@ async function maybeSharedRuleReply(args: {
       modules: [],
       promptChars: 0,
       promptComposition: null,
+      contextReceipt: null,
       toolsUsed: [],
       unknownSender: false,
       usage: noticesUsage,
@@ -1736,6 +1751,7 @@ export async function finalizeFeatureTurn(
     modules: [],
     promptChars: 0,
     promptComposition: null,
+    contextReceipt: null,
     toolsUsed: [],
     unknownSender: false,
     usage: args.usage,
@@ -1806,6 +1822,7 @@ export async function runColivingTurn(args: {
       modules: [],
       promptChars: 0,
       promptComposition: null,
+      contextReceipt: null,
       toolsUsed: [],
       unknownSender: true,
       usage: {
@@ -2004,6 +2021,7 @@ export async function runColivingTurn(args: {
       modules: [],
       promptChars: 0,
       promptComposition: null,
+      contextReceipt: null,
       toolsUsed: [],
       unknownSender: false,
       usage: {
@@ -4367,6 +4385,14 @@ export async function runColivingTurn(args: {
       moduleIds: loadedModuleIds,
       toolNames: exposedToolNames,
       toolCount: exposedToolNames.length,
+    },
+    // 上下文就是这条路径上构建的：分节与上面那份 runtime 同源，只记 id 与字符数。
+    // 按需检索工具名在这里补上——`buildContext` 那一刻还不知道模型会调什么；
+    // 只从 `toolsUsed` 里挑出**代码写死名单里的**那几类，纯名字、去重、顺序稳定，
+    // 查询参数与工具返回正文一概不进回执。
+    contextReceipt: {
+      ...ctx.receipt,
+      retrievalToolNames: retrievalToolNamesUsed(toolsUsed),
     },
     toolsUsed,
     unknownSender: false,

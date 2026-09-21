@@ -81,6 +81,7 @@ import type {
   PromptComposition,
   ReplyReview,
 } from "../lib/chat/coliving/turn";
+import type { ContextReceipt } from "../lib/chat/coliving/context-receipt";
 import {
   isMissingGuidanceArg,
   knownGuidanceIds,
@@ -297,6 +298,13 @@ type TurnRecord = {
    * 没走模型（短路/接管/未知号码），不是 0 字符。生产路径不落这份数据。
    */
   promptComposition: PromptComposition | null;
+  /**
+   * 这一轮上下文的**分节收据**（只记分节 id 与字符数，不记正文），由
+   * `buildContext` 随上下文一起产出。`null` = 这一轮没走主提示词
+   * （短路/接管/未知号码/功能前门），不是"0 个分节"。
+   * 生产路径不落这份数据，只进评测报告 JSON。
+   */
+  contextReceipt: ContextReceipt | null;
   toolsUsed: string[];
   scheduleFacts: string[];
   outbound: Array<{
@@ -524,6 +532,7 @@ async function runScenario(
       reply: last.reply,
       replyReview: last.replyReview,
       promptComposition: last.promptComposition,
+      contextReceipt: last.contextReceipt,
       toolsUsed: last.toolsUsed,
       scheduleFacts: last.scheduleFacts,
       // 用 allOutbound 而不是 outbound：被审稿拦下的那些也要进文字稿，

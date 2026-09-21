@@ -227,7 +227,9 @@ import {
 } from "../lib/chat/coliving/evals/action-plan";
 import { findUnknownActionPlanFlags } from "../lib/chat/coliving/evals/action-plan-args";
 import {
+  normalizeContextReceipt,
   normalizePromptComposition,
+  renderContextReceiptHtml,
   renderPromptCompositionHtml,
 } from "../lib/chat/coliving/ledger-report";
 import {
@@ -7606,6 +7608,332 @@ async function main() {
       ),
       "报告必须明说这只是观测，不构成删 doctrine 的依据"
     );
+  });
+
+  /**
+   * ── 上下文回执：只有分节 id / 字符数与检索工具名，没有正文 ──────────────
+   *
+   * 回执是观察层，跟上面的 prompt 观测同一条纪律：它只回答"这一轮上下文由
+   * 哪些分节拼成、各占多少字符，模型额外去查了哪几类"，**不回答里面写了
+   * 什么**。所以要证三件事：
+   *  1. **源级**：`ContextReceipt` 的形状里没有任何承载正文的字段，
+   *     `buildContext` 只按 `lines` 的字符数记账（不把分节文本存进收据）；
+   *  2. **离线渲染**：把一份**被刻意塞进"样例机密正文"**的收据喂给渲染函数，
+   *     输出里绝不能出现那段正文——分节只读 `id` / `chars`，工具名只留
+   *     代码认识的名字，多余字段一律不读、不渲染；
+   *  3. **旧报告兼容**：字段缺席时整个块不渲染（不补 0、不 NaN）。
+   */
+  check("上下文回执：只有分节 id / 字符数与检索工具名，渲染不暴露任何正文", () => {
+    // 形状与工具名单在纯模块里（零 import）：运行时、评测脚本、报告层共用一份，
+    // 不许在别处再立一套收据类型或再写一份检索工具名单。
+    const receiptSrc = readFileSync(
+      "lib/chat/coliving/context-receipt.ts",
+      "utf8"
+    );
+    const sectionTypeStart = receiptSrc.indexOf(
+      "export type ContextReceiptSection = {"
+    );
+    assert(sectionTypeStart > 0, "ContextReceiptSection 类型必须导出");
+    assert(
+      receiptSrc.includes(
+        "export type ContextReceipt = ContextSectionsReceipt & {"
+      ),
+      "ContextReceipt 类型必须导出，供 turn/eval/报告复用"
+    );
+    assert.equal(
+      receiptSrc.split("export const CONTEXT_RETRIEVAL_TOOL_NAMES = [").length - 1,
+      1,
+      "按需检索工具名单只能有一处定义"
+    );
+    // 类型声明区块 = 分节类型 + 收据类型；到工具名单为止，把渲染/装配代码排除在外。
+    const receiptTypeBlock = receiptSrc.slice(
+      sectionTypeStart,
+      receiptSrc.indexOf("export const CONTEXT_RETRIEVAL_TOOL_NAMES = [")
+    );
+    // 只查**声明行**（跳过注释，与其它运行时代码扫描同一规矩）：注释里引一句
+    // `text` 是在说明字符数的口径，不是承载正文的字段。
+    const receiptDeclLines = receiptTypeBlock
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(
+        (t) =>
+          t.length > 0 &&
+          !t.startsWith("//") &&
+          !t.startsWith("*") &&
+          !t.startsWith("/*")
+      );
+    assert(
+      receiptDeclLines.every((line) => !/\btext\b/.test(line)),
+      "收据类型里不得出现任何正文承载字段（text）——收据只有 id / 字符数 / 工具名"
+    );
+    assert(
+      receiptDeclLines.some((line) => line === "id: string;") &&
+        receiptDeclLines.some((line) => line === "chars: number;") &&
+        receiptDeclLines.some((line) => line === "retrievalToolNames: string[];"),
+      "收据声明行只能是 id: string、chars: number 与 retrievalToolNames: string[]"
+    );
+    // context.ts 只产出"分节那半"，不许再另立一套收据形状。
+    const ctxSrc = readFileSync("lib/chat/coliving/context.ts", "utf8");
+    assert(
+      !ctxSrc.includes("export type ContextReceipt"),
+      "收据类型只在纯模块 context-receipt.ts 定义，context.ts 不得另立一套"
+    );
+    // 分节收据由 buildContext 逐节收尾产出：12 个稳定分节 id（条件分节没出现就
+    // 自然不进列表），字符数一律由 lines 切片算出来（不是把正文存起来）。
+    assert.equal(
+      ctxSrc.split("endSection(").length - 1,
+      12,
+      "12 个稳定分节各收尾一次（id 由代码写死）"
+    );
+    for (const id of [
+      "unknowns",
+      "now",
+      "channel",
+      "answering",
+      "first-contact",
+      "roster",
+      "sender-landlord",
+      "house-rules",
+      "awaiting-replies",
+      "open-cases",
+      "standalone-positions",
+      "recent-outbound",
+    ]) {
+      assert(
+        ctxSrc.includes(`endSection("${id}")`),
+        `稳定分节 id 必须写死：${id}`
+      );
+    }
+    assert(
+      ctxSrc.includes("chars: lines.slice(sectionStart).join(\"\\n\").length"),
+      "字符数只能从已构建的行算出来，不许另存分节正文"
+    );
+    assert(
+      ctxSrc.includes("receipt: { sections },"),
+      "收据必须随 ColivingContext 一起返回"
+    );
+
+    // turn：只有主提示词那条路径带收据，其余路径显式 null。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    assert(
+      turnSrc.includes("contextReceipt: ContextReceipt | null;"),
+      "TurnOutcome 必须带可空收据字段（null=本轮没走主提示词）"
+    );
+    assert.equal(
+      turnSrc.split("contextReceipt: null,").length - 1,
+      6,
+      "六条不走主提示词的返回点都要显式 null（与 promptComposition 同一批）"
+    );
+    assert(
+      turnSrc.includes("contextReceipt: {") &&
+        turnSrc.includes("...ctx.receipt,") &&
+        turnSrc.includes("retrievalToolNames: retrievalToolNamesUsed(toolsUsed),"),
+      "主生成返回点必须带上 buildContext 的分节 + 本轮真跑过的按需检索工具名"
+    );
+    assert(
+      turnSrc.includes("retrievalToolNamesUsed") &&
+        turnSrc.includes("from \"./context-receipt\""),
+      "按需检索工具名只能从纯模块的名单里筛出来，不在 turn.ts 里另写一份名单"
+    );
+    assert(
+      !/contextReceipt[\s\S]{0,400}(ctx\.text|args\.text|toolCalls|call\.args)/.test(
+        turnSrc
+      ),
+      "收据里不得出现运行时正文、住户原话或工具调用参数"
+    );
+
+    // eval：逐轮记录带进报告 JSON。
+    const evalSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
+    assert(
+      evalSrc.includes("contextReceipt: last.contextReceipt"),
+      "逐轮记录必须把收据带进报告 JSON"
+    );
+
+    // 报告渲染：三态防御；坏节丢弃、坏字符数记未知；绝不放 NaN/undefined。
+    assert.equal(
+      normalizeContextReceipt(undefined),
+      undefined,
+      "旧报告字段缺席 → 不展示"
+    );
+    assert.equal(
+      normalizeContextReceipt(null),
+      null,
+      "null = 本轮没构建上下文，不是 0 个分节"
+    );
+    assert.equal(
+      normalizeContextReceipt({ sections: "不是数组" }),
+      undefined,
+      "形状不认识 → 不渲染"
+    );
+    // **样例机密正文**：刻意塞进收据对象的额外字段，用来证明渲染不会带出正文。
+    const SAMPLE_SECRET = "样例机密正文-SHOULD-NOT-APPEAR-42";
+    const normalized = normalizeContextReceipt({
+      sections: [
+        { id: "roster", chars: 128, text: SAMPLE_SECRET },
+        { id: 7, chars: 10 },
+        { id: "house-rules", chars: Number.NaN, statement: SAMPLE_SECRET },
+      ],
+      // 检索工具名里也塞一段机密正文：名单外的字符串一个都不许渲染。
+      retrievalToolNames: ["recall", SAMPLE_SECRET, "lookupHistory"],
+    });
+    assert.ok(normalized, "形状认识的收据要归一化");
+    assert.deepEqual(
+      normalized.sections,
+      [
+        { id: "roster", chars: 128 },
+        { id: "house-rules", chars: null },
+      ],
+      "只取 id 与字符数：非字符串 id 丢弃，坏字符数记未知"
+    );
+    for (const s of normalized.sections) {
+      assert.deepEqual(
+        Object.keys(s),
+        ["id", "chars"],
+        "归一化后的分节只能有 id/chars 两个键"
+      );
+    }
+    assert.deepEqual(
+      normalized.retrievalToolNames,
+      ["recall", "lookupHistory"],
+      "检索工具名只留代码认识的那几个，名单外的字符串丢弃"
+    );
+    // 旧报告连检索工具名这一栏都没有 → 未知（不是"没跑检索"）。
+    assert.equal(
+      normalizeContextReceipt({ sections: [] })?.retrievalToolNames,
+      null,
+      "缺检索工具名 → 未知，不猜成空"
+    );
+    // 类型不对（不是字符串数组）→ 未知。
+    assert.equal(
+      normalizeContextReceipt({ sections: [], retrievalToolNames: [7] })
+        ?.retrievalToolNames,
+      null,
+      "非字符串数组 → 未知"
+    );
+
+    assert.equal(
+      renderContextReceiptHtml(undefined),
+      "",
+      "旧报告不渲染收据块"
+    );
+    const receiptHtml = renderContextReceiptHtml(normalized);
+    const rendered = [
+      renderContextReceiptHtml(null),
+      receiptHtml,
+      renderContextReceiptHtml({ sections: [] }),
+      renderContextReceiptHtml({}),
+    ];
+    for (const html of rendered) {
+      assert(!html.includes("NaN"), "收据块绝不能渲染出 NaN");
+      assert(!html.includes("undefined"), "收据块绝不能渲染出 undefined");
+      assert(
+        !html.includes(SAMPLE_SECRET),
+        "渲染绝不能暴露分节正文（样例机密文本不得出现）"
+      );
+    }
+    // 紧凑列表：每行一个节 id + 字符数；未知字符数照实说"未知"。
+    assert(
+      receiptHtml.includes("<li>") &&
+        receiptHtml.includes("roster") &&
+        receiptHtml.includes("128"),
+      "收据要渲染成紧凑列表：节 id + 字符数"
+    );
+    assert(
+      receiptHtml.includes("house-rules") && receiptHtml.includes("未知"),
+      "坏字符数显示为未知，不显示成 0"
+    );
+    // 按需检索工具：报告要列出本轮真跑过的那几类名字。
+    assert(
+      receiptHtml.includes("recall") && receiptHtml.includes("lookupHistory"),
+      "报告要列出本轮跑过的按需检索工具名"
+    );
+    assert(
+      renderContextReceiptHtml({ sections: [], retrievalToolNames: [] }).includes(
+        "（无"
+      ),
+      "没跑任何按需检索时明说无，不显示成未知"
+    );
+
+    // 报告页真的挂了这块（html 报告侧）。
+    const reportSrc = readFileSync("scripts/coliving-report.ts", "utf8");
+    assert(
+      reportSrc.includes("renderContextReceiptHtml(t.contextReceipt)"),
+      "HTML 报告必须渲染收据块"
+    );
+  });
+
+  /**
+   * ── 免费静态检查：分节收据只有安全 id + 有限计数，绝无 text/body ────────
+   *
+   * 上面那条 check 覆盖端到端渲染（含"样例机密正文"不被带出）。这条把**形状**
+   * 单拎出来，不接模型、不接数据库、不写出站，纯读源码 + 纯函数归一化，钉死两点：
+   *  1. `ContextReceiptSection` 的声明里没有 `text` / `body` 这类承载正文的字段
+   *     （词边界匹配，避免误伤其它标识符里的子串）；
+   *  2. 一个分节收据只保留「安全 id（非空字符串）+ 有限非负计数」，溢出/负数/NaN
+   *     记为未知，非字符串 id 或空 id 直接丢弃——结构上带不出任意正文或 NaN。
+   */
+  check("上下文回执分节形状：无 text/body 字段，只有安全 id + 有限计数", () => {
+    const src = readFileSync("lib/chat/coliving/context-receipt.ts", "utf8");
+    const start = src.indexOf("export type ContextReceiptSection = {");
+    assert(start > 0, "ContextReceiptSection 必须导出");
+    const sectionType = src.slice(start, src.indexOf("};", start));
+    // 只认**字段声明行**，其余一律忽略：空行、注释（说明字符数口径时会引 `text`，
+    // 那不是承载字段）、类型声明头 `export type ... = {`、以及花括号本身。所以按
+    // 换行**和花括号**切，并用锚定正则只留 `标识符: 类型;` 这种字段行——声明行与
+    // 收尾括号不管怎么排版都不会被当成字段。
+    const fieldLines = sectionType
+      .split(/[\r\n{}]/)
+      .map((line) => line.trim())
+      .filter(
+        (t) =>
+          t.length > 0 &&
+          !t.startsWith("//") &&
+          !t.startsWith("*") &&
+          !t.startsWith("/*") &&
+          !t.startsWith("export ") &&
+          !t.startsWith("type ") &&
+          /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*[^;{}]+;$/.test(t)
+      );
+    assert(
+      fieldLines.every((line) => !/\b(text|body)\b/.test(line)),
+      "ContextReceiptSection 不得有任何 text / body 之类的正文承载字段"
+    );
+    assert.deepEqual(
+      fieldLines,
+      ["id: string;", "chars: number;"],
+      "ContextReceiptSection 只能有 id: string 与 chars: number 两个字段"
+    );
+
+    // 纯函数归一化：坏 id 丢弃；坏计数（NaN/Infinity/负数/字符串）记为未知，不是 0。
+    const normalized = normalizeContextReceipt({
+      sections: [
+        { id: "roster", chars: 128, text: "SHOULD-NOT-SURVIVE", body: "SHOULD-NOT-SURVIVE" },
+        { id: "now", chars: Number.POSITIVE_INFINITY },
+        { id: "channel", chars: Number.NaN },
+        { id: "house-rules", chars: -5 },
+        { id: "", chars: 10 },
+        { id: 7, chars: 10 },
+      ],
+    });
+    assert.ok(normalized, "形状认识的收据要归一化");
+    assert.deepEqual(
+      normalized.sections,
+      [
+        { id: "roster", chars: 128 },
+        { id: "now", chars: null },
+        { id: "channel", chars: null },
+        { id: "house-rules", chars: null },
+      ],
+      "只留安全 id + 有限计数：非字符串/空 id 丢弃，坏计数记为未知"
+    );
+    for (const s of normalized.sections) {
+      assert.deepEqual(Object.keys(s), ["id", "chars"], "分节只能有 id 与 chars 两个键");
+      assert.equal(typeof s.id, "string", "id 只能是字符串");
+      assert.ok(
+        s.chars === null || (Number.isFinite(s.chars) && s.chars >= 0),
+        "chars 要么是有限非负数，要么是未知（null）"
+      );
+    }
   });
 
   /**

@@ -12,6 +12,8 @@
  */
 
 import type { GenerationRecord, LedgerSnapshot } from "./gateway-ledger";
+// 纯模块（零 import）：上下文回执里"哪些工具算按需检索"这份名单只有一处定义。
+import { isContextRetrievalToolName } from "./context-receipt";
 
 /** "上游未回报"的统一措辞——用在 token 这种可以为 null 的字段上。 */
 export const TOKEN_UNKNOWN = "未知（上游未回报）";
@@ -411,6 +413,121 @@ export function renderPromptCompositionHtml(raw: unknown): string {
     `固定分隔符）；不含评测 guidance（--guidance 实验专用，生产不传）。</div>` +
     `<div class="cost-note">这是观测：只用于解释每轮 prompt 由什么构成，` +
     `单独不构成删除或精简 doctrine 的依据。</div>` +
+    `</div></details>`
+  );
+}
+
+// ── 上下文回执（观察层，与上面的 prompt 观测同一条纪律） ─────────────────
+//
+// 每轮上下文由哪些分节拼成、各占多少字符，以及本轮真跑过哪些**按需检索**
+// 工具（只有名字）。**没有正文**——回执形状里根本没有承载正文的字段，所以
+// 渲染层也无从泄漏分节内容；这里再防御两层：
+//   1. 分节只认 `id`（字符串）和 `chars`（有限非负数），多余字段一律不读；
+//   2. 检索工具名**只认代码写死在 `context-receipt.ts` 里的那几个名字**，
+//      报告 JSON 里即使被塞了别的字符串（例如某段正文），也不会渲染出来。
+// 未知照旧显示"未知"，不显示成 0；旧报告没这个字段就不展示。
+
+/** 归一化后的一节：`chars` 可能"未知"（null），不是 0。 */
+export type NormalizedContextSection = {
+  id: string;
+  chars: number | null;
+};
+
+/** 归一化后的回执；`null` = 这一轮没构建上下文。 */
+export type NormalizedContextReceipt = {
+  sections: NormalizedContextSection[];
+  /**
+   * 本轮跑过的按需检索工具名（已按写死的名单过筛）；`null` = 这一栏未知
+   * （旧报告没有），空数组 = 明确没跑任何按需检索。
+   */
+  retrievalToolNames: string[] | null;
+};
+
+/**
+ * 把报告里原始的收据字段归一化成三态（与 `normalizePromptComposition` 同规矩）：
+ * - `undefined`：旧报告没有这个字段 → 调用方不展示（不猜、不补 0）；
+ * - `null`：这一轮没走主提示词 → 不是"0 个分节"；
+ * - 对象：逐节归一化，只取 `id` + `chars`，坏节丢弃 / 坏字符数记 null；
+ *   检索工具名只保留代码认识的（见 `isContextRetrievalToolName`）。
+ *
+ * 形状完全不认识的（`sections` 不是数组）也当 `undefined`，避免把别的东西
+ * 渲染成收据。**id 只当字符串渲染，不做任何语义解释。**
+ */
+export function normalizeContextReceipt(
+  raw: unknown
+): NormalizedContextReceipt | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const sections = o.sections;
+  if (!Array.isArray(sections)) return undefined;
+  const normalized: NormalizedContextSection[] = [];
+  for (const entry of sections) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const id = (entry as Record<string, unknown>).id;
+    if (typeof id !== "string" || id.length === 0) continue;
+    normalized.push({
+      id,
+      chars: finiteNonNegative((entry as Record<string, unknown>).chars),
+    });
+  }
+  // 只留代码认识的检索工具名：这是"渲染层绝不显示任意字符串"的结构性保证，
+  // 也让工具的增删只发生在 `context-receipt.ts` 一处。
+  const rawTools = stringArrayOrNull(o.retrievalToolNames);
+  return {
+    sections: normalized,
+    retrievalToolNames:
+      rawTools === null ? null : rawTools.filter(isContextRetrievalToolName),
+  };
+}
+
+/**
+ * 渲染一轮的「上下文回执」块：
+ * - **分节清单**：一个紧凑列表，每行只有节 id 和字符数；
+ * - **按需检索工具**：本轮真跑过哪几类（只列名字）。
+ *
+ * 旧报告（字段缺席）返回空串；`null` 明说"本轮未构建上下文"。
+ * 列表项只取归一化后的 id/chars，工具名只取代码认识的名字，因此收据对象上
+ * 即使被塞进了额外字段（例如某段正文），也**不会**出现在输出里。
+ */
+export function renderContextReceiptHtml(raw: unknown): string {
+  const receipt = normalizeContextReceipt(raw);
+  if (receipt === undefined) return "";
+  if (receipt === null) {
+    return (
+      `<details class="cost ctx-receipt"><summary>上下文回执</summary>` +
+      `<div class="cost-body"><div class="cost-note">` +
+      `本轮未构建上下文（未走主提示词）——未知号码、简单肯定短路、功能前门或` +
+      `状态机接管等确定性路径。这里不是"0 个分节"，是"没有这一层"。` +
+      `</div></div></details>`
+    );
+  }
+  const items =
+    receipt.sections.length > 0
+      ? receipt.sections
+          .map(
+            (s) =>
+              `<li><span class="ck">${escapeHtml(s.id)}</span>` +
+              `<span class="cv">${s.chars === null ? PCOMP_UNKNOWN : s.chars}</span></li>`
+          )
+          .join("")
+      : `<li><span class="ck">（无分节）</span><span class="cv">${PCOMP_UNKNOWN}</span></li>`;
+  const retrievalText =
+    receipt.retrievalToolNames === null
+      ? PCOMP_UNKNOWN
+      : receipt.retrievalToolNames.length > 0
+        ? receipt.retrievalToolNames.join("、")
+        : "（无——本轮没有额外按需检索）";
+  return (
+    `<details class="cost ctx-receipt">` +
+    `<summary>上下文回执（只记分节 id / 字符数与检索工具名，不含正文）</summary>` +
+    `<div class="cost-body">` +
+    `<ul class="ctx-sections">${items}</ul>` +
+    `<div class="cost-note">本轮真正跑过的按需检索工具：${escapeHtml(retrievalText)}</div>` +
+    `<div class="cost-note">这是观测：只用于解释每轮上下文由哪些分节拼成、` +
+    `模型额外去查了哪几类，单独不构成增删分节或增减工具的依据。字符数按各节` +
+    `自身口径算，不含节与节之间的连接换行。</div>` +
     `</div></details>`
   );
 }

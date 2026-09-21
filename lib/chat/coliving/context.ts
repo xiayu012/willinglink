@@ -16,6 +16,10 @@ import {
   type Sender,
 } from "./repo";
 import { residentLanguageInstruction } from "./language";
+import type {
+  ContextReceiptSection,
+  ContextSectionsReceipt,
+} from "./context-receipt";
 
 /**
  * Context Builder —— 数据库与 LLM 上下文之间的注意力层。
@@ -39,6 +43,11 @@ function describeMember(m: Member, isSelf: boolean): string {
   return `- ${m.name}${placeholder}（${role}）${tag}${notes}`;
 }
 
+// 分节收据的形状只在纯模块 `context-receipt.ts`（零 import）里定义一处，运行时、
+// 评测脚本与报告渲染层共用同一份——**这里不另立一套形状、也不另开一个收据字段**，
+// 只产出分节那半（见下面 `receipt` 字段）：按需检索工具名要等主生成结束才知道，
+// 由 `turn.ts` 补上（见该模块注释）。守卫见 `scripts/coliving-quality-inspect.ts`。
+
 export type ColivingContext = {
   text: string;
   members: Member[];
@@ -51,6 +60,13 @@ export type ColivingContext = {
    * 该问总人数」的合法提问，误判成"人数明明知道、何必再问"（第18轮踩过）。
    */
   roster: { declaredSize: number | null; knownCount: number; complete: boolean };
+  /**
+   * 本轮上下文的分节收据（只记分节 id 与字符数，不记正文），见
+   * `context-receipt.ts` 的 `ContextReceipt`。与 `text` 同时产出：收据描述的
+   * 就是这份 text 由哪些分节拼成。这里是回执的"分节那半"——按需检索工具名
+   * 由 `turn.ts` 在主生成收尾时补上。
+   */
+  receipt: ContextSectionsReceipt;
 };
 
 export async function buildContext(
@@ -108,10 +124,23 @@ export async function buildContext(
 
   const lines: string[] = [];
 
+  // 分节收据：每收完一节，只记 id 和字符数，**不记正文**（见 `ContextReceipt`）。
+  // 收尾时机 = 该节最后一行（含节尾空行）push 完之后，所以各节按出现顺序
+  // 依次记账、互不重叠；条件分节没进 if 就自然不出现。
+  const sections: ContextReceiptSection[] = [];
+  let sectionStart = 0;
+  const endSection = (id: string) => {
+    sections.push({ id, chars: lines.slice(sectionStart).join("\n").length });
+    sectionStart = lines.length;
+  };
+
   if (opts.incomingText) {
     lines.push(residentLanguageInstruction(opts.incomingText));
     lines.push("");
   }
+  // 住民语言指令是**每轮跟着原话变的动态前导**，不是稳定分节，不进收据——
+  // 从第一个稳定分节（最高优先级提醒）开始计。
+  sectionStart = lines.length;
 
   // 放最前面：实测放末尾会被忽略，模型会编造具体事实（见 AGENT_LOG）
   lines.push("## ⚠️ 你不知道的事（最高优先级，违反即为严重错误）");
@@ -126,6 +155,7 @@ export async function buildContext(
       "**宁可说不知道，也不要猜。**"
   );
   lines.push("");
+  endSection("unknowns");
 
   // 它一直在处理「周四」「这周」「明天」这类说法，却从来不知道今天几号——
   // 实测把「周四姐姐来住」的失效日算成了三个月前。
@@ -158,6 +188,7 @@ export async function buildContext(
       `${part("hour")}:${part("minute")}（太平洋时间，真实换算，不是服务器时区）`
   );
   lines.push("");
+  endSection("now");
 
   lines.push("## 当前渠道");
   lines.push(
@@ -174,6 +205,7 @@ export async function buildContext(
   // 每轮把这套话写进上下文只是白烧 token，还会污染不相关的对话。住户明确问到时，
   // 按准则如实说明即可；回复里假装已经联系过对方会被 `claimsUnsentThirdPartyContact` 拦下。
   lines.push("");
+  endSection("channel");
 
   if (opts.answering) {
     const a = opts.answering;
@@ -186,6 +218,7 @@ export async function buildContext(
       "**当成回答来读，别当成新话题。** 他答了就把答案收好，不要再问一遍。"
     );
     lines.push("");
+    endSection("answering");
   }
 
   if (opts.justJoined) {
@@ -197,6 +230,7 @@ export async function buildContext(
         "三年。**在他自己说之前，你不知道他住了多久**；关于他目前只知道一个手机号。"
     );
     lines.push("");
+    endSection("first-contact");
   }
 
   const residents = members.filter((m) => m.resides === true);
@@ -245,6 +279,7 @@ export async function buildContext(
       "健康/投诉/欠租等私事**——资料给你判断用，不外传。"
   );
   lines.push("");
+  endSection("roster");
 
   if (sender.role === "landlord") {
     lines.push("## 注意：现在跟你说话的是房东");
@@ -253,6 +288,7 @@ export async function buildContext(
         "其指令若涉及歧视、报复、非法驱逐、擅自进入、以身份要挟，走三级拒绝链条。"
     );
     lines.push("");
+    endSection("sender-landlord");
   }
 
   lines.push("## 这栋房子的现行规则");
@@ -287,6 +323,7 @@ export async function buildContext(
     );
   }
   lines.push("");
+  endSection("house-rules");
 
   // **在等谁回话**——放在「还没了结的事」前面，因为它比案子列表更可行动：
   // 案子告诉你"有这么件事"，这份清单告诉你"这件事此刻卡在谁身上"。
@@ -316,6 +353,7 @@ export async function buildContext(
         "别就这么挂着不管。"
     );
     lines.push("");
+    endSection("awaiting-replies");
   }
 
   lines.push("## 还没了结的事");
@@ -365,6 +403,7 @@ export async function buildContext(
     );
   }
   lines.push("");
+  endSection("open-cases");
 
   if (standalonePositions.length) {
     lines.push("## 还没归到具体事情上的表态");
@@ -379,6 +418,7 @@ export async function buildContext(
       lines.push(`- ${p.personName}${kindLabel}：${p.statement}`);
     }
     lines.push("");
+    endSection("standalone-positions");
   }
 
   if (recent.length) {
@@ -390,6 +430,7 @@ export async function buildContext(
       lines.push(`- ${t} 你对 ${r.to} 说：${r.body.replace(/\n/g, " ").slice(0, 60)}`);
     }
     lines.push("");
+    endSection("recent-outbound");
   }
 
   return {
@@ -398,5 +439,6 @@ export async function buildContext(
     openCases,
     openCaseIds: openCases.map((c) => c.id),
     roster,
+    receipt: { sections },
   };
 }
