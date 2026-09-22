@@ -15,7 +15,11 @@ import path from "node:path";
 import { config } from "dotenv";
 // 评测报告页面的渲染器只有一处：这条闸直接 import 它来验"产出成对"，
 // 顺带证明导入这个模块不会执行它的 CLI（见下面那条 check）。
-import { reportHtmlPathFor, writeReportHtml } from "./coliving-report";
+import {
+  renderReportHtml,
+  reportHtmlPathFor,
+  writeReportHtml,
+} from "./coliving-report";
 import { assembleSystemPrompt } from "../lib/ai/brains";
 import {
   finalizeJudgment,
@@ -61,6 +65,7 @@ import {
   hasDeferredCoordination,
   isLowInformationFollowUp,
   isOpenConflictCase,
+  shouldExposeConflictPlanningTools,
   isPrematureCapacityEscape,
   isPureNoticeReply,
   isScheduleFairnessObjection,
@@ -1884,6 +1889,127 @@ async function main() {
     assert(src.includes("activeTools.recall = tools.recall;"), "历史信号命中才暴露 recall");
     assert(src.includes("activeTools.lookupHistory = tools.lookupHistory;"), "历史信号命中才暴露 lookupHistory");
     assert(src.includes("activeTools.findSimilarCases = tools.findSimilarCases;"), "历史信号命中才暴露 findSimilarCases");
+  });
+  /**
+   * 上下文工程实验（2026-09-22）：一对一传话轮的冲突专用工具收窄。
+   *
+   * 前提是**真实路由**算出来的（不手工编造模块清单）：传话句几乎必然点名收信人，
+   * `mentionsOther` 于是把 `conflict` 准则**无条件强制装入**——这正是"光是提到
+   * 收信人就白摆一批冲突专用工具"的成因；而同一句里**没有** `scheduling` 议题时，
+   * 排程/立场定位工具在这一轮没有任何用处。
+   */
+  check("传话轮不再因提到收信人而顺带摆出冲突专用工具", () => {
+    const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+
+    // ── 结构闸：那五个冲突专用工具必须由收窄后的条件把关，不得退回裸 topicHitsConflict ──
+    const gate = "if (topicHitsConflict && exposeConflictPlanningTools) {";
+    assert(src.includes(gate), "冲突专用工具必须由 topicHitsConflict + 收窄判据共同把关");
+    const gateStart = src.indexOf(gate);
+    const gateBody = src.slice(gateStart, src.indexOf("}", gateStart));
+    for (const t of ["pickSchedule", "chooseSchedule", "recordShare", "notePartyAffected", "recordPosition"]) {
+      assert(gateBody.includes(`activeTools.${t} = tools.${t};`), `${t} 必须仍在该情境组里，不得被顺手删掉`);
+    }
+    // 判据的三项输入必须全部来自代码已算出的结构结果（路由 / 未结案子），不是新猜的话题词表。
+    assert(
+      src.includes("relayRouted: relayActive") &&
+        src.includes("hasOpenConflictCase,") &&
+        src.includes('schedulingTopicLoaded: loadedModuleIds.includes("scheduling")'),
+      "收窄判据必须吃 relay 路由标记、未结冲突案子、scheduling 议题这三项结构信号"
+    );
+
+    // ── 正向：简单传话轮（点名收信人、无未结冲突、无排程议题）→ 不摆冲突专用工具 ──
+    const members = [{ personId: "p2", name: "小浩" }];
+    const relayText = "帮我跟小浩说一声，让他明天下午三点前把客厅的快递拿走";
+    const mentionsOther = members.some((m) => relayText.includes(m.name));
+    assert(mentionsOther, "传话句必须真的点名了另一位住户（复刻 turn.ts 的 mentionsOther 判定）");
+    const relayRoute = assembleSystemPrompt({
+      brainId: "coliving",
+      routeOn: relayText,
+      runtimeContext: "",
+      signals: { mentionsOther, hasOpenConflictCase: false },
+    });
+    assert(relayRoute.loadedModuleIds.includes("relay"), "这句必须是传话轮（relay 命中）");
+    assert(
+      relayRoute.loadedModuleIds.includes("conflict"),
+      "前提失效：提到收信人本应把 conflict 强制装载进来（registry 的 mentionsOther 规则）"
+    );
+    assert(
+      !relayRoute.loadedModuleIds.includes("scheduling"),
+      "这句不该命中排程议题，否则下面的正向用例不成立"
+    );
+    assert.equal(
+      shouldExposeConflictPlanningTools({
+        relayRouted: relayRoute.loadedModuleIds.includes("relay"),
+        hasOpenConflictCase: false,
+        schedulingTopicLoaded: relayRoute.loadedModuleIds.includes("scheduling"),
+      }),
+      false,
+      "简单传话轮不得摆出冲突专用工具"
+    );
+
+    // ── 反例 1：有未结的同住人冲突案子 → 照旧全摆 ──
+    assert.equal(
+      shouldExposeConflictPlanningTools({
+        relayRouted: true,
+        hasOpenConflictCase: true,
+        schedulingTopicLoaded: false,
+      }),
+      true,
+      "有未结冲突案子的传话轮照旧摆出冲突专用工具（表态/定位/结案都还要用）"
+    );
+
+    // ── 反例 2：真的有排程议题 → 照旧全摆（判据取路由结果，不靠关键词自己猜） ──
+    const scheduleText = "帮我跟小浩说一声，他老是占着灶台不做饭也不让人用，让他错开时间";
+    const scheduleRoute = assembleSystemPrompt({
+      brainId: "coliving",
+      routeOn: scheduleText,
+      runtimeContext: "",
+      signals: { mentionsOther: true, hasOpenConflictCase: false },
+    });
+    assert(scheduleRoute.loadedModuleIds.includes("relay"), "这句仍是传话轮");
+    assert(
+      scheduleRoute.loadedModuleIds.includes("scheduling"),
+      "有关排程议题的传话必须装载 scheduling，收窄判据才不会误伤它"
+    );
+    assert.equal(
+      shouldExposeConflictPlanningTools({
+        relayRouted: true,
+        hasOpenConflictCase: false,
+        schedulingTopicLoaded: scheduleRoute.loadedModuleIds.includes("scheduling"),
+      }),
+      true,
+      "确有排程议题的传话轮照旧摆出排程工具"
+    );
+
+    // ── 反例 3：非传话轮一律不变（含安全强制装载的轮次） ──
+    for (const [text, signals] of [
+      ["室友半夜很吵，说话声特别大", { mentionsOther: true, hasOpenConflictCase: false }],
+      ["他昨天动手打人了，我怕他再动手", { mentionsOther: true, hasOpenConflictCase: false }],
+    ] as const) {
+      const r = assembleSystemPrompt({
+        brainId: "coliving",
+        routeOn: text,
+        runtimeContext: "",
+        signals,
+      });
+      assert(!r.loadedModuleIds.includes("relay"), `非传话句不得命中 relay：${text}`);
+      assert(
+        shouldExposeConflictPlanningTools({
+          relayRouted: r.loadedModuleIds.includes("relay"),
+          hasOpenConflictCase: false,
+          schedulingTopicLoaded: r.loadedModuleIds.includes("scheduling"),
+        }),
+        `非传话轮的冲突工具暴露必须完全不受本次收窄影响：${text}`
+      );
+    }
+    // 安全路径本身没被动过：风险模块照旧强制装载。
+    const risk = assembleSystemPrompt({
+      brainId: "coliving",
+      routeOn: "他昨天动手打人了，我怕他再动手",
+      runtimeContext: "",
+      signals: { mentionsOther: true, hasOpenConflictCase: false },
+    });
+    assert(risk.loadedModuleIds.includes("complaint-risk"), "安全风险轮次照旧强制装载 complaint-risk");
   });
   check("工具描述声明区字面量被压缩且不回弹", () => {
     const src = readFileSync("lib/chat/coliving/turn.ts", "utf8");
@@ -9228,6 +9354,96 @@ async function main() {
   });
 
   /**
+   * ── 逐轮耗时的观测：写入测整轮、渲染三态、坏值不显示假 0 ────────────────
+   *
+   * `turnMs` 是**评测观测**（生产路径不落这份数据）：这一轮**整轮**的真实耗时，
+   * 包括 `runColivingTurn` 里的数据库读写与模型往返，不只是模型延迟。这条钉住：
+   *  1. **写入侧**用单调时钟 `performance.now()` 包住整个调用并**只写数字**
+   *     （`Date.now()` 跟着系统时间走，被校正时会跳，测的不是时长）；
+   *  2. **渲染侧三态**：认识的值照人读的方式显示；旧报告**没有这个字段** → 不显示；
+   *     坏值（负数 / 字符串 / `NaN`）→ 当没有，**绝不显示 `0ms`**——假 0 比不显示更误导。
+   * 不跑模型、不连数据库、不发送；夹具里的对话是离线编的，不是住户真实历史。
+   */
+  check("逐轮耗时观测：写入取整轮单调时钟，渲染三态且坏值不显示假 0", () => {
+    const evalSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
+    /**
+     * 写入侧是**两步**：先在整轮调用**之前**取一次单调时钟，调用返回后算出
+     * `const turnMs = Math.round(…)`，再在逐轮记录里写 `turnMs,`。三处都在、
+     * 且顺序正确，才证明它真的包住了整轮——只认某一种写法（比如内联在
+     * `transcript.push` 里）会把正确的实现误判成失败。
+     */
+    const startedIdx = evalSrc.indexOf("const turnStartedAt = performance.now();");
+    const callIdx = evalSrc.indexOf("turn.runColivingTurn(");
+    const writtenIdx = evalSrc.indexOf(
+      "const turnMs = Math.round(performance.now() - turnStartedAt);"
+    );
+    assert(
+      startedIdx >= 0 &&
+        callIdx > startedIdx &&
+        writtenIdx > callIdx &&
+        evalSrc.includes("Math.round(performance.now() - turnStartedAt)") &&
+        /transcript\.push\(\{[\s\S]*?\n\s*turnMs,/.test(evalSrc),
+      "评测 runner 必须用单调时钟包住整轮（取时 → 调用 → 算差 → 写数字 turnMs）"
+    );
+    assert(
+      !/turnMs:\s*Date\.now/.test(evalSrc),
+      "逐轮耗时不得用 Date.now（它跟系统时间走，测的不是单调时长）"
+    );
+
+    const reportSrc = readFileSync("scripts/coliving-report.ts", "utf8");
+    assert(
+      reportSrc.includes("turnMs: t?.turnMs") &&
+        reportSrc.includes("function normalizeTurnMs("),
+      "报告渲染器必须透传并归一化 turnMs，三态由一处判"
+    );
+
+    const turn = (extra: Record<string, unknown>) => ({
+      fromName: "甲",
+      fromRole: "resident",
+      said: "提醒一下乙",
+      reply: "好的。",
+      toolsUsed: [],
+      outbound: [],
+      ...extra,
+    });
+    // 走一遍 JSON 往返：旧报告是**真的没有这个键**（不是 undefined 值），
+    // 而 `NaN` 经 JSON 会变成 `null`——两种坏形状都要被挡住。
+    const html = renderReportHtml(
+      JSON.parse(
+        JSON.stringify([
+          {
+            id: "turn-ms-fixture",
+            source: "离线夹具：只验逐轮耗时三态，不是住户历史",
+            pass: true,
+            failures: [],
+            turns: [
+              turn({ turnMs: 2500 }), // 认识的值 → 显示
+              turn({ turnMs: undefined }), // 旧报告：JSON 往返后整个键不在 → 不显示
+              turn({ turnMs: -1 }), // 坏值：负数 → 不显示
+              turn({ turnMs: "2500" }), // 坏值：字符串 → 不显示
+              turn({ turnMs: Number.NaN }), // 坏值：NaN → 不显示
+            ],
+            judge: { pass: true, verified: false, findings: [] },
+            ms: 1,
+          },
+        ])
+      ),
+      "turn-ms-fixture.json"
+    );
+
+    assert.equal(
+      (html.match(/class="turn-ms"/g) ?? []).length,
+      1,
+      "五轮里只该有一轮显示出耗时（旧报告与坏值都不显示）"
+    );
+    assert(html.includes(">2.5s<"), "认识的耗时按人读的方式显示（2500ms → 2.5s）");
+    assert(
+      !html.includes("0ms") && !html.includes("NaN") && !html.includes("undefined"),
+      "旧报告与坏值不得渲染成 0ms / NaN / undefined"
+    );
+  });
+
+  /**
    * ── 语言判定进回执：词汇表不许漂移、只认枚举、渲染不带正文 ──────────────
    *
    * 回执里那两栏（语言 / 历史）是**代码写死的枚举与计数**，报告 JSON 里塞什么
@@ -10505,13 +10721,17 @@ async function main() {
    *
    * 这里只做确定性断言：原话必须**按原话判成英文**（压过中文人名与会话历史）、场景必须
    * 结构合法，且五件事必须写进场景断言——真的调用 contactPerson 发给小五、不产生发给
-   * 发信人阿泽的出站、出站保留「每次用完厨房就收拾」的动作与频次且不泄露来源、回信与
-   * 出站是英文（除登记姓名 阿泽 / 小五 外不得有汉字），以及 2026-09-21 隔离实跑暴露的
+   * 发信人阿泽的出站、出站保留「用完厨房就收拾」这个动作且不泄露来源、回信与出站是英文
+   * （除登记姓名 阿泽 / 小五 外不得有汉字），以及 2026-09-21 隔离实跑暴露的
    * 第五条：**一次性交办不留自主后续**（不许 `scheduleReminder`、回信不许许将来承诺）。
-   * **它证明不了英文出站读起来自然、有没有把话说重**——那要留给 semantic judge 与
-   * 人工逐轮阅读。
+   * **频次（「每次」）不在结构断言里**：场景已删掉频次正则（同一件「每次用完就收拾」
+   * 的实跑写法在变——`after you use` / `When you're done…` / `after you cook`——枚举
+   * 说法没有尽头，而「每次」有没有被缩成「今晚一次」本来就不是字符串形状判得出的）。
+   * 结构层只钉「英文 + 厨房 + 收拾动作」，住户要的「每次」只留在第一轮原话里，频次是否
+   * 保住交给 semantic judge（judge.ts 判定守则第 6 类）与人工逐轮阅读。**它同样证明
+   * 不了英文出站读起来自然、有没有把话说重**——那也要留给 semantic judge 与人工阅读。
    */
-  check("corpus-047 英文厨房交办：语料合法，且「联系小五 / 不泄露来源 / 保留动作频次 / 英文回信与出站 / 不留自主后续」写进断言", () => {
+  check("corpus-047 英文厨房交办：语料合法，且「联系小五 / 不泄露来源 / 保留厨房收拾动作 / 英文回信与出站 / 不留自主后续」写进断言", () => {
     const file =
       "lib/chat/coliving/evals/scenarios/corpus-047-english-kitchen-tidy-relay-2026-09-21.json";
     const scene = validateScenario(JSON.parse(readFileSync(file, "utf8")), file);
@@ -10551,9 +10771,15 @@ async function main() {
       "corpus-047 至少一条通过审稿的出站"
     );
 
-    // ② 出站保留「厨房 + 每次用完就收拾」这个动作与频次：拿场景自己的正向断言跑几条
-    //    样本正文——保留动作与频次的那条必须全中；丢掉收拾动作、或丢掉频次的那两条
-    //    必须至少漏一条，否则这条回归挡不住「只发一句泛泛的提醒」。
+    // ② 出站断言只钉三件确定性事实：正文是英文、提到了厨房、保留了「收拾」这个动作。
+    //    **频次不在这里**（场景已删掉频次正则，理由见场景说明与本 check 头注释）：
+    //    `clean up the kitchen` 与 `clean up the kitchen once tonight` 的区别在语义、
+    //    不在字符串形状。下面跑三件事各自的正反样本，再加一条把「结构层够不着频次」
+    //    这个边界本身钉下来的断言。
+    assert.ok(
+      scene.turns[0].text.includes("every time he finishes using it"),
+      "corpus-047 第一轮原话必须原封保留住户要的「每次」——频次改由语义层判后，原话是它唯一的落点"
+    );
     const out = expect.outboundMustMatch ?? [];
     const outPasses = (body: string): boolean =>
       out.length > 0 && out.every((p) => new RegExp(p).test(body));
@@ -10561,28 +10787,38 @@ async function main() {
       outPasses(
         "Hi 小五 — could you clean up the kitchen after each time you use it? Thanks."
       ),
-      "corpus-047 出站断言必须放过一条保留收拾动作与「每次用完」频次的英文正文"
-    );
-    // 2026-09-21 一次实跑里，出站实际写的是 `after you use`——和 `after using` /
-    // 「after each time」是同义的频次写法，此前没被收进来，导致一条全部达标（点名
-    // 小五、无来源泄露、英文、保留收拾动作与频次）的正文被误判失败。这里把那条真实
-    // 正文钉进样本，防止再把这条等价写法收窄回去。
-    assert.ok(
-      outPasses(
-        "Hi 小五 — after you use the kitchen, please clean up after yourself: wipe the counter and put your dishes and things away. It's a shared kitchen and it's been getting left messy after use."
-      ),
-      "corpus-047 出站断言必须放过 `after you use` 这条与 `after using` 等价的频次写法"
+      "corpus-047 出站断言必须放过一条英文、点名厨房、保留收拾动作的正文"
     );
     for (const [label, body] of [
       [
         "收拾动作",
         "Hi 小五 — could you sort out the kitchen after each time you use it? Thanks.",
       ],
-      ["「每次用完」的频次", "Hi 小五 — could you clean up the kitchen? Thanks."],
+      [
+        "厨房",
+        "Hi 小五 — could you clean up the bathroom after each time you use it? Thanks.",
+      ],
+      ["英文", "小五，请你每次用完厨房后收拾干净。"],
     ] as const) {
       assert.ok(
         !outPasses(body),
         `corpus-047 出站断言必须要求${label}——丢掉它就该判失败`
+      );
+    }
+    // 频次是**结构层够不着**的那一项：一句没有频次的正文、和一句把「每次」写成
+    // 「今晚一次」的正文，在结构断言下**同样全中**。这不是漏掉的正则，是有意留的
+    // 边界——把它写成断言，谁想「加一条频次正则就当覆盖过了」，这两条会先红。频次
+    // 是否保住由 semantic judge 判（judge.ts 判定守则第 6 类要求如实保留住户要的频次）。
+    for (const [label, body] of [
+      ["没有频次的正文", "Hi 小五 — could you clean up the kitchen? Thanks."],
+      [
+        "把「每次」缩成一次性的正文",
+        "Hi 小五 — could you clean up the kitchen once tonight? Thanks.",
+      ],
+    ] as const) {
+      assert.ok(
+        outPasses(body),
+        `corpus-047 结构断言不得声称能判频次：${label}本来就该全中（频次归语义层）——它要是判失败，说明频次正则又被加回来了`
       );
     }
     // ③ 不泄露来源：不得出现来源人姓名，也不得把原话里对收信人的定性（搞乱厨房 /

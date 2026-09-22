@@ -298,6 +298,13 @@ type TurnRecord = {
   reply: string;
   replyReview: ReplyReview;
   /**
+   * 这一轮**整轮**的真实耗时（毫秒）。用单调时钟测的是 `runColivingTurn`
+   * 整个调用——里面的数据库读写、嵌入检索、主生成/重写/复核的模型往返都算在内，
+   * **不是**只看模型延迟。纯数字，不含任何住户内容；生产路径不落这份数据，
+   * 只进评测报告 JSON。
+   */
+  turnMs: number;
+  /**
    * 这一轮系统提示词的**组成观测**（只记长度/模块 id/工具名，不记正文），
    * 供报告解释 prompt 由什么构成、避免盲目删 doctrine。`null` = 这一轮
    * 没走模型（短路/接管/未知号码），不是 0 字符。生产路径不落这份数据。
@@ -520,6 +527,13 @@ async function runScenario(
     // guidance 只有显式 `--guidance <id>` 时才有值；不传就是基线，
     // 生成器看到的 system 与生产逐字一致（见 turn.ts 里共用的
     // buildGeneratorSystemMessages：无 guidance 时严格 doctrine → runtime）。
+    /**
+     * **这一轮整轮的耗时从这儿开始算。** 用单调时钟 `performance.now()`，
+     * 不是 `Date.now()`——后者跟着系统时间走，被 NTP 校正时会跳，测出来的
+     * 不是时长。包住的是 `runColivingTurn` 整个调用：数据库读写、检索、
+     * 主生成/重写/复核的模型往返全在里面，**不是**单看模型延迟。
+     */
+    const turnStartedAt = performance.now();
     try {
       // 每轮单独打 turnIndex 标签：这一轮里所有 generation（主生成、
       // 强制发信、重写、事实复核、最终修正、工具里的 embedding）都继承
@@ -540,6 +554,7 @@ async function runScenario(
       }
       throw error;
     }
+    const turnMs = Math.round(performance.now() - turnStartedAt);
     transcript.push({
       fromName:
         members.find((m) => m.address === livePhone)?.name ?? livePhone,
@@ -547,6 +562,7 @@ async function runScenario(
       said,
       reply: last.reply,
       replyReview: last.replyReview,
+      turnMs,
       promptComposition: last.promptComposition,
       contextReceipt: last.contextReceipt,
       // 台账里这一轮的 generation 现在就全在（主生成在 `runColivingTurn` 内部

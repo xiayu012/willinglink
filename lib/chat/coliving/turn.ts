@@ -351,6 +351,39 @@ export function isOpenConflictCase(c: { kind: string; title: string }): boolean 
   );
 }
 
+/**
+ * 这一轮要不要摆出**冲突专用**的工具（排程 `pickSchedule`/`chooseSchedule`/`recordShare`、
+ * 立场定位 `notePartyAffected`/`recordPosition`）。
+ *
+ * 起因（2026-09-22 上下文工程实验）：`mentionsOther`（本轮提到名册里另一位住户的名字）
+ * 是一条**结构信号**，registry 用它把 `conflict` 准则**无条件强制装入**
+ * （`lib/ai/brains/coliving/index.ts` 的 `when: [{ key: "mentionsOther" }, ...]`）。
+ * 而一对一传话**几乎必然点名收信人**，所以传话这一轮也总会带着整份冲突准则进来；
+ * `topicHitsConflict` 一直为真，冲突专用的排程/立场工具就跟着摆了出来——哪怕这一轮
+ * 既没有未结的冲突案子、也没有任何真正的排程议题。工具表是请求之外的约束层，
+ * 多摆一个就是多一份注意力成本（见 CLAUDE.md：工具表按情境动态摘取）。
+ *
+ * 收窄条件（三件事同时成立才算「这一轮没有冲突/排程领域」）：
+ *   1. 路由把这一轮判成了**一对一传话**（`relay` 模块）——是住户交办的一件事；
+ *   2. 没有任何**未结的**同住人冲突案子（有案子就照旧全摆：表态、定位、结案都还要用）；
+ *   3. 路由**没有**装载 `scheduling` 议题（真排程照旧全摆）。
+ *
+ * 判据全部是路由已经算出的结构结果，**不按关键词自己猜话题**：这里只负责「没有冲突
+ * 领域时不要顺带摆出冲突专用工具」这一小步；传话本身该不该发、发什么，仍归 doctrine
+ * 与主生成判断。`relayRouted === false` 时一律返回 true——非传话轮行为完全不变。
+ */
+export function shouldExposeConflictPlanningTools(signals: {
+  relayRouted: boolean;
+  hasOpenConflictCase: boolean;
+  schedulingTopicLoaded: boolean;
+}): boolean {
+  return (
+    !signals.relayRouted ||
+    signals.hasOpenConflictCase ||
+    signals.schedulingTopicLoaded
+  );
+}
+
 export function isLowInformationFollowUp(text: string): boolean {
   return /^(?:你好|您好|在吗|嗨|哈喽|hello|hi|嗯+|哦+|好(?:的)?|收到|知道了|谢谢)[!！。,.，?？\s]*$/i.test(
     text.trim()
@@ -4023,7 +4056,10 @@ export async function runColivingTurn(args: {
    *   （不看话题：钱类、安全类结案都不会被"这轮聊的是不是冲突"卡住）；
    *   `confirmRoster` 只要名册没收全就摆；`renamePerson` 只要有人还
    *   顶着占位名就摆。其余用话题信号（`loadedModuleIds` 是不是命中了
-   *   `tenancy`/`conflict`）兜底。
+   *   `tenancy`/`conflict`）兜底。**冲突专用那五个（排程 / 立场定位）还要
+   *   再收一道**：传话轮会因为提到收信人而把 `conflict` 强制装进来，那时
+   *   没有未结冲突案子、也没有真排程议题就不摆（见
+   *   `shouldExposeConflictPlanningTools`）。
    *
    *   **③ 查询/观察类（5个，按需暴露，默认不摆）**：`noteObservation`
    *   `checkEnvironment` 只在出现外部环境/气味/噪音/天气等信号时给；
@@ -4067,7 +4103,18 @@ export async function runColivingTurn(args: {
     activeTools.recordStance = tools.recordStance;
     activeTools.scheduleReminder = tools.scheduleReminder;
   }
-  if (topicHitsConflict) {
+  /**
+   * 冲突专用工具（排程 / 立场定位）只在**这一轮真的有冲突领域**时摆出来。
+   * 一对一传话几乎必然点名收信人，光是这个结构信号就会把 `conflict` 准则强制装进来
+   * （`mentionsOther`）；不能因此顺带把这些工具塞给传话轮——传话不是调解，
+   * 判据见 `shouldExposeConflictPlanningTools`。
+   */
+  const exposeConflictPlanningTools = shouldExposeConflictPlanningTools({
+    relayRouted: relayActive,
+    hasOpenConflictCase,
+    schedulingTopicLoaded: loadedModuleIds.includes("scheduling"),
+  });
+  if (topicHitsConflict && exposeConflictPlanningTools) {
     activeTools.pickSchedule = tools.pickSchedule;
     activeTools.chooseSchedule = tools.chooseSchedule;
     activeTools.recordShare = tools.recordShare;

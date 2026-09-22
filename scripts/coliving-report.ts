@@ -47,6 +47,13 @@ type TurnRecord = {
   fromRole: string;
   said: string;
   reply: string;
+  /**
+   * 这一轮**整轮**的真实耗时（毫秒；单调时钟测的，含数据库与模型往返），
+   * 由 coliving-eval 写入。**可选**：旧报告没有这个字段 → 不展示；
+   * 值不是有限非负数（`NaN` / 负数 / 字符串）→ 当没有，**不显示假的 0ms**
+   * （"没测到"和"真花了 0"是两回事）。渲染前走 `normalizeTurnMs` 防御。
+   */
+  turnMs?: unknown;
   toolsUsed: string[];
   outbound: Array<{
     toName: string;
@@ -187,6 +194,8 @@ function loadReport(file: string): ScenarioResult[] {
         fromRole: t?.fromRole ?? "",
         said: t?.said ?? "",
         reply: t?.reply ?? "",
+        // 逐轮耗时原样透传，三态（缺席 / 坏值 / 数字）由 normalizeTurnMs 判。
+        turnMs: t?.turnMs,
         toolsUsed: Array.isArray(t?.toolsUsed) ? t.toolsUsed : [],
         // 三块观测字段原样透传，由 renderContextEngineeringPanelHtml 里的
         // 各自渲染器兼容三态（缺席=旧报告不展示 / null=没有这一层 / 对象=归一化展示）。
@@ -253,6 +262,18 @@ function fmtMs(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
+/**
+ * 逐轮耗时**三态归一化**：字段缺席（旧报告）→ `null` 不显示；值不是有限非负数
+ * （`NaN` / 负数 / 字符串 / `null`）→ `null` 不显示；只有真数字才认。
+ * **绝不把"没测到"或"值坏了"渲染成 `0ms`**——假 0 会让人以为这一轮真的瞬间跑完，
+ * 那比不显示更误导。
+ */
+function normalizeTurnMs(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
 const ROLE_LABEL: Record<string, string> = {
   landlord: "房东",
   tenant: "住客",
@@ -294,6 +315,9 @@ function renderFinding(f: JudgeFinding): string {
 function renderTurn(t: TurnRecord, index: number, findings: JudgeFinding[]): string {
   const role = ROLE_LABEL[t.fromRole] ?? t.fromRole;
   const roleTag = role ? `<span class="role">${escapeHtml(role)}</span>` : "";
+  // 逐轮耗时：只标时长，不抢注意力（放抬头里、不加大字号）。
+  const turnMs = normalizeTurnMs(t.turnMs);
+  const turnMsTag = turnMs === null ? "" : `<span class="turn-ms">${fmtMs(turnMs)}</span>`;
 
   const said = t.said
     ? `<div class="row left">
@@ -341,6 +365,7 @@ function renderTurn(t: TurnRecord, index: number, findings: JudgeFinding[]): str
       <div class="turn-head">
         <span class="turn-no">第 ${index + 1} 轮</span>
         <span class="who">${escapeHtml(t.fromName)}${roleTag}</span>
+        ${turnMsTag}
         ${renderTools(t.toolsUsed)}
       </div>
       ${said}
@@ -619,6 +644,8 @@ h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
   font-size: 12px; color: var(--muted); margin-bottom: 8px;
 }
 .turn-no { font-variant-numeric: tabular-nums; }
+/* 逐轮耗时：小而淡，只是抬头里的一枚数字，不跟"谁说的"抢位置 */
+.turn-ms { font-variant-numeric: tabular-nums; opacity: .75; }
 .who { font-weight: 600; color: var(--text); font-size: 13px; }
 .role {
   font-weight: 400; font-size: 11px; color: var(--muted);
