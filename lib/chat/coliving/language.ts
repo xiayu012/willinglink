@@ -19,7 +19,8 @@
  * 4. **连会话里也读不出来才用默认中文**（`source: "default"`）——与加这个闸之前
  *    的行为逐字一致，不会因为引入回退而改变任何既有语料的判定。
  *
- * **判据本身不做主题分类，也不看关键词表**：只数汉字与拉丁词，外加一小份
+ * **判据本身不做主题分类，也不看关键词表**：只数汉字与拉丁词，外加一条**构成比例**
+ * （汉字只是零头时，这句话其实是英文，见 `isEnglishWithEmbeddedHan`），外加一小份
  * **整句相等**的短英文清单（`EXPLICIT_ENGLISH_SHORT_UTTERANCES`）。那份清单不是主题词表
  * ——它认的是「这一整句**就是**一句英文」这个事实，所以只做整句相等、不做包含匹配，
  * 人名 / 号码 / 日期 / 短标签结构上命中不了（见该常量的说明）。下游任何一处
@@ -68,6 +69,56 @@ const LATIN_WORD = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
  * **整句相等**的短句开放，词数下限本身没有放松。
  */
 const ENGLISH_MIN_LATIN_WORDS = 3;
+
+/**
+ * **句子里已经有汉字时，拉丁词要到这个数才配叫「这句话其实是英文」。**
+ *
+ * 比纯拉丁那边的三个词下限严得多，而且**故意**严：汉字的存在本身就说明这句话里有
+ * 跨语言成分，要多得多的英文证据才敢把整轮判成英文。短句（「小五 clean 一下」）
+ * 一律不够，继续算歧义。
+ */
+const ENGLISH_MIN_LATIN_WORDS_WITH_HAN = 8;
+
+/**
+ * **拉丁词至少要是汉字的这么多倍**，才认定汉字只是这句话里夹的标识符。
+ *
+ * 取 3 是有意的分界：中文句子顺口夹几个英文词时，汉字仍然是绝大多数（下面那条
+ * 判据会算出远低于 3 的比例）；英文句子里夹一个中文人名（两三个字）时，拉丁词
+ * 把人名远远甩开。两边都留了余量，不是卡在某个真实句子的临界值上。
+ */
+const ENGLISH_MIN_LATIN_PER_HAN = 3;
+
+/**
+ * **「这句话其实是英文，只是夹了几个汉字标识符」的合成判据。**
+ *
+ * 为什么需要它：英文住户写英文、只把人名写成汉字（`小五 always messes up the kitchen
+ * and doesn't tidy up. You tell him…`）时，光看「有汉字 + 拉丁词够多」只会得出
+ * **歧义**，接着回退去读**会话里最近的**那条——那条往往是中文，于是整轮判成中文，
+ * 英文住户收到一段中文回复。**2026-09-21 生产上就是这样**：一条英文点名交办被当成
+ * 中文轮次处理（背景见 corpus-047）。
+ *
+ * 为什么不是「含拉丁词就算英文」：那会把中文住户顺口夹的英文词（`帮我把 dryer 关掉`）
+ * 整轮翻成英文。所以这里看的是**构成比例**，不是「有没有」：
+ *
+ * 1. 拉丁词至少 `ENGLISH_MIN_LATIN_WORDS_WITH_HAN` 个——先是一句够长的英文；
+ * 2. 拉丁词至少是汉字的 `ENGLISH_MIN_LATIN_PER_HAN` 倍——汉字是**零头**（一个人名、
+ *    一个被引用的词），不是半个分句。
+ *
+ * 两条缺一就返回 `false`，调用方照旧按「中英混写 = 歧义」处理（回退会话，读不出来
+ * 才默认中文）。**宁可漏判成歧义，也不把一句话的语言猜反**——歧义只会让回复语言
+ * 多依赖一次会话回退，猜反会直接让住户收到错语言的短信。
+ *
+ * 单位口径：汉字按**字**数、拉丁按**词**数，两边都当「一个信息单位」。这是个粗略
+ * 近似（一个汉字承载的语义通常比一个英文虚词多），所以门槛留得宽；判据本身只有
+ * 这两个计数，**没有词表、没有主题词、不看关键词**。
+ */
+function isEnglishWithEmbeddedHan(han: number, latinWords: number): boolean {
+  if (han <= 0) return false;
+  return (
+    latinWords >= ENGLISH_MIN_LATIN_WORDS_WITH_HAN &&
+    latinWords >= han * ENGLISH_MIN_LATIN_PER_HAN
+  );
+}
 
 /**
  * **短英文原话的显式清单——整句相等才算，绝不做包含匹配。**
@@ -160,8 +211,10 @@ export function containsHan(text: string): boolean {
  *
  * - 没有汉字、且拉丁词够多 → `en`
  * - 没有汉字、拉丁词不够，但**整句就是一句明确的英文短话** → `en`
+ * - 有汉字，但汉字只是**零头**（拉丁词够长、又是汉字的 3 倍以上）→ `en`
+ *   （`小五 always messes up the kitchen…`：汉字是个人名，这句话是英文）
  * - 有汉字、拉丁词又少 → `zh`
- * - 有汉字、拉丁词也多（中英混写）→ `null`
+ * - 有汉字、拉丁词也多、但**不到那个比例**（中英混写）→ `null`
  * - 没汉字、拉丁词又少（数字 / 人名 / 一个 "ok"）→ `null`
  */
 export function classifyDirectLanguage(text: string): ResidentLanguage | null {
@@ -174,6 +227,10 @@ export function classifyDirectLanguage(text: string): ResidentLanguage | null {
     // 人名 / 号码 / 日期 / 短标签在这份清单里匹配不上，照旧是 `null`（歧义）。
     return isExplicitEnglishShortUtterance(t) ? "en" : null;
   }
+  // **有汉字不等于这句话是中文**：英文句子里夹一个中文人名，先按构成比例认出来。
+  // 认不出来（汉字不是零头）才落到下面那条老口径：拉丁词够多 = 中英混写（歧义），
+  // 否则才是中文。**歧义那一档一字未动**——真正中英混写的原话仍然不在这里就地猜。
+  if (isEnglishWithEmbeddedHan(han, latinWords)) return "en";
   return latinWords >= ENGLISH_MIN_LATIN_WORDS ? null : "zh";
 }
 

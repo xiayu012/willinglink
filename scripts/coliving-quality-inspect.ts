@@ -7752,6 +7752,16 @@ async function main() {
       "你现在单独跟小浩说，没得到阿鹏同意就别动阿鹏的吃的",
       "你私下提醒他把门口这些饼干屑扫掉，别发群里",
       "你提醒他一下，别在大半夜进屋",
+      // **英文说法**（2026-09-21 真实产品事故）：住户全程写英文、点名了室友，
+      // 原路由一条都没命中 → 这一轮只装了 conflict，`domain/relay.md` 不在提示词里，
+      // 模型按投诉受理的五要素反过来追问「他什么时候用、留下什么」，一条都没发出去。
+      // 第一句就是那条真实事故原话（见 corpus-047 场景）。
+      "小五 always messes up the kitchen and doesn't tidy up. You tell him to clean up the kitchen every time he finishes using it",
+      "Alex keeps leaving dishes in the sink. Please tell him to wash them after he eats.",
+      "Could you remind Jordan about the rule we agreed on?",
+      "Can you ask him to keep the noise down at night?",
+      "Tell her to clean the bathroom after using it.",
+      "Could you help me ask him about the parking spot?",
     ];
     for (const text of shouldLoad) {
       assert(
@@ -7769,6 +7779,17 @@ async function main() {
       "你昨天跟小明说了什么？",
       "你之前跟房东讲过吗？",
       "你上周提醒过他了吗？",
+      // 英文的同一组反例：`(?<!\b(?:did|do|does|have|had|…)\s)` 是中文 `(?!了|过)` 的
+      // 对等收窄；`\bme\b|\bus\b` 排除"对着 AI 自己说话"；宾语只收第三人称单数，
+      // 对全屋/一群人的说法不是一对一交办（与中文形态同宽，不因英文放宽）。
+      "Did you tell him about the kitchen?",
+      "You tell me what to do about the kitchen.",
+      "Please tell everyone about the trash schedule.",
+      "Can you talk to everyone about the noise?",
+      "I already told him about it.",
+      // 纯投诉、没有交办任何动作——照旧走冲突/清洁流程，不装 relay。
+      "The kitchen is a mess and I'm tired of it.",
+      "The kitchen is always dirty after he cooks.",
     ];
     for (const text of shouldNotLoad) {
       assert(
@@ -10233,6 +10254,185 @@ async function main() {
       (scenario.people ?? []).some((p) => p.role === "landlord" && p.resides !== false),
       "登记边界场景必须保留「房东就住在这栋房子里」这个正常事实"
     );
+  });
+
+  /**
+   * corpus-047 英文厨房交办：**语料形状 + 关键回归断言真的写进了场景**。
+   *
+   * 真实事故（2026-09-21）：住户用英文点名交办（「You tell him to clean up the kitchen
+   * every time he finishes using it」），功能前门返回 `none`、路由又一条英文形态都没命中
+   * → 这一轮只装了 conflict，`domain/relay.md` 根本不在提示词里；模型按投诉受理的五要素
+   * 反过来追问「他什么时候用厨房、留下什么」，一条提醒都没发出去（decision 落成
+   * reply_only）。本场景把这条原话冻成一条英文回归。
+   *
+   * 这里只做确定性断言：原话必须**按原话判成英文**（压过中文人名与会话历史）、场景必须
+   * 结构合法，且五件事必须写进场景断言——真的调用 contactPerson 发给小五、不产生发给
+   * 发信人阿泽的出站、出站保留「每次用完厨房就收拾」的动作与频次且不泄露来源、回信与
+   * 出站是英文（除登记姓名 阿泽 / 小五 外不得有汉字），以及 2026-09-21 隔离实跑暴露的
+   * 第五条：**一次性交办不留自主后续**（不许 `scheduleReminder`、回信不许许将来承诺）。
+   * **它证明不了英文出站读起来自然、有没有把话说重**——那要留给 semantic judge 与
+   * 人工逐轮阅读。
+   */
+  check("corpus-047 英文厨房交办：语料合法，且「联系小五 / 不泄露来源 / 保留动作频次 / 英文回信与出站 / 不留自主后续」写进断言", () => {
+    const file =
+      "lib/chat/coliving/evals/scenarios/corpus-047-english-kitchen-tidy-relay-2026-09-21.json";
+    const scene = validateScenario(JSON.parse(readFileSync(file, "utf8")), file);
+    const expect = scene.expect;
+    assert.ok(expect, "corpus-047 必须带场景级 expect");
+    assert.ok(
+      scene.turns.length >= 1 &&
+        scene.turns[0].text.includes("小五") &&
+        /You tell him to clean up the kitchen every time he finishes using it/.test(
+          scene.turns[0].text
+        ),
+      "corpus-047 第一轮必须是那条真实事故原话（点名小五 + 英文交办动词）"
+    );
+    // 原话自己就判得出英文：依据是**原话**，不是会话回退 / 默认中文——汉字（小五）
+    // 不得把它拖进中文会话回退，否则英文住户收到中文回复。
+    const firstTurn = decideLanguage(scene.turns[0].text);
+    assert.equal(firstTurn.language, "en", "corpus-047 第一轮必须是英文轮次");
+    assert.equal(firstTurn.source, "direct", "依据必须是原话本身，不是会话回退");
+
+    // ① 真的联系小五、且不发给发信人——反问式 intake（decision 落 reply_only、
+    //    零出站）会在这里露馅。
+    assert.ok(
+      (expect.mustUseTools ?? []).includes("contactPerson"),
+      "corpus-047 必须要求真的调用 contactPerson——只回一句问句不算办到"
+    );
+    assert.ok(
+      (expect.mustContactNames ?? []).includes("小五"),
+      "corpus-047 必须要求有一条通过审稿的出站发给小五"
+    );
+    assert.deepEqual(
+      expect.mustNotContactNames,
+      ["阿泽"],
+      "corpus-047 不得产生发给发信人阿泽的出站"
+    );
+    assert.ok(
+      (expect.minAcceptedOutbound ?? 0) >= 1,
+      "corpus-047 至少一条通过审稿的出站"
+    );
+
+    // ② 出站保留「厨房 + 每次用完就收拾」这个动作与频次：拿场景自己的正向断言跑几条
+    //    样本正文——保留动作与频次的那条必须全中；丢掉收拾动作、或丢掉频次的那两条
+    //    必须至少漏一条，否则这条回归挡不住「只发一句泛泛的提醒」。
+    const out = expect.outboundMustMatch ?? [];
+    const outPasses = (body: string): boolean =>
+      out.length > 0 && out.every((p) => new RegExp(p).test(body));
+    assert.ok(
+      outPasses(
+        "Hi 小五 — could you clean up the kitchen after each time you use it? Thanks."
+      ),
+      "corpus-047 出站断言必须放过一条保留收拾动作与「每次用完」频次的英文正文"
+    );
+    // 2026-09-21 一次实跑里，出站实际写的是 `after you use`——和 `after using` /
+    // 「after each time」是同义的频次写法，此前没被收进来，导致一条全部达标（点名
+    // 小五、无来源泄露、英文、保留收拾动作与频次）的正文被误判失败。这里把那条真实
+    // 正文钉进样本，防止再把这条等价写法收窄回去。
+    assert.ok(
+      outPasses(
+        "Hi 小五 — after you use the kitchen, please clean up after yourself: wipe the counter and put your dishes and things away. It's a shared kitchen and it's been getting left messy after use."
+      ),
+      "corpus-047 出站断言必须放过 `after you use` 这条与 `after using` 等价的频次写法"
+    );
+    for (const [label, body] of [
+      [
+        "收拾动作",
+        "Hi 小五 — could you sort out the kitchen after each time you use it? Thanks.",
+      ],
+      ["「每次用完」的频次", "Hi 小五 — could you clean up the kitchen? Thanks."],
+    ] as const) {
+      assert.ok(
+        !outPasses(body),
+        `corpus-047 出站断言必须要求${label}——丢掉它就该判失败`
+      );
+    }
+    // ③ 不泄露来源：不得出现来源人姓名，也不得把原话里对收信人的定性（搞乱厨房 /
+    //    从来不收拾）转述出去——同样真跑一遍场景自己的反向断言。
+    const outNo = expect.outboundMustNotMatch ?? [];
+    const outLeaks = (body: string): boolean =>
+      outNo.some((p) => new RegExp(p).test(body));
+    assert.ok(
+      outLeaks("Hi 小五 — 阿泽 asked me to pass this on. Please clean the kitchen."),
+      "corpus-047 出站断言必须挡住来源人姓名「阿泽」"
+    );
+    assert.ok(
+      outLeaks(
+        "Hi 小五 — you always leave the kitchen dirty, please clean up after each use."
+      ),
+      "corpus-047 出站断言必须挡住转述对收信人的定性"
+    );
+    assert.ok(
+      (expect.replyMustNotMatch ?? []).length >= 2,
+      "corpus-047 回信至少要挡住「他什么时候用 / 留下什么」的盘问，以及写回中文"
+    );
+
+    // ④ 英文轮次：回信与出站各要有一条「除登记姓名（阿泽 / 小五）外不得出现汉字」的
+    //    反向断言、和一条正面要求含英文词的断言。这里把场景里那条正则**真跑一遍**
+    //    （不是把同一句话抄两遍）：只有登记姓名的英文正文必须放过，换成中文必须命中。
+    const behaves = (p: string, hit: string, miss: string): boolean => {
+      try {
+        const r = new RegExp(p);
+        return r.test(hit) && !r.test(miss);
+      } catch {
+        return false;
+      }
+    };
+    for (const [field, label, enSample, zhSample] of [
+      [
+        "outboundMustNotMatch",
+        "出站",
+        "Okay — I've asked 小五 to clean the kitchen after each use.",
+        "好，我已经让小五每次用完厨房都收拾干净。",
+      ],
+      [
+        "replyMustNotMatch",
+        "回信",
+        "Thanks 阿泽, I passed it on.",
+        "好，我已经跟小五说过了。",
+      ],
+    ] as const) {
+      assert.ok(
+        (expect[field] ?? []).some((p) => behaves(p, zhSample, enSample)),
+        `corpus-047 ${label}必须有一条「除登记姓名（阿泽 / 小五）外不得出现汉字」的反向断言`
+      );
+    }
+    for (const [field, label] of [
+      ["outboundMustMatch", "出站"],
+      ["replyMustMatch", "回信"],
+    ] as const) {
+      assert.ok(
+        (expect[field] ?? []).some((p) => behaves(p, "I will do it now.", "好，我现在就去办。")),
+        `corpus-047 ${label}必须有一条正面要求「正文含真正的英文词」的断言`
+      );
+    }
+
+    // ⑤ **一次性交办不留自主后续**（2026-09-21 隔离实跑暴露的过度帮忙）：办完这一件
+    //    之后，那一次实跑又调了两次 `scheduleReminder`，回信也写了「I'll check back
+    //    with you in a couple weeks」。这两样都不是住户交办的，所以场景必须把
+    //    「不许排自主的将来动作」「回信不许许将来承诺」都钉成断言。这里不只查字段在不在，
+    //    还**真跑一遍**：那条实跑里写出来的正文必须命中，一句只有「已联系 + 在等回话」
+    //    的短回执必须放过——否则这条加严会连合格回执一起误杀。
+    for (const tool of ["proposeRule", "scheduleReminder"] as const) {
+      assert.ok(
+        (expect.mustNotUseTools ?? []).includes(tool),
+        `corpus-047 必须禁止 ${tool}——一次性交办办完就停，不再排规则或自主的将来动作`
+      );
+    }
+    const cleanReceipt =
+      "Done — I've asked 小五 to clean up the kitchen after each use. Waiting to hear back.";
+    for (const [label, offending] of [
+      [
+        "带时点的将来回访承诺",
+        "I've passed it on to 小五. I'll check back with you in a couple weeks.",
+      ],
+      ["不带时点的将来承诺", "Passed it on to 小五 — will follow up with you later."],
+    ] as const) {
+      assert.ok(
+        (expect.replyMustNotMatch ?? []).some((p) => behaves(p, offending, cleanReceipt)),
+        `corpus-047 回信断言必须挡住${label}，同时放过一句只有「已联系 + 在等回话」的短回执`
+      );
+    }
   });
 
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);

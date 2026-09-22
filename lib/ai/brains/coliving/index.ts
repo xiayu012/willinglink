@@ -245,6 +245,25 @@ export const colivingBrain: Brain = {
         // 「你（私下/单独）提醒他把…扫掉」这类提醒/叮嘱交办；同样排除完成式问题。
         /(?:麻烦你|请你|你能不能|你可以|你)[^。！？，,；;\n]{0,10}(?:提醒|转告|催)(?!了|过)[^。！？，,；;\n]{0,6}(?:他|她|那位|对方|房东)/,
         /转告|带个话|带句话|捎个话/,
+
+        // ── 同一次交办的**英文说法**（2026-09-21 真实产品事故）──────────────
+        // 住户全程写英文、点名了室友，说「You tell him to clean up the kitchen
+        // every time he finishes using it」——上面五条中文形态一条都没命中，
+        // 这一轮于是只装了 `conflict`：模型按投诉受理的五要素反过来追问
+        // 「他什么时候用厨房、用完留下什么」，一句提醒都没发出去（decision
+        // 落成 `reply_only`）。补的是**同一个交办信号的语言覆盖**，不是主题词表：
+        // 认的仍然是交办的动作形态（tell / ask / remind …），主题照旧交给大脑判断。
+        // 宾语只收**第三人称单数**（him / her），与中文形态的「他/她/那位」同宽：
+        // 对全屋/一群人的说法（everyone / all of you / them）不是一对一交办，不收。
+        // `(?<!…)` 与中文 `(?!了|过)` 同义：排除「Did you tell him…?」这类**问 AI
+        // 历史**、没有交办任何动作的说法；`(?![^.!?\n]{0,24}\b(?:me|us)\b)` 排除
+        // 「You tell me」「tell us」——那是对着 AI 说话，不是要 AI 去联系别人。
+        /(?<!\b(?:did|do|does|have|had|what|why|when|where|how)\s)\byou\s+(?:please\s+)?(?:tell|ask|remind|warn|notify|message|text|speak|talk)\b(?!\s*(?:to\s+|with\s+)?(?:everyone|everybody|you guys|all of|the whole|the entire))(?![^.!?\n]{0,24}\b(?:me|us)\b)/i,
+        /\b(?:please|pls)\s+(?:tell|ask|remind|warn|notify|message|text)\b(?!\s*(?:to\s+|with\s+)?(?:everyone|everybody|you guys|all of|the whole|the entire))(?![^.!?\n]{0,24}\b(?:me|us)\b)/i,
+        // 句首祈使 + 第三人称单数宾语：「Tell him to clean up after himself.」
+        /(?:^|[.!?]\s*)(?:please\s+)?(?:tell|ask|remind|warn|notify)\s+(?:him|her)\b/i,
+        /\blet\s+(?:him|her)\s+know\b/i,
+        /\b(?:help me|on my behalf)\s+(?:ask|tell|remind|let)\b/i,
       ],
       modules: ["relay"],
       reason: "住户交办一次一对一的传话/提醒/代问",

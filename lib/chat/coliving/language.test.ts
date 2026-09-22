@@ -13,6 +13,9 @@
  *   原话直接判成英文（`direct`），并且真的走通「认出 → 功能问答 → **既有英文事实**
  *   （`COORDINATOR_ROLE_NOTE_EN`）」；人名 / 号码 / 日期 / 短标签 / 单个 `ok` 继续是
  *   歧义，落会话回退 / 默认中文——这是本文件新增的核心回归；
+ * - **英文里夹中文人名**（本轮新增）：`小五 always messes up the kitchen…` 这条 2026-09-21
+ *   生产事故原话必须**按原话直接判成英文**（`direct`），**压过中文会话历史**；边界由
+ *   「拉丁词 ≥ 8 且 ≥ 汉字 3 倍」的合成比例判，不够就退回**歧义**、绝不就地猜；
  * - **英文自称问句**：`What does this AI do?` 必须被认成自称问句、走进问答，且兜底用的是
  *   **既有的英文事实措辞**（`COORDINATOR_ROLE_NOTE_EN`），不是中文那段；
  * - **中文一字不动**：同一入口的中文问句仍回中文事实（`COORDINATOR_ROLE_NOTE`）；
@@ -146,6 +149,27 @@ const LANGUAGE_MATRIX: readonly {
   { text: "thank you", language: "en", source: "direct", note: "两词英文道谢" },
   { text: "sounds good", language: "en", source: "direct", note: "两词英文确认" },
 
+  // —— 英文句子里夹中文人名 / 一个汉字：汉字是**标识符**，这句话仍然是英文 ——
+  // 第一行就是 2026-09-21 的生产事故原话（23 个拉丁词 + 2 个汉字）。
+  {
+    text: "小五 always messes up the kitchen and doesn't tidy up. You tell him to clean up the kitchen every time he finishes using it.",
+    language: "en",
+    source: "direct",
+    note: "事故原话：英文句子 + 中文人名",
+  },
+  {
+    text: "欧阳娜 always leaves the dishes in the sink after she cooks.",
+    language: "en",
+    source: "direct",
+    note: "三个汉字的人名同样是零头，一样按英文判",
+  },
+  {
+    text: "Alex said 好 and left the kitchen dirty after he finished cooking.",
+    language: "en",
+    source: "direct",
+    note: "夹一个被引用的汉字仍算英文（拉丁词远多于汉字）",
+  },
+
   // —— 负例：这些**不许**被当成英文（空历史 → 默认中文，不是 direct）——
   { text: "Mary", language: "zh", source: "default", note: "一个词的人名" },
   { text: "Ah Chuan", language: "zh", source: "default", note: "两个词的人名" },
@@ -158,6 +182,24 @@ const LANGUAGE_MATRIX: readonly {
   { text: "hi", language: "zh", source: "default", note: "单词招呼不收（中文住户也会打 hi）" },
   { text: "Wi-Fi", language: "zh", source: "default", note: "短拉丁标签，不是一句话" },
   { text: "Room 3B", language: "zh", source: "default", note: "短拉丁标签，不是一句话" },
+  {
+    text: "小五 always cleans the kitchen",
+    language: "zh",
+    source: "default",
+    note: "汉字是零头但拉丁词只有 4 个：不够长，仍算歧义（不就地猜英文）",
+  },
+  {
+    text: "小五总是把厨房搞得一团糟 and you tell him to clean the kitchen every time he finishes using it",
+    language: "zh",
+    source: "default",
+    note: "汉字不是零头（拉丁词不到汉字的 3 倍）= 真中英混写，仍算歧义",
+  },
+  {
+    text: MIXED_TURN,
+    language: "zh",
+    source: "default",
+    note: "中英各半，同样落歧义——合成比例判据不得把它翻成英文",
+  },
 
   // —— 中文：同一入口中文口径一字不动 ——
   { text: "你是谁？", language: "zh", source: "direct", note: "中文自称问句" },
@@ -242,6 +284,61 @@ async function main(): Promise<void> {
       LANGUAGE_MATRIX.some((r) => r.source === "direct") &&
         LANGUAGE_MATRIX.some((r) => r.source === "default"),
       "矩阵必须同时覆盖 direct 与 default"
+    );
+  });
+
+  /**
+   * ── 英文句子里夹中文人名：**原话的判定必须压过中文会话历史** ──────────────────
+   *
+   * 2026-09-21 生产事故：住户通篇写英文、只把人名写成汉字，会话线是中文的。老口径
+   * 「有汉字 + 拉丁词够多 = 歧义」→ 回退读会话里最近那条 → **中文**，于是英文住户
+   * 收到一段中文回复。这条检查把三件事一起钉住：
+   *
+   * 1. **依据是原话**（`source: "direct"`），不是会话回退——这正是「当前这条原话的
+   *    主要语言优先于中文姓名、房子标签与更早的中文历史」；
+   * 2. **门槛是构成比例，不是关键词**：拉丁词数与汉字数的两个条件各自都能单独否决，
+   *    下面用只违反其中一条的两个句子分别验证；
+   * 3. **反例仍然是歧义**：真中英混写、或英文证据不够长的句子，`direct` 必须是
+   *    `null`（回退会话），不得就地猜成英文。
+   */
+  await check("英文里夹中文人名：原话直接判英文并压过中文历史；比例不够就退回歧义", () => {
+    /** 事故原话：23 个拉丁词 + 2 个汉字（人名「小五」）。 */
+    const ACCIDENT =
+      "小五 always messes up the kitchen and doesn't tidy up. " +
+      "You tell him to clean up the kitchen every time he finishes using it.";
+
+    // ① 会话历史**全中文**，原话仍然自己就能定 —— 判定依据是原话，不是历史。
+    const withChineseHistory = decideLanguage(ACCIDENT, ZH_HISTORY);
+    assert.equal(withChineseHistory.language, "en");
+    assert.equal(withChineseHistory.source, "direct", "依据必须是原话，不能是会话回退");
+    assert.equal(withChineseHistory.direct, "en");
+    // 对照：老口径会走会话回退、判成中文——把这条历史留着，正是为了证明原话赢在它前面。
+    assert.equal(
+      decideLanguage(BARE_OK, ZH_HISTORY).language,
+      "zh",
+      "夹具：这份历史确实是中文的（所以①的 en 只能来自原话）"
+    );
+
+    // ② 门槛的两条各自都能单独否决（用只违反其中一条的句子验证，不是同一句话两遍）。
+    //    只差「够长」：汉字 2 个、比例够，但拉丁词只有 7 个。
+    const tooShort = "小五 always cleans the kitchen and the stove";
+    assert.equal(classifyDirectLanguage(tooShort), null, "拉丁词不够 8 个 → 不判英文");
+    //    只差「比例」：拉丁词 10 个（够长），但汉字 4 个，不到 3 倍。
+    const tooMuchHan = "小五总是 always leaves the dishes there in the sink after cooking";
+    assert.equal(classifyDirectLanguage(tooMuchHan), null, "汉字不是零头 → 不判英文");
+    //    两条都过：汉字 2 个、拉丁词 9 个。
+    const justEnough = "小五 always cleans the kitchen and stove after he cooks";
+    assert.equal(classifyDirectLanguage(justEnough), "en", "两条都过 → 判英文");
+
+    // ③ 反例：真中英混写与「英文证据不够长」仍然是歧义，不回退成英文。
+    for (const mixed of [MIXED_TURN, tooShort, tooMuchHan]) {
+      assert.equal(classifyDirectLanguage(mixed), null, `仍是歧义：${mixed}`);
+    }
+
+    // ④ 交给模型的硬指令跟着这条判定走：住户拿到的是「英文」那条，不是回退 / 默认。
+    assert.match(
+      languageInstruction(withChineseHistory),
+      /The resident wrote in English\./
     );
   });
 

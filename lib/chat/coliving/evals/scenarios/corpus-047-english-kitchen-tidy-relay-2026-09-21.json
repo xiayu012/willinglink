@@ -1,0 +1,55 @@
+{
+  "id": "corpus-047-english-kitchen-tidy-relay-2026-09-21",
+  "source": "源自 2026-09-21 一条真实生产英文短信的产品事故。住户原话是一句**已经说完备的交办**：点名了收信人（小五）、也说清要他做什么（做完饭把厨房收拾干净），只差 AI 去办。系统却把这条当成「室友住在一起不痛快」的投诉受理：反过来追问『他什么时候用厨房、用完留下什么』，那一轮一条提醒都没发出去（decision 落成 reply_only，toolsUsed 为空）。根因有三条，都已在本轮修掉：(1) `lib/ai/brains/coliving/index.ts` 的一对一传话路由只写了中文形态，英文原话一条都没命中 → 这一轮只装了 conflict，`domain/relay.md` 根本不在提示词里；(2) 就算 relay 装进来了，conflict 〇 的「五要素」盘问对**点名交办**仍会按『缺三样以上就走了解流程』触发；(3) **轮次语言闸把这条原话判成了中文**——`小五` 两个汉字让老口径（有汉字 + 拉丁词够多 = 歧义）落回会话回退，而这条会话线是中文的，于是英文住户收到的回复也是中文。现在 `language.ts` 有一条构成比例判据（拉丁词 ≥ 8 且 ≥ 汉字 3 倍 → 这句话其实是英文，汉字是人名/标识符），这条原话**按原话直接判成英文**。\n\n本场景的边界刻意收窄，防止把「投诉一律自动去联系人」当成结论：**只有点名了收信人、又说清了要办的那件事**才走 relay。没点名收信人、没说清要他做什么、或这件事本身没法写成一句中立的可观察提醒（例如老板登记的黑名单那条），照旧走各自原来的流程——本场景不改变那些路径，也不放松黑名单。\n\n语料边界：删去原话里对收信人这个人的定性（『总是把厨房搞得一团糟』），只保留交办本身。名字与号码为虚构。\n\n**语言断言**（本轮新增）：这条是英文轮次，所以**回给发信人的话与发给小五的出站都必须是英文**——两句各自最后两条 `MustNotMatch` 就是钉这件事的：`(?<![小阿])[㐀-鿿](?![五泽])` 匹配「一个不属于登记姓名（阿泽 / 小五）的汉字」，因此**人名可以留中文，整句没被翻译（或又写回中文）会立刻命中判失败**；两条 `[A-Za-z]{3}` 分别正面要求回信与出站**含有真正的英文词**（只把中文名甩过去不算）。\n\n机械断言只覆盖确定性事实：必须调用 contactPerson、真的发给小五（不是回一句问句）、不产生发给发信人阿泽的出站、出站不得出现来源人姓名或把请求归因给某人、出站必须保留『每次用完厨房就收拾干净』这个动作与频次（频次那一项接受几种等价的英文写法：`every/each time`、`after each/every use`、`after using`、`after you use`；2026-09-21 一次实跑里出站写的是 `after you use`，此前只收了前几种而被判失败——只补这一条等价写法，动作、隐私、英文三项要求一条都没放松）、回给发信人的话不得把已经做完的事写成将来时。断言里的大小写写成 `[Ss]` 这类字符类、**不用 `(?i)` 内联标志**——评测 runner 用 `new RegExp(pattern)` 编译，JS 不支持内联标志。**这些断言证明不了英文出站读起来自然、有没有把话说重**——那要留给 semantic judge 与人工逐轮阅读。\n\n**本轮加严：一次性交办不许自己排后续。** 2026-09-21 的隔离实跑在办完这一件之后又多做了两件事：调了两次 `scheduleReminder`（给自己排「过些天到点再开口」），回信里也写了「I'll check back with you in a couple weeks」。这不是住户交办的，属于过度帮忙——所以要在这里钉死两条：`mustNotUseTools` 收进 `scheduleReminder`（`proposeRule` 那条照旧），`replyMustNotMatch` 收进两类将来承诺的说法（`check back` / `check in` / `follow up` / `get back to you` / `keep you posted` / `let you know` 这类「以后再说」的承诺，以及 `in a couple weeks` 这类将来时点）。**例外仍然保留**：住户**明确要求**以后再问一次、或另有独立流程要求回访时照办——这条场景的住户没有要求，所以本轮该做的只有「联系小五 + 一句短回执」。**这不改冲突跟进的通用能力**：那是另一条路径，本场景只约束这一轮的一次性交办。**同时没有放松任何原有要求**——`contactPerson`、发给小五且不发阿泽、来源匿名、英文、保留收拾动作与频次，一条都没动。\n\n**本场景尚未跑过付费评测**：当前只由免费闸做结构校验（见 scripts/coliving-quality-inspect.ts），结构通过不等于语气与判断已验收。",
+  "household": { "label": "Eval-047 English kitchen tidy relay" },
+  "people": [
+    { "phone": "+15550470001", "name": "阿泽", "role": "tenant" },
+    { "phone": "+15550470002", "name": "小五", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["阿泽", "小五"],
+    "priorMessages": [
+      { "person": "阿泽", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." },
+      { "person": "小五", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550470001",
+      "text": "小五 always messes up the kitchen and doesn't tidy up. You tell him to clean up the kitchen every time he finishes using it."
+    }
+  ],
+  "expect": {
+    "minAcceptedOutbound": 1,
+    "mustUseTools": ["contactPerson"],
+    "mustNotUseTools": ["proposeRule", "scheduleReminder"],
+    "mustContactNames": ["小五"],
+    "mustNotContactNames": ["阿泽"],
+    "outboundMustMatch": [
+      "[A-Za-z]{3}",
+      "[Kk]itchen",
+      "[Cc]lean|[Ww]ipe|[Tt]idy|[Cc]lear|[Ww]ash|[Pp]ut (?:things|stuff|it) away",
+      "[Ee]very time|[Ee]ach time|[Ww]henever|[Aa]fter (?:each|every) (?:use|time)|[Aa]fter using|[Aa]fter (?:you|he) uses?|(?:[Ww]hen|[Oo]nce|[Aa]fter) (?:you|he) (?:finish|finishes|'re done|'s done|are done|is done)"
+    ],
+    "outboundMustNotMatch": [
+      "阿泽",
+      "(?<![小阿])[㐀-鿿](?![五泽])",
+      "[Mm]ess(?:es|ing)? up|[Dd]oesn'?t tidy|[Nn]ot tidy",
+      "[Yy]ou (?:always|never)\\b",
+      "(?:[Hh]e|[Ss]he|[Tt]hey) (?:said|says|asked|asks|wants|wanted|told|complained|mentioned|reported)",
+      "(?:[Ss]omeone|[Aa] roommate|[Oo]ne of your roommates|[Aa]nother resident|[Aa] housemate)[^.!?\\n]{0,20}(?:said|asked|told|wants|wanted|complained|mentioned|reported)",
+      "(?:[Ee]veryone|[Ee]verybody|[Aa]ll residents|the whole house|[Hh]ouse rule|[Nn]ew rule)"
+    ],
+    "replyMustNotMatch": [
+      "(?<![小阿])[㐀-鿿](?![五泽])",
+      "[Ww]hen (?:does|do) (?:he|they|小五)[^.!?\\n]{0,40}use",
+      "[Ww]hat (?:does|do) (?:he|they|小五)[^.!?\\n]{0,40}leave",
+      "^\\s*I(?:'ll| will) (?:let|tell|ask|remind)",
+      "[Cc]heck(?:ing)? (?:back|in)|[Ff]ollow(?:ing)? up|[Cc]ircle back|be in touch|get back to you|keep you posted|let you know",
+      "\\b(?:in|after|within|next)\\s+(?:a\\s+)?(?:couple(?:\\s+of)?\\s+|one\\s+|two\\s+|three\\s+|\\d+\\s+)?(?:days?|weeks?|months?)\\b"
+    ],
+    "replyMustMatch": [
+      "[A-Za-z]{3}"
+    ]
+  }
+}
