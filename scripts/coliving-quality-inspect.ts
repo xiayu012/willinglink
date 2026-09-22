@@ -3778,23 +3778,33 @@ async function main() {
       const bundle = buildFeatureQaFacts({
         openFeatures: OPEN_FEATURES,
         question: combinedQuestion,
+        // 与生产同一条：`turn.ts` 按问句现判这两个标志（夹具照抄真实注入的值）。
+        selfIntro: asksAboutSelf(combinedQuestion),
+        wantsCapabilities: asksWhatIsAvailable(combinedQuestion),
       });
       assert.equal(bundle.blacklisted.length, 0, "问能力清单时不带任何「办不了」条目");
-      // 功能名只剩反向守卫用途：清单本身不再交给模型（老板 2026-09-22 不列清单）。
+      // 问能力的**索引动态来自登记清单**（登记处是唯一出处，Markdown 与引擎里都没有
+      // 第二份），名称按本轮语言取；本语言的名字是索引、允许提到，只禁另一种语言的。
       assert.deepEqual(
-        [...bundle.forbiddenOpenFeatureNames],
-        [...openLabels],
-        "中文轮次的反向守卫就是 APPROVED_FEATURES 的登记名"
+        bundle.featureIndex,
+        APPROVED_FEATURES.map((f) => ({ id: f.id, name: f.label })),
+        "中文轮次的索引就是 APPROVED_FEATURES 的登记名"
+      );
+      assert.deepEqual(
+        [...bundle.forbiddenFeatureNames],
+        [...openLabelsEn],
+        "中文轮次只禁英文显示名（本语言的名字是索引）"
       );
       // 问能力只读内容文件的能力段，原文一字不改。
       assert.equal(bundle.blocks.length, 1, "问能力只读一段");
       assert.equal(bundle.blocks[0].kind, "capabilities", "问能力读的是能力段");
       assert.equal(bundle.blocks[0].text, CAPABILITIES_ZH, "能力段原文逐字来自内容文件");
-      // 兜底同样只含内容文件原文：问能力时绝不编造「办不了」，也不列功能清单。
+      // 兜底同样只含内容文件原文：问能力时绝不编造「办不了」，**也不带那份索引**
+      // （兜底是安全地板：模型说不出干净回应时，住户读到的就是 Markdown 那一段）。
       const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
       assert.equal(fb, CAPABILITIES_ZH, "问能力的兜底就是内容文件的能力段原文");
       assert(!/办不了|没法|不能做/.test(fb), "问能力的兜底不得编造办不了");
-      assert(!openLabels.some((l) => fb.includes(l)), "问能力不列功能清单");
+      assert(!openLabels.some((l) => fb.includes(l)), "兜底不带功能索引（只回 Markdown 原文）");
     }
   );
 
@@ -3805,11 +3815,37 @@ async function main() {
     assert.equal(asksWhatIsAvailable(combinedQuestion), true, "合并追问要识别为在问能力清单");
     assert.equal(asksWhatIsAvailable("这件事刚才为什么办不了"), false);
     assert.equal(
+      asksWhatIsAvailable("你能帮我们处理哪些合住的事？"),
+      true,
+      "「你能帮我们处理哪些…」也是问能力（冒烟里实际走到了这条路径）"
+    );
+    assert.equal(
       isFeatureQaQuestion("阿川最近老把地漏堵住，头发也不清理。请叫他把地漏的头发清干净。"),
       false,
       "普通交办不是功能边界元问题"
     );
     assert.equal(isFeatureQaQuestion("今天晚饭吃什么"), false, "闲聊不进");
+    // 自然的英文能力问法（整句锚定）：认，别再让「What can you help with around the
+    // house?」这种正问句掉回普通对话。
+    for (const q of [
+      "What can you help with around the house?",
+      "What can you help us with?",
+      "what can you help me with in this home",
+      "How can you help around the house?",
+    ]) {
+      assert.equal(asksWhatIsAvailable(q), true, `英文能力问法要认出来：${q}`);
+      assert.equal(isFeatureQaQuestion(q), true, `英文能力问法要进功能问答：${q}`);
+    }
+    // 后面挂着**具体诉求**的英文句子是交办，不是问能力——宽松的 `/what can you help/`
+    // 会把它们吞掉，让真要办的事没人办。
+    for (const q of [
+      "What can you help with the dryer beeping at night?",
+      "what can you do about the noise next door?",
+      "Could you help with the laundry tonight?",
+      "Can you help me with the dishes after dinner?",
+    ]) {
+      assert.equal(isFeatureQaQuestion(q), false, `具体交办不得被吞：${q}`);
+    }
   });
 
   await checkAsync("功能问答：直接问能力也进；无关消息一次模型都不调", async () => {
@@ -3832,69 +3868,111 @@ async function main() {
     });
     assert.equal(none, null, "无关消息不触发功能问答");
     assert.equal(calls.length, 0, "无关消息一个模型调用都不花");
-  });
 
-  await checkAsync("功能问答 grounding：漏说原文 / 列出功能名 / 自创处置方案 / 超长一律回落兜底", async () => {
-    const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
-    const grounded = CAPABILITIES_ZH;
-    const missedBlock = "我可以帮大家协调合住的事。";
-    const leakedName = `${grounded}${openLabels[0]}`;
-    const inventedPlan = `${grounded}我这就去跟阿川说。`;
-    const bundle = buildFeatureQaFacts({
-      openFeatures: OPEN_FEATURES,
-      question: combinedQuestion,
-    });
-
-    // 直接检验通用校验函数本身：没说原文 / 列出功能名都必须报缺。
-    assert.deepEqual(findUngroundedFeatureQaFacts(grounded, bundle), []);
-    assert.equal(
-      findUngroundedFeatureQaFacts(missedBlock, bundle).length,
-      1,
-      "没原样说出该说的那段原文必须报缺"
-    );
-    assert.equal(
-      findUngroundedFeatureQaFacts(leakedName, bundle).length,
-      1,
-      "列出具体功能名必须报缺"
-    );
-
-    // grounding：漏说原文 / 列出功能名 / 自创处置方案都回落，并把原因带出来。
-    for (const [label, reply] of [
-      ["漏说原文", missedBlock],
-      ["列出功能名", leakedName],
-      ["自创处置方案", inventedPlan],
-    ] as Array<[string, string]>) {
+    // 自然的英文能力问法：进得来、按英文取索引交给模型、提 0 条或提一条都接受。
+    const enQuestion = "What can you help with around the house?";
+    for (const reply of [
+      "I help with the day-to-day things that come up around the house.",
+      `I help with the day-to-day things around the house, like ${openLabelsEn[0]}.`,
+    ]) {
       const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
-      const qa = await runFeatureQa({
-        text: combinedQuestion,
+      const enQa = await runFeatureQa({
+        text: enQuestion,
         openFeatures: OPEN_FEATURES,
+        language: decideLanguage(enQuestion),
         llm: m.llm,
       });
-      assert.equal(qa!.reply, fb, `${label} 必须回落兜底`);
-      assert(qa!.error, `${label} 回落时要把原因带出来`);
+      assert(enQa, "英文能力问法必须进功能问答");
+      assert.equal(enQa!.reply, reply, `英文自然回答要原样接受：${reply}`);
+      assert(!("error" in enQa!), "英文自然回答不该回落");
+      assert.equal(m.calls.length, 1, "英文能力问只花一次模型调用");
+      // 索引按本轮语言取：英文轮次交给模型的是英文显示名，中文名不出现。
+      assert(
+        m.calls[0].system.includes(openLabelsEn[0]),
+        "英文轮次要把英文登记名作为索引交给模型"
+      );
+      assert(!m.calls[0].system.includes(openLabels[0]), "英文轮次不得夹中文登记名");
     }
-
-    // 说了原文、也没多列的正文照样接受。
-    const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
-    const okQa = await runFeatureQa({
-      text: combinedQuestion,
-      openFeatures: OPEN_FEATURES,
-      llm: ok.llm,
-    });
-    assert.equal(okQa!.reply, grounded, "内容文件的能力段原文要接受");
-    assert(!("error" in okQa!));
-
-    // 超长正文也回落（结构校验仍在）。
-    const long = mockLlm({
-      [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded + "啊".repeat(FEATURE_QA_MAX_CHARS) }),
-    });
-    const longQa = await runFeatureQa({
-      text: combinedQuestion,
-      openFeatures: OPEN_FEATURES,
-      llm: long.llm,
-    });
-    assert.equal(longQa!.reply, fb, "超长正文必须回落兜底");
   });
+
+  await checkAsync(
+    "功能问答 grounding：能力段可自然改写、索引可提 0 到多条；串语言 / 说成「只有这几项」/ 自创方案 / 超长回落兜底",
+    async () => {
+      const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
+      const grounded = CAPABILITIES_ZH;
+      // 问能力时**能力段不再要求逐字**：Markdown 那段是事实来源与兜底，回答是一句自然的话。
+      const paraphrased = "合住里日常的事我都能帮着协调，有事你直接说就行。";
+      // 本语言的登记名是**索引**——提一条、提几条、一条都不提都由模型判断。
+      const oneMention = `${paraphrased}${openLabels[0]}`;
+      const allMentions = `${paraphrased}${openLabels.join("、")}`;
+      // 该拦的三类：夹另一种语言的登记名（语言守卫）/ 说成「只有这几项」（排他失真）/
+      // 承诺去联系（共享 grounding 闸）。
+      const foreignName = `${grounded}${openLabelsEn[0]}`;
+      const exclusive = `${paraphrased}只有这两项功能：${openLabels.join("、")}。`;
+      const inventedPlan = `${grounded}我这就去跟阿川说。`;
+      const bundle = buildFeatureQaFacts({
+        openFeatures: OPEN_FEATURES,
+        question: combinedQuestion,
+      });
+
+      // 直接检验通用校验函数本身。
+      assert.deepEqual(findUngroundedFeatureQaFacts(grounded, bundle), []);
+      assert.deepEqual(
+        findUngroundedFeatureQaFacts(paraphrased, bundle),
+        [],
+        "能力段允许自然改写（逐字只对身份段）"
+      );
+      assert.deepEqual(
+        findUngroundedFeatureQaFacts(allMentions, bundle),
+        [],
+        "提到本语言登记名（几条不限）是通过的"
+      );
+      assert.equal(
+        findUngroundedFeatureQaFacts(foreignName, bundle).length,
+        1,
+        "夹带另一种语言的登记功能名必须报缺"
+      );
+
+      // 通过 / 回落的正文各自只花一次模型调用：索引只是参考，不改变这条路径的调用数。
+      for (const [label, reply, accepted] of [
+        ["内容文件原文", grounded, true],
+        ["自然改写（一条都不提）", paraphrased, true],
+        ["提一条相关登记功能", oneMention, true],
+        ["提全部登记功能", allMentions, true],
+        ["夹另一种语言的名字", foreignName, false],
+        ["说成「只有这两项」", exclusive, false],
+        ["自创处置方案", inventedPlan, false],
+        // 冒烟里真发生过：模型把给它的内部依据复述给住户（"专门优化过 / 走完整流程"）。
+        ["复述内部机制", `${paraphrased}这几条是专门优化过的，其余的事走完整流程。`, false],
+      ] as Array<[string, string, boolean]>) {
+        const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
+        const qa = await runFeatureQa({
+          text: combinedQuestion,
+          openFeatures: OPEN_FEATURES,
+          llm: m.llm,
+        });
+        if (accepted) {
+          assert.equal(qa!.reply, reply, `${label} 应当原样接受`);
+          assert(!("error" in qa!), `${label} 不该回落`);
+        } else {
+          assert.equal(qa!.reply, fb, `${label} 必须回落兜底`);
+          assert(qa!.error, `${label} 回落时要把原因带出来`);
+        }
+        assert.equal(m.calls.length, 1, `${label} 只花一次模型调用`);
+      }
+
+      // 超长正文也回落（结构校验仍在）。
+      const long = mockLlm({
+        [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded + "啊".repeat(FEATURE_QA_MAX_CHARS) }),
+      });
+      const longQa = await runFeatureQa({
+        text: combinedQuestion,
+        openFeatures: OPEN_FEATURES,
+        llm: long.llm,
+      });
+      assert.equal(longQa!.reply, fb, "超长正文必须回落兜底");
+    }
+  );
 
   await checkAsync(
     "功能问答的「刚才」窄引用：本人紧接追问补上被拒条目，没有引用时不继承",
@@ -4251,22 +4329,16 @@ async function main() {
       ["卫生整改", "未开放", "白名单", "黑名单", "路由", "提示词", "不在.{0,6}(能力|功能)清单"],
       "第一轮回复不得含内部术语，也不得退回大类旧称"
     );
-    // 第二轮是**同一住户紧接着**的功能边界追问：无工具、无出站；且必须说出刚刚被拒的
-    // 具体功能名与登记原因、并列出全部专门优化功能——由结构化引用 + grounding
-    // 共同保证（不是「不继承」，也不是按关键词乱猜主题）。
+    // 第二轮是**同一住户紧接着**的功能边界追问：无工具、无出站；必须说出刚刚被拒的
+    // 具体功能名与登记原因——由结构化引用 + grounding 共同保证（不是「不继承」，也不是
+    // 按关键词乱猜主题）。**专门优化功能的索引只是举例，提不提、提几条由模型按问句判断**
+    // （老板 2026-09-22），所以这一轮不再要求逐字列出那两条功能名。
     assert.deepEqual(scenario.turns[1].expect?.mustNotContactNames, ["阿川", "小禾"], "第二轮不得联系任何人");
     assert.deepEqual(scenario.turns[1].expect?.mustNotUseTools, ["contactPerson"], "第二轮无工具");
     assert.deepEqual(
       scenario.turns[1].expect?.replyMustMatch,
-      [
-        "单方面叫别人在洗完澡后清理地漏头发",
-        "看不到",
-        "程度",
-        "整改",
-        "个人物品使用提醒",
-        "夜间洗衣提醒",
-      ],
-      "第二轮紧接着追问：必须说出具体功能名 + 登记原因，并列全专门优化功能"
+      ["单方面叫别人在洗完澡后清理地漏头发", "看不到", "程度", "整改"],
+      "第二轮紧接着追问：必须说出具体功能名 + 登记原因；功能索引提不提由模型判断"
     );
     assert.deepEqual(
       scenario.turns[1].expect?.replyMustNotMatch,

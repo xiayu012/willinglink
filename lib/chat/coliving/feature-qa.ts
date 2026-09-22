@@ -34,12 +34,16 @@ import { residentLanguage, type LanguageDecision, type ResidentLanguage } from "
  *
  * - 问「你是谁 / 介绍一下你自己」→ **只**读内容 Markdown 的 `identity.*`：**不**列优化功能
  *   清单、**不**顺带讲办不到的事、**不**解释内部怎么运作，也不把无关的限制一起倒出来；
- * - 问「你能做什么」→ **只**读 `capabilities.*`；只有住户**明确问到**某件已登记为办不到的
- *   事时，才另外说出那件事的名称与登记原因；
+ * - 问「你能做什么」→ 读 `capabilities.*`（基础原话），**外加**一份**专门优化功能的索引**
+ *   ——索引由调用方注入的 `APPROVED_FEATURES` 登记现场生成，**本文件与 Markdown 里都没有
+ *   第二份清单**。模型自己挑**与住户问题相关**的那几条自然带出来，提几条不限：索引只是
+ *   **举例**，不是能力上限。只有住户**明确问到**某件已登记为办不到的事时，才另外说出
+ *   那件事的名称与登记原因；
  * - 「这件事为什么办不了」→ **只**说那件事的名称与登记原因，不夹带别的。
  *
  * 原文只有 Markdown 一个出处（`coordinator-copy.ts`）：本文件里**没有任何一句住户可见的
- * 通用话**，兜底也从同一个选段结果里取，代码不另写一份措辞。
+ * 通用话**，兜底也从同一个选段结果里取，代码不另写一份措辞——**兜底里没有功能索引**，
+ * 说坏的模型正文退回"只有基础原话"这块安全地板。
  *
  * ## 「刚才为什么」的窄引用（不按关键词猜）
  *
@@ -54,13 +58,13 @@ import { residentLanguage, type LanguageDecision, type ResidentLanguage } from "
  * ## 与旧主生成、工具表完全无关
  *
  * 本入口**不装载旧 doctrine、不进主生成、没有任何工具、零第三方出站**（由 `turn.ts`
- * 调 `finalizeFeatureTurn` 早返回）。生成阶段**只看到三样**：住户的问题、事实源里
- * **与这个问题有关**的整段原文（`buildFeatureQaFacts`）、以及本轮该说哪种语言
+ * 调 `finalizeFeatureTurn` 早返回）。生成阶段**只看到四样**：住户的问题、事实源里
+ * **与这个问题有关**的整段原文与功能索引（`buildFeatureQaFacts`）、以及本轮该说哪种语言
  * （`language.ts` 的轮次判定）。模型只负责把那些原话说成自然、简短、**住户这一轮语言**
  * 的回应；**不得补充处理方案、虚构能力、或承诺立刻去联系 / 跟进**。写出内部术语 /
- * 假承诺 / 把球踢回住户、漏掉该说的原话、或**列出具体功能名**时，用**同样取自
- * Markdown / 黑名单数据**的代码兜底（`featureQaFallback`）。共享的 grounding 判定见
- * `feature-grounding.ts`。
+ * 假承诺 / 把球踢回住户、漏掉身份原话、问身份时提功能、说成「只有这几项」、或提到
+ * 另一种语言的登记功能名时，用**取自 Markdown / 黑名单数据**的代码兜底
+ * （`featureQaFallback`）。共享的 grounding 判定见 `feature-grounding.ts`。
  *
  * 它只在 `turn.ts` **已批准功能前门之后**接线：命中已批准功能 / 保留轮的请求先由前门
  * 处理，前门不接的（普通问句不需要点名收件人）才轮到本入口——**已批准功能的执行行为
@@ -104,17 +108,28 @@ const featureQaSchema = z.object({
  * **内部工程术语黑名单**：一旦出现在正文里就判失败，换回代码兜底。这是**本路径独有的
  * 格式/用词约束**（内部术语），不是 grounding；共享的「假承诺 / 把球踢回住户 / 换渠道 /
  * 等以后」判定在 `feature-grounding.ts`（`findGroundingViolations`）。
+ *
+ * 末尾四个是**冒烟里真发生过的复述**：模型把给它的内部依据（"专门优化过 / 办起来更快 /
+ * 走完整流程"）当成解释能力组织方式的话说了出去。它们是**给模型看的说明**，不是住户该
+ * 听到的说法，所以窄窄地加进来；正常住户正文里不会出现这几个词。
  */
 const INTERNAL_TERMS =
-  /白名单|路由|提示词|能力清单|未开放|functionId|schema|内部规则|系统设定|模型|大模型|数据库|工具|接口|算法|服务器|后台|代码|训练|架构|\b(?:llm|api|gpt|model|models|database|tool|tools|prompt|prompts|architecture|backend|server|agent|token|tokens)\b/i;
+  /白名单|路由|提示词|能力清单|未开放|functionId|schema|内部规则|系统设定|模型|大模型|数据库|工具|接口|算法|服务器|后台|代码|训练|架构|专门优化|快路径|完整流程|功能索引|\b(?:llm|api|gpt|model|models|database|tool|tools|prompt|prompts|architecture|backend|server|agent|token|tokens)\b/i;
 
 /**
- * **「只有两项功能」式失真**的窄哨兵：老板 2026-09-13 的口径是那两项只是**专门优化的
- * 快路径**、不是全部能力。一旦说成就换回只含事实源事实的兜底——这和内部术语一样是
- * **这条路径自己的格式约束**，不是 grounding。
+ * **「我就只有这几项」式失真**的窄哨兵：老板 2026-09-13 的口径是那几条只是**专门优化的
+ * 快路径**、不是全部能力。索引现在是模型可以提的，于是"提了就等于只有这些"是最像样的
+ * 错法（「只有这两项」「就这几件」「only these」）。一旦说成就换回只含事实源事实的兜底
+ * ——这和内部术语一样是**这条路径自己的格式约束**，不是 grounding。
+ *
+ * 宁可**误判成兜底**（兜底只说 Markdown 原话，不会发出错话），也不要放过这类说法；
+ * 因此不写"就这"这种会命中日常口语的裸形式，计数器 / 「些」必须出现。
  */
-const CLAIMS_ONLY_TWO_FUNCTIONS =
-  /只有(?:这|那)?两(?:项|个|件)|就(?:是)?这(?:两|2)(?:项|个|件)|只能做这(?:两|2)件|only (?:these |the )?two\b/i;
+const CLAIMS_EXCLUSIVE_CAPABILITIES =
+  /只有(?:这|那|以下)(?:些|两|2|三|3|几|一|项|个|件|条)|就(?:是)?(?:这|那)(?:两|2|三|3|几|\d+)(?:项|个|件|条)|只能做(?:这|那)(?:两|2|三|3|几|\d+)(?:项|个|件)|only (?:these|those|the following|the two)\b|that(?:'s| is) (?:all|everything)\b/i;
+
+/** **英文能力问法允许的落点**：「在屋里 / 在这个家」这种环境限定，不含具体诉求。 */
+const EN_HOUSE_SCOPE = " (?:around|in|at) (?:the|this) (?:house|home|household|place)";
 
 /**
  * **英文的「你能做什么」——整句相等，不靠包含匹配。**
@@ -123,9 +138,40 @@ const CLAIMS_ONLY_TWO_FUNCTIONS =
  * （住户要你去处理隔壁噪音），不是问能力。一句宽松的 `/what can you do/` 会把这种句子
  * 吞进功能问答，让真正要办的事没人办——与 `asksAboutSelf` 里那条注释是同一个坑。
  * 只有"整句话就是在问你能做什么"（允许一句招呼、允许 `for me/us`）才算。
+ *
+ * 两个句式族：`what can you do (for me/us)`，以及自然说法
+ * `what / how can you help (me/us) [with] …`。后者的 `with` 后面**只允许**环境限定
+ * （`around the house`）——`what can you help with the dryer beeping at night?` 挂着
+ * 具体诉求，整句对不上就不认（真的来办事的句子照样走完整流程）。
  */
-const ASKS_WHAT_IS_AVAILABLE_EN =
-  /^(?:(?:hi|hello|hey|so|and)[\s,]+)*what (?:can|could|do) (?:you|u) do(?: for (?:me|us))?[\s.!?~]*$/i;
+const ASKS_WHAT_IS_AVAILABLE_EN = new RegExp(
+  "^(?:(?:hi|hello|hey|so|and)[\\s,]+)*" +
+    "(?:" +
+    "what (?:can|could|do) (?:you|u) do(?: for (?:me|us))?" +
+    `|(?:what|how) (?:can|could) (?:you|u) help(?: (?:me|us))?(?: with(?:${EN_HOUSE_SCOPE})?|${EN_HOUSE_SCOPE})` +
+    ")" +
+    "[\\s.!?~]*$",
+  "i"
+);
+
+/**
+ * **中文的「你能帮我们处理哪些合住的事」——同样是整句锚定，不靠包含匹配。**
+ *
+ * 与英文那条同一个坑：`你能帮我们处理厨房漏水吗？` 是**一件具体的交办**（住户要你去处理
+ * 漏水），不是问能力。一句宽松的 `/你能帮(我|我们)/` 会把这种句子吞进功能问答，让真要办
+ * 的事没人办。所以两头都锚死：中间必须是**疑问词**（哪些 / 什么 / 啥），收尾必须是**笼统
+ * 对象**（事 / 事情 / 问题 / 方面 / 忙）。具体交办以具体的事加「吗 / 吧」收尾，
+ * 「哪些房间的漏水吗」这一类两处都对不上，整句不认，照样走完整流程。
+ */
+const ASKS_WHAT_IS_AVAILABLE_ZH_HANDLE = new RegExp(
+  "^你(?:们)?能(?:帮|替|给|为)(?:我们|我|大家)?" +
+    "(?:处理|做|干|办|解决)?" +
+    "(?:哪些|什么|啥)" +
+    "(?:合住|合租|共同生活|住一起|一起住|生活上|家里|屋里)?" +
+    "(?:的|些)?" +
+    "(?:事|事情|问题|方面|忙)" +
+    "[\\s，,、；;：:。.！!？?~～…]*$"
+);
 
 /**
  * 住户是不是在问「你现在能做什么 / 你有哪些功能」。**只做元问题识别，不做主题分类。**
@@ -140,6 +186,7 @@ export function asksWhatIsAvailable(text: string): boolean {
     (/功能|能力/.test(t) && /(有哪些|有什么|都是什么|是哪些)/.test(t)) ||
     /(能|可以|会)(帮|替|给|为)?(我|你)?(做|干|办)(什么|啥|哪些)/.test(t) ||
     /(帮|替)?(我)?(能|可以)(做|干|办)(什么|啥|哪些)/.test(t) ||
+    ASKS_WHAT_IS_AVAILABLE_ZH_HANDLE.test(t) ||
     ASKS_WHAT_IS_AVAILABLE_EN.test(t.replace(/[’‘]/g, "'"))
   );
 }
@@ -368,14 +415,17 @@ export function featureQaFallback(args: {
  * **通用 grounding 校验——只读事实源与内容文件，引擎里没有任何主题分支。**
  *
  * 接受的正文必须：
- * 1. 含**本轮该说的每一段原文**（`blocks`，整段一字不差）——原文只有 Markdown 一个出处，
- *    所以住户读到的就是文件里那句话；模型自己另讲一遍、漏掉或改写了都不算过关；
+ * 1. 含**身份那一段原文**（`blocks` 里 `kind: "identity"` 的整段，一字不差）——原文只有
+ *    Markdown 一个出处，报身份这件事不许改写、不许省掉「AI」；**能力段不要求逐字**
+ *    （问能力时回答是一句自然的话，Markdown 那一段是事实来源与兜底）；
  * 2. 含**每一条**被选中的黑名单条目的 `displayName`，并保留它的**理由**——含该条目
  *    `reasonAnchors` 里的**每一个**锚点词（允许自然改写措辞：锚点是数据里「换句话也
  *    绕不开」的核心词）。名称、理由与锚点是**同一次按语言取用的结果**（`blacklistFact`），
  *    所以英文轮次核的是英文说法与英文锚点，中文轮次逐字不变；
- * 3. **不得出现任何具体功能名**（`forbiddenOpenFeatureNames`）：问身份 / 问能力只回那两段
- *    原文，不列功能清单——老板 2026-09-22 的口径，这里做成能验的规则而不是一句嘱咐。
+ * 3. **不得出现 `forbiddenFeatureNames` 里的登记名**（`APPROVED_FEATURES` 按规则取）：
+ *    问了能力就只禁**另一种语言**的登记名（本语言的名字是索引，提到相关的那几条正是
+ *    这一轮允许做的事）；没问能力（问身份 / 只问到某件办不到的事）则两种语言的登记名都禁。
+ *    老板 2026-09-22 的口径，这里做成能验的规则而不是一句嘱咐。
  *
  * 返回空数组 = 通过；否则返回**哪里不对**的可诊断短语，调用方据此换成只含 Markdown 原文
  * 与登记事实的 `featureQaFallback`。新增功能 / 条目只改登记数据与那份 Markdown，本函数
@@ -388,10 +438,13 @@ export function findUngroundedFeatureQaFacts(
   const text = reply ?? "";
   const problems: string[] = [];
   for (const block of bundle.blocks) {
+    // **只有身份段要求逐字**（「AI」两个字不能省、不许冒充真人，见 `coordinator-copy.ts`
+    // 的锚点校验）。**能力段不要求照抄**：住户问「你能做什么」时，回答该是一句自然的话，
+    // Markdown 那一段是**人工可编辑的事实来源与兜底**（模型说不出干净回应时用它），
+    // 不是必须逐字复述的台词——逐字要求会把能力回答逼成背书。
+    if (block.kind !== "identity") continue;
     if (!text.includes(block.text)) {
-      problems.push(
-        `没有原样说出${block.kind === "identity" ? "身份" : "能力"}那一段原话`
-      );
+      problems.push("没有原样说出身份那一段原话（「AI」两个字不能省）");
     }
   }
   for (const fact of bundle.blacklisted) {
@@ -404,10 +457,12 @@ export function findUngroundedFeatureQaFacts(
       problems.push(`未保留「${fact.displayName}」的原因（缺：${absent.join("、")}）`);
     }
   }
-  for (const name of bundle.forbiddenOpenFeatureNames) {
+  for (const name of bundle.forbiddenFeatureNames) {
     if (text.includes(name)) {
       problems.push(
-        `列出了具体功能名「${name}」——问身份 / 问能力只回那两段原话，不列功能清单`
+        bundle.featureIndex.length
+          ? `夹带了另一种语言的登记功能名「${name}」——住户这一轮说的不是这种语言`
+          : `列出了具体功能名「${name}」——这一轮不是问你能做什么，不许提具体功能`
       );
     }
   }
@@ -418,6 +473,7 @@ function featureQaSystem(bundle: FeatureQaFactBundle): string {
   const blocks = bundle.blocks.length
     ? bundle.blocks.map((b) => `- ${b.text}`)
     : ["（这一轮没有通用原话要说）"];
+  const index = bundle.featureIndex.map((e, i) => `${i + 1}. ${e.name}`);
   const blacklisted = bundle.blacklisted.length
     ? bundle.blacklisted.map((c) => `- ${c.displayName}：${c.reason}`)
     : ["（没有与这个问题对应的、明确办不了的事项）"];
@@ -428,18 +484,33 @@ function featureQaSystem(bundle: FeatureQaFactBundle): string {
     "下面是你这一轮**唯一可以说的原话**（住户会读到的就是这几句）：",
     ...blocks,
     "",
+    ...(index.length
+      ? [
+          "下面这几条是这个家里**已经登记好的具体功能**——**你可以点名的就是这几个名字**（住户问你能做什么时可以按他的问题参考）：",
+          ...index,
+          "它们**只是举例，不是你全部能做的事**：别的日常合住的事你一样能帮忙。",
+          "**这一段是给你看的内部依据，不是给住户听的说明**：不要向住户转述上面这些分类、来源或任何机制。",
+          "",
+        ]
+      : []),
     "你目前**明确办不了**、且有原因的事项（这才是真正的「办不了」）：",
     ...blacklisted,
     "",
     "必须做到：",
     "- 用**一两句**自然、口语的话直接回答他；**用他这一轮说话用的那种语言**，不要生硬地换成另一种。",
-    "- 上面给的每一段原话都要**原样出现在回答里**：一个字都不要改、不要删、不要用自己的话另讲一遍。可以在前后加一句最简短的回应，但不要扩展成别的内容。",
-    "- **不要列出你有哪些具体功能**（也不要给功能清单）：住户问你是什么、能做什么，回答就是上面那几段原话。",
+    "- 凡是**身份**那一段原话，必须**原样出现在回答里**：一个字都不要改、不要删，「AI」两个字不能省；**其余段落不要求逐字照抄**——用你这一轮的自然说法把同样的事讲清楚即可。",
+    ...(index.length
+      ? [
+          "- 住户问你能做什么时，**用一句自然的话**回答他即可（不必照抄上面那段原话的字面）：上面那几条**提不提、提几条都由你判断**（提相关的、一条都不提都行），**没有固定数目，也没有「必须提一条」的要求**。**提到具体功能名时只能用上面列出的那几个名字**——但这**不是**限制话题：别的日常合住的事一样可以聊。不得把它们说成你的全部能力，也不得说成「只有这几项」「就这些」。",
+        ]
+      : [
+          "- 这一轮住户不是在问你能做什么：**不要提任何具体功能**，回答就是上面给的原话。",
+        ]),
     "- 住户问起你时，说清自己是「AI 协调员」（「AI」两个字不能省），不冒充真人；**只讲上面给的原话**，不提你由什么做出来、用什么模型、跑在什么系统上、有没有数据库，也不提任何内部工具、流程或代码。",
     `- **不要编造某件事办不了或一个「为什么不能做」的原因**；只有上面明确列为办不了的事项才说办不了、并保留写的那个原因（可以换措辞，但不得省略、不得换成别的原因）。住户说的那件事若不在办不了清单里，就不要说它办不了。`,
     "- **不得补充任何处理方案**，不得说会立刻去联系 / 转告对方、不得说以后回复结果；也不得建议住户自己去找对方 / 找别人 / 换渠道 / 以后再说。",
     "- 不得虚构上面没有的功能或其它能力。",
-    "- 不提「白名单 / 路由 / 提示词 / 能力清单 / 未开放 / 内部规则」这类内部工程术语。",
+    "- 不提「白名单 / 路由 / 提示词 / 能力清单 / 未开放 / 内部规则 / 专门优化 / 快路径 / 完整流程 / 索引」这类内部工程术语，也不解释你的能力是怎么组织的、哪几条办得更快——直接说你能帮上什么。",
     "- 不说已经跟对方说过、对方已经知道，也不给「我待会儿就去办」这种假希望。",
     "",
     "只输出一个 JSON 对象，字段固定为 reply（字符串）：",
@@ -459,8 +530,10 @@ export async function generateFeatureQaReply(
     question: string;
     /**
      * 已批准功能（`APPROVED_FEATURES`）。**两个显示名都带着**（`label` 登记名 +
-     * `labelEn` 英文显示名）；问答不再列这份清单，它在这里只作**反向守卫**
-     * （`forbiddenOpenFeatureNames`：这类回答里不该冒出功能名）。
+     * `labelEn` 英文显示名）：问「你能做什么」时按本轮语言取成一份**索引**交给模型
+     * （它自己挑相关的那几条说），其余问法下只作**纯代码守卫**（`forbiddenFeatureNames`：
+     * 问身份 / 只问到某件办不到的事时不该冒出功能名）。**清单只有功能登记这一个出处**
+     * ——这里与 Markdown 都不另抄一份。
      */
     openFeatures: readonly FeatureDisplayName[];
     /**
@@ -518,7 +591,7 @@ export async function generateFeatureQaReply(
       !reply ||
       reply.length > maxChars ||
       INTERNAL_TERMS.test(reply) ||
-      CLAIMS_ONLY_TWO_FUNCTIONS.test(reply) ||
+      CLAIMS_EXCLUSIVE_CAPABILITIES.test(reply) ||
       violations.length > 0 ||
       ungrounded.length > 0
     ) {
@@ -530,7 +603,7 @@ export async function generateFeatureQaReply(
           ? `模型输出的功能回答没有覆盖本轮该说的原文与事实：${ungrounded.join("；")}`
           : violations.length
             ? `模型输出的功能回答越界：${violations.join("；")}`
-            : CLAIMS_ONLY_TWO_FUNCTIONS.test(reply)
+            : CLAIMS_EXCLUSIVE_CAPABILITIES.test(reply)
               ? "模型输出的功能回答把两项专门优化说成了全部能力"
               : "模型输出的功能回答不可用（空 / 超长 / 内部术语）"
       );

@@ -18,9 +18,12 @@ import type { LanguageDecision, ResidentLanguage } from "./language";
  *
  * 1. **通用自我介绍 / 能力说明**：整段原文从 Markdown 取（`blocks`），本文件
  *    **不复制、不改写、不润色**，也不在代码里留一份"兜底措辞"。
- * 2. **两项已批准功能**（`features.ts` 的 `APPROVED_FEATURES` 单一登记点，调用方注入）
- *    是专门优化的快路径；但**问身份与问能力都不再列这份清单**——清单在这里只剩一个
- *    **反向守卫**用途（`forbiddenOpenFeatureNames`：这类回答里不该冒出功能名）。
+ * 2. **已批准功能**（`features.ts` 的 `APPROVED_FEATURES` 单一登记点，调用方注入）是
+ *    专门优化的快路径。问「你能做什么」时把它们作为一份**索引**（`featureIndex`）交给
+ *    模型：名称按本轮语言取、来自那次登记，**不是本文件或 Markdown 里的第二份清单**。
+ *    模型自己判断该提哪几条、提几条（条目只是**举例**，不是全部能力）；问身份 /
+ *    只问到某件办不到的事时**不带索引**（那种回答里冒出功能名就判不通过，
+ *    `forbiddenFeatureNames`）。
  * 3. **真正办不了的事只有一个来源**：老板明确登记的**黑名单**
  *    （`blacklist.ts` 的 `BLACKLISTED_CAPABILITIES`）。与问题**对不上**的条目不得被选中，
  *    也不得为它编造原因。
@@ -29,7 +32,7 @@ import type { LanguageDecision, ResidentLanguage } from "./language";
  * 兜底共用同一个结果，不会出现"事实包给了两段、兜底只回一段"）：
  *
  * - 问「你是谁 / 介绍一下你自己」→ **只** `identity.*`（不列功能、不讲办不到的事）；
- * - 问「你能做什么」→ **只** `capabilities.*`；
+ * - 问「你能做什么」→ **只** `capabilities.*`（外加那份功能索引）；
  * - 住户**明确问到**某件已登记为办不到的事 → 只给那件事的名称与登记原因；同一句里若同时
  *   问能力，才把 `capabilities.*` 一并给出。
  *
@@ -91,9 +94,17 @@ export type FeatureQaBlock = {
 };
 
 /**
+ * **索引里的一条**：本轮语言下的登记显示名 + 稳定 id（id 只用于台账与检查，不进正文）。
+ */
+export type FeatureQaIndexEntry = {
+  id: string;
+  name: string;
+};
+
+/**
  * **交给模型的那一份用户可见事实**（结构化、可打包）：本轮允许表达的整段原文 +
- * 与本次问题有关的黑名单条目。**代码里没有任何一份"备用措辞"**——原文只有 Markdown
- * 这一个出处，兜底也从同一个结果里取。
+ * 本轮可以参考的功能索引 + 与本次问题有关的黑名单条目。**代码里没有任何一份"备用措辞"**
+ * ——原文只有 Markdown 这一个出处，兜底也从同一个结果里取。
  */
 export type FeatureQaFactBundle = {
   /**
@@ -108,14 +119,25 @@ export type FeatureQaFactBundle = {
    */
   blacklisted: readonly FeatureQaBlacklistFact[];
   /**
-   * **本类回答里不得出现的功能名**（`APPROVED_FEATURES` 的显示名，按本轮语言取）。
+   * **专门优化过的快路径索引**（`APPROVED_FEATURES`，按本轮语言取好），只有住户问到
+   * 「你能做什么」时才给。它**只是举例**：模型自己挑与住户问题相关的那几条自然带出来，
+   * 提几条不限，其余日常合住的事照旧可以办（走完整流程）。
    *
-   * 老板 2026-09-22：问身份**只**读身份段、问能力**只**读能力段，**不列优化功能清单**。
-   * 事实包里不给这份清单（模型没有机会照抄），这里再留一份名字做**纯代码反向守卫**：
-   * 正文里冒出功能名就判不通过、换回只含上面 `blocks` 的兜底——否则"不列清单"只是
-   * 一句嘱咐，不是一条能验的规则。
+   * **可能为空**：问身份、只问到某件办不到的事时不给索引——那两种回答里出现功能名
+   * 就判不通过（见 `forbiddenFeatureNames`）。
    */
-  forbiddenOpenFeatureNames: readonly string[];
+  featureIndex: readonly FeatureQaIndexEntry[];
+  /**
+   * **本类回答里不得出现的功能名**（同样是 `APPROVED_FEATURES` 的登记名，按规则取）：
+   *
+   * - 问了能力（`featureIndex` 非空）→ 只禁**另一种语言**的登记名：本语言的名字是索引、
+   *   允许出现，另一种语言的冒出来就是语言串了（英文轮次里夹中文名）；
+   * - 没问能力（问身份 / 只问到某件办不到的事）→ **两种语言的登记名都禁**：这一轮本就
+   *   不该提具体功能。
+   *
+   * 它是**纯代码守卫**，让上面那条"什么时候能提功能"成为一条能验的规则，而不是一句嘱咐。
+   */
+  forbiddenFeatureNames: readonly string[];
 };
 
 /**
@@ -231,16 +253,29 @@ export function buildFeatureQaFacts(args: {
     args.question,
     args.referencedBlacklistedId
   ).map((c) => blacklistFact(c, language));
+  const blocks = selectFeatureQaBlocks({
+    selfIntro: args.selfIntro === true,
+    wantsCapabilities: args.wantsCapabilities === true,
+    hasBlacklisted: blacklisted.length > 0,
+    language,
+  });
+  // 索引与能力段**同进同出**：选段函数说了这一轮要读 `capabilities.*`，才把这份索引
+  // 交给模型（问身份 / 只问到某件办不到的事时都不给），避免"两处各判一次"再次跑偏。
+  const asksCapabilities = blocks.some((b) => b.kind === "capabilities");
+  const other: ResidentLanguage = language === "en" ? "zh" : "en";
   return {
-    blocks: selectFeatureQaBlocks({
-      selfIntro: args.selfIntro === true,
-      wantsCapabilities: args.wantsCapabilities === true,
-      hasBlacklisted: blacklisted.length > 0,
-      language,
-    }),
+    blocks,
     blacklisted,
-    forbiddenOpenFeatureNames: args.openFeatures.map((f) =>
-      featureDisplayName(f, language)
-    ),
+    featureIndex: asksCapabilities
+      ? args.openFeatures.map((f) => ({
+          id: f.id,
+          name: featureDisplayName(f, language),
+        }))
+      : [],
+    forbiddenFeatureNames: asksCapabilities
+      ? // 问了能力：本语言的登记名是索引（允许出现），只禁另一种语言的名字。
+        args.openFeatures.map((f) => featureDisplayName(f, other))
+      : // 没问能力：这一轮不该提具体功能，两种语言的登记名都禁。
+        args.openFeatures.flatMap((f) => [f.label, f.labelEn]),
   };
 }
