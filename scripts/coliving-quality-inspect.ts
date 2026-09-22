@@ -2,9 +2,20 @@
  * No database imports, no send path. Run with NODE_OPTIONS=--conditions=react-server.
  */
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { config } from "dotenv";
+// 评测报告页面的渲染器只有一处：这条闸直接 import 它来验"产出成对"，
+// 顺带证明导入这个模块不会执行它的 CLI（见下面那条 check）。
+import { reportHtmlPathFor, writeReportHtml } from "./coliving-report";
 import { assembleSystemPrompt } from "../lib/ai/brains";
 import {
   finalizeJudgment,
@@ -129,18 +140,23 @@ import {
   isFeatureQaQuestion,
   runFeatureQa,
 } from "../lib/chat/coliving/feature-qa";
-// 用户可见功能事实源（运行时读取的单点数据文件）：专门优化的开放功能 + 与问题有关的黑名单条目
-// + 住户问起自己时的身份事实（镜像 doctrine 的「AI 协调员」那段）。
+// 用户可见功能事实源（运行时读取的单点数据文件）：专门优化的开放功能（只作反向守卫）
+// + 与问题有关的黑名单条目。
 import {
-  COORDINATOR_ROLE_ANCHORS,
-  COORDINATOR_ROLE_NOTE,
-  COORDINATOR_ROLE_NOTE_EN,
-  FULL_FLOW_NOTE,
   buildFeatureQaFacts,
   featureDisplayName,
   selectBlacklistedCapabilities,
   type FeatureDisplayName,
 } from "../lib/chat/coliving/feature-facts";
+// 住户会读到的自我介绍 / 能力说明的**唯一出处**（纯 Markdown，代码不改写一个字）：
+// 这里读的是文件本身，用来核对兜底正文逐字等于那四段。
+import {
+  COORDINATOR_COPY_HEADINGS,
+  COORDINATOR_COPY_RELATIVE_PATH,
+  COORDINATOR_IDENTITY_ANCHORS,
+  coordinatorCopyPath,
+  coordinatorCopyText,
+} from "../lib/chat/coliving/coordinator-copy";
 // 显式黑名单事实源（当前一项：单方面叫别人在洗完澡后清理地漏头发）：复用那一次功能路由的
 // `blocked:<id>` token，不按关键词阻断；纯代码解析 + 条目自己的 qualifier 资格复核，
 // 是「这件事办不了」的唯一起源。
@@ -3584,8 +3600,63 @@ async function main() {
   const OPEN_FEATURES: readonly FeatureDisplayName[] = APPROVED_FEATURES;
   const openLabels = OPEN_FEATURES.map((f) => f.label);
   const openLabelsEn = OPEN_FEATURES.map((f) => f.labelEn);
-  const listOpen = `我目前对${openLabels.join("、")}有专门优化，处理起来更快、更省；${FULL_FLOW_NOTE}。`;
+  // 住户会读到的四段原文——**从内容文件现取**，本脚本不复制它们的内容（改文案只改 Markdown）。
+  const IDENTITY_ZH = coordinatorCopyText("identity", "zh");
+  const IDENTITY_EN = coordinatorCopyText("identity", "en");
+  const CAPABILITIES_ZH = coordinatorCopyText("capabilities", "zh");
+  const CAPABILITIES_EN = coordinatorCopyText("capabilities", "en");
   const combinedQuestion = "请问为什么连这么简单的功能都没有?那你有什么功能？";
+
+  check(
+    "自我介绍 / 能力说明的唯一出处是 doctrine 树里的纯 Markdown（TypeScript 里不再有副本）",
+    () => {
+      // ① 位置必须在 doctrine 资产树下：`next.config.ts` 的 output tracing 正是按
+      //    `lib/ai/brains/**/doctrine/**/*.md` 配的，所以**不需要**新增追踪配置。
+      assert(
+        COORDINATOR_COPY_RELATIVE_PATH.startsWith("lib/ai/brains/coliving/doctrine/") &&
+          COORDINATOR_COPY_RELATIVE_PATH.endsWith(".md"),
+        "内容文件必须落在 doctrine 树内（部署追踪按那棵树配，不必新增配置）"
+      );
+      assert(
+        coordinatorCopyPath() ===
+          path.join(
+            process.cwd(),
+            "lib/ai/brains/coliving/doctrine/content/coordinator-self-description.md"
+          ),
+        "内容文件按仓库根解析（与 doctrine 读取同一套约定）"
+      );
+      const raw = readFileSync(coordinatorCopyPath(), "utf8");
+      // ② 普通散文：没有 frontmatter，也没有 JSON / YAML 结构。
+      assert(!/^---\s*$/m.test(raw), "内容文件不得有 frontmatter");
+      assert(!/[{}]/.test(raw), "内容文件不得是 JSON / YAML（普通散文即可）");
+      // ③ 四个标题各出现一次：改名 / 少一段都会被解析器与这条检查一起抓住。
+      for (const heading of COORDINATOR_COPY_HEADINGS) {
+        const occurrences = raw.split(`## ${heading}`).length - 1;
+        assert.equal(occurrences, 1, `标题「${heading}」必须恰好出现一次（实际 ${occurrences}）`);
+      }
+      // ④ 四段都非空，且程序取到的就是文件里那串字（取用不改写一个字）。
+      for (const heading of COORDINATOR_COPY_HEADINGS) {
+        const [kind, language] = heading.split(".") as [
+          "identity" | "capabilities",
+          "zh" | "en",
+        ];
+        const text = coordinatorCopyText(kind, language);
+        assert(text.trim().length > 0, `「${heading}」不得为空`);
+        assert(raw.includes(text), `「${heading}」必须逐字取自内容文件`);
+      }
+      // ⑤ 那几段通用话在 TypeScript 里**没有副本**：否则又变成两个出处，改一处另一处还是旧的。
+      for (const file of [
+        "lib/chat/coliving/feature-facts.ts",
+        "lib/chat/coliving/feature-qa.ts",
+        "lib/chat/coliving/turn.ts",
+      ]) {
+        const src = readFileSync(file, "utf8");
+        for (const text of [IDENTITY_ZH, IDENTITY_EN, CAPABILITIES_ZH, CAPABILITIES_EN]) {
+          assert(!src.includes(text), `${file} 不得再复制住户可见文案：${text}`);
+        }
+      }
+    }
+  );
 
   check(
     "统一功能事实源：地漏头发交办是唯一「办不了」条目，开放功能来自 APPROVED_FEATURES",
@@ -3709,27 +3780,21 @@ async function main() {
         question: combinedQuestion,
       });
       assert.equal(bundle.blacklisted.length, 0, "问能力清单时不带任何「办不了」条目");
-      assert.equal(
-        bundle.openFeatures.length,
-        APPROVED_FEATURES.length,
-        "开放功能必须来自 APPROVED_FEATURES 清单"
+      // 功能名只剩反向守卫用途：清单本身不再交给模型（老板 2026-09-22 不列清单）。
+      assert.deepEqual(
+        [...bundle.forbiddenOpenFeatureNames],
+        [...openLabels],
+        "中文轮次的反向守卫就是 APPROVED_FEATURES 的登记名"
       );
-      assert(
-        bundle.generic.fullFlow.length > 0 && bundle.generic.fastPath.length > 0,
-        "通用说明必须是事实源数据"
-      );
-      assert(
-        !/办不了|没法|不能做/.test(bundle.generic.fullFlow) &&
-          bundle.generic.fullFlow.includes("不是做不到"),
-        "通用说明必须说明清单外走完整协调流程、不是做不到"
-      );
-      // 兜底同样只含事实源事实：问能力清单时绝不编造「办不了」，要列全专门优化功能。
+      // 问能力只读内容文件的能力段，原文一字不改。
+      assert.equal(bundle.blocks.length, 1, "问能力只读一段");
+      assert.equal(bundle.blocks[0].kind, "capabilities", "问能力读的是能力段");
+      assert.equal(bundle.blocks[0].text, CAPABILITIES_ZH, "能力段原文逐字来自内容文件");
+      // 兜底同样只含内容文件原文：问能力时绝不编造「办不了」，也不列功能清单。
       const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
-      assert(
-        !/办不了|没法|不能做/.test(fb) && fb.includes("不是做不到"),
-        "问能力清单的兜底不得编造办不了，且要如实说明会走完整流程"
-      );
-      assert(openLabels.every((l) => fb.includes(l)), "问能力清单时兜底必须列全专门优化功能");
+      assert.equal(fb, CAPABILITIES_ZH, "问能力的兜底就是内容文件的能力段原文");
+      assert(!/办不了|没法|不能做/.test(fb), "问能力的兜底不得编造办不了");
+      assert(!openLabels.some((l) => fb.includes(l)), "问能力不列功能清单");
     }
   );
 
@@ -3748,7 +3813,7 @@ async function main() {
   });
 
   await checkAsync("功能问答：直接问能力也进；无关消息一次模型都不调", async () => {
-    const grounded = listOpen;
+    const grounded = CAPABILITIES_ZH;
     const { llm } = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
     const qa = await runFeatureQa({
       text: "那你有什么功能？",
@@ -3756,7 +3821,7 @@ async function main() {
       llm,
     });
     assert(qa, "直接问能力必须进功能问答（通用入口）");
-    assert.equal(qa!.reply, grounded, "列全专门优化功能并说明完整流程的正文原样接受");
+    assert.equal(qa!.reply, grounded, "说清能做什么的原文（内容文件那一段）原样接受");
     assert(!("error" in qa!));
 
     const { llm: unusedLlm, calls } = mockLlm({});
@@ -3769,33 +3834,34 @@ async function main() {
     assert.equal(calls.length, 0, "无关消息一个模型调用都不花");
   });
 
-  await checkAsync("功能问答 grounding：漏列专门优化功能 / 自创处置方案 / 超长一律回落兜底", async () => {
+  await checkAsync("功能问答 grounding：漏说原文 / 列出功能名 / 自创处置方案 / 超长一律回落兜底", async () => {
     const fb = featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES });
-    const grounded = listOpen;
-    const missingOne = `我目前对${openLabels[0]}有专门优化，处理起来更快、更省。`;
+    const grounded = CAPABILITIES_ZH;
+    const missedBlock = "我可以帮大家协调合住的事。";
+    const leakedName = `${grounded}${openLabels[0]}`;
     const inventedPlan = `${grounded}我这就去跟阿川说。`;
     const bundle = buildFeatureQaFacts({
       openFeatures: OPEN_FEATURES,
       question: combinedQuestion,
     });
 
-    // 直接检验通用校验函数本身：问能力清单时漏列开放功能必须报缺。
-    assert.deepEqual(
-      findUngroundedFeatureQaFacts(grounded, bundle, { requireOpenLabels: true }),
-      []
+    // 直接检验通用校验函数本身：没说原文 / 列出功能名都必须报缺。
+    assert.deepEqual(findUngroundedFeatureQaFacts(grounded, bundle), []);
+    assert.equal(
+      findUngroundedFeatureQaFacts(missedBlock, bundle).length,
+      1,
+      "没原样说出该说的那段原文必须报缺"
     );
     assert.equal(
-      findUngroundedFeatureQaFacts(missingOne, bundle, { requireOpenLabels: true }).length,
-      1
-    );
-    assert.deepEqual(
-      findUngroundedFeatureQaFacts(grounded, bundle, { requireOpenLabels: false }),
-      []
+      findUngroundedFeatureQaFacts(leakedName, bundle).length,
+      1,
+      "列出具体功能名必须报缺"
     );
 
-    // grounding：漏列 / 自创处置方案都回落，并把原因带出来。
+    // grounding：漏说原文 / 列出功能名 / 自创处置方案都回落，并把原因带出来。
     for (const [label, reply] of [
-      ["漏列专门优化功能", missingOne],
+      ["漏说原文", missedBlock],
+      ["列出功能名", leakedName],
       ["自创处置方案", inventedPlan],
     ] as Array<[string, string]>) {
       const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
@@ -3808,14 +3874,14 @@ async function main() {
       assert(qa!.error, `${label} 回落时要把原因带出来`);
     }
 
-    // 覆盖齐全的自然改写照样接受。
+    // 说了原文、也没多列的正文照样接受。
     const ok = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: grounded }) });
     const okQa = await runFeatureQa({
       text: combinedQuestion,
       openFeatures: OPEN_FEATURES,
       llm: ok.llm,
     });
-    assert.equal(okQa!.reply, grounded, "列全专门优化功能并说明完整流程的正文要接受");
+    assert.equal(okQa!.reply, grounded, "内容文件的能力段原文要接受");
     assert(!("error" in okQa!));
 
     // 超长正文也回落（结构校验仍在）。
@@ -3847,7 +3913,7 @@ async function main() {
       );
 
       // 有引用（本人上一轮刚被拒、紧接追问）：事实源补上那一条，兜底必须说出名称 +
-      // 登记原因 + 全部专门优化功能——**不靠旧主题关键词**，靠的是结构化引用。
+      // 登记原因，**并且**说清能做什么——**不靠旧主题关键词**，靠的是结构化引用。
       const refBundle = buildFeatureQaFacts({
         openFeatures: OPEN_FEATURES,
         question,
@@ -3867,7 +3933,11 @@ async function main() {
       for (const a of drainHair.validation.reasonAnchors) {
         assert(refFb.includes(a), `紧接追问的兜底必须保留登记原因锚点：${a}`);
       }
-      assert(openLabels.every((l) => refFb.includes(l)), "紧接追问仍要列全专门优化功能");
+      assert(
+        refFb.includes(CAPABILITIES_ZH),
+        "紧接追问仍要说清能做什么（内容文件的能力段）"
+      );
+      assert(!openLabels.some((l) => refFb.includes(l)), "紧接追问同样不列功能清单");
       assert.deepEqual(findGroundingViolations(refFb), [], "含事实的兜底必须过 grounding 闸");
 
       // 模型正文覆盖事实才接受；漏掉被拒条目 / 原因 → 换回同样只含事实的兜底。
@@ -3878,10 +3948,10 @@ async function main() {
         referencedBlacklistedId: drainHair.id,
         llm: ok.llm,
       });
-      assert.equal(okQa!.reply, refFb, "覆盖被拒条目 + 开放功能的正文要接受");
+      assert.equal(okQa!.reply, refFb, "覆盖被拒条目 + 能做什么的正文要接受");
       assert(!("error" in okQa!));
 
-      const dropped = listOpen; // 只列开放功能、漏掉「刚才被拒」的条目与原因
+      const dropped = CAPABILITIES_ZH; // 只说能做什么、漏掉「刚才被拒」的条目与原因
       const bad = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: dropped }) });
       const badQa = await runFeatureQa({
         text: question,
@@ -3893,14 +3963,18 @@ async function main() {
       assert(badQa!.error, "回落时要把原因带出来");
 
       // 无引用时同样的正文就是合规的（不该被要求补一条并不存在的「刚才」）。
-      const noRefOk = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: listOpen }) });
+      const noRefOk = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: CAPABILITIES_ZH }) });
       const noRefOkQa = await runFeatureQa({
         text: question,
         openFeatures: OPEN_FEATURES,
         referencedBlacklistedId: null,
         llm: noRefOk.llm,
       });
-      assert.equal(noRefOkQa!.reply, listOpen, "没有引用时不要求补被拒条目，列全功能即可");
+      assert.equal(
+        noRefOkQa!.reply,
+        CAPABILITIES_ZH,
+        "没有引用时不要求补被拒条目，说清能做什么即可"
+      );
     }
   );
 
@@ -3908,7 +3982,7 @@ async function main() {
    * ── 住户问起「你是谁 / 你怎么工作」时的自称问答（2026-09-20 扩展） ──
    *
    * 走的是**同一条**功能问答路径：零工具、零第三方出站、不装旧 doctrine，只多拿一条
-   * 身份事实（`COORDINATOR_ROLE_NOTE`，镜像 doctrine 的「AI 协调员」那段）。
+   * 身份段（内容 Markdown 的 `identity.*`，与 doctrine 的「AI 协调员」同一口径）。
    * 这里盯三件事：①认出「问自己」且**不吞掉普通交办**；②回答用住户那一轮的语言；
    * ③不泄露内部（模型 / 数据库 / 工具）也不把两项专门优化说成全部能力。
    */
@@ -3926,7 +4000,6 @@ async function main() {
       "介绍一下你自己",
       "你平时怎么工作的",
       "Who are you?",
-      "Hi, what can you do?",
       "What’s this number?",
       "Are you a bot?",
       "how do you work",
@@ -3954,97 +4027,107 @@ async function main() {
       assert.equal(asksAboutSelf(q), false, `不得把普通交办 / 闲聊认成问我自己：${q}`);
       assert.equal(isFeatureQaQuestion(q), false, `不得进功能问答：${q}`);
     }
-    // 只是「问我自己的身份/能力」这一栏认不出，其余口径不归这条扩展管（「你会做什么菜」
-    // 命中的是既有的问能力句式，与本次扩展无关，这里不为它立新规）。
+    // **纯问能力是另一种问法，不是问你自己**（老板 2026-09-22 契约）：整句合规也认，
+    // 但它只读能力段。从前 `Hi, what can you do?` 被算成"问我自己"，于是住户问一句能力，
+    // 收到的是身份段 + 能力段两段——这一栏现在就钉住"只读能力段"。
+    for (const q of ["你能做什么", "你有什么功能？", "Hi, what can you do?", "what can you do"]) {
+      assert.equal(asksAboutSelf(q), false, `纯问能力不得算成问你自己：${q}`);
+      assert.equal(asksWhatIsAvailable(q), true, `必须认成问能力：${q}`);
+      assert.equal(isFeatureQaQuestion(q), true, `仍要进功能问答：${q}`);
+      const decision = decideLanguage(q);
+      const fb = featureQaFallback({ question: q, openFeatures: OPEN_FEATURES, language: decision });
+      assert.equal(
+        fb,
+        decision.language === "en" ? CAPABILITIES_EN : CAPABILITIES_ZH,
+        `问能力只读能力段原文：${q}`
+      );
+      assert(
+        !fb.includes(decision.language === "en" ? IDENTITY_EN : IDENTITY_ZH),
+        `问能力不得夹身份段：${q}`
+      );
+    }
+    // 「你会做什么菜」是**带具体主题**的问法：与上面那几句的区别是整句不再只是在问能力，
+    // 所以不算问你自己（它是问能力句式命中的，口径与本次改动无关，不为它立新规）。
     assert.equal(asksAboutSelf("你会做什么菜"), false, "有具体主题的「会做什么」不是问我自己");
   });
 
-  check("自称问答：身份事实镜像 doctrine，且住户可见内容不掺内部架构", () => {
+  check("自称问答：身份段与 doctrine 的角色名一致，住户可见内容不掺内部架构", () => {
     // 角色名必须与权威来源一致（doctrine/always/identity.md 的「AI 协调员」「不自称管理员」）。
+    // 这份 doctrine 是权威来源，本次改动**没有**碰它；身份段只是与它口径一致的一段文案。
     const identity = readFileSync(
       "lib/ai/brains/coliving/doctrine/always/identity.md",
       "utf8"
     );
     assert(
       identity.includes("AI 协调员") && identity.includes("不是「管理员」"),
-      "doctrine 身份段仍是「AI 协调员 / 不是管理员」——事实源镜像的就是它"
+      "doctrine 身份段仍是「AI 协调员 / 不是管理员」——身份文案与它同一口径"
     );
-    assert(
-      COORDINATOR_ROLE_NOTE.includes("AI 协调员") &&
-        COORDINATOR_ROLE_NOTE.includes("管理员"),
-      "身份事实必须说清角色名与「不是管理员」"
-    );
-    // 住户可见的那句里不得出现内部架构 / 工具 / 模型 / 数据库。
-    for (const note of [COORDINATOR_ROLE_NOTE, COORDINATOR_ROLE_NOTE_EN]) {
+    assert(IDENTITY_ZH.includes("AI 协调员"), "中文身份段必须说清角色名");
+    assert(/AI coordinator/i.test(IDENTITY_EN), "英文身份段必须说清角色名");
+    // 住户可见的那几段里不得出现内部架构 / 工具 / 模型 / 数据库。
+    for (const text of [IDENTITY_ZH, IDENTITY_EN, CAPABILITIES_ZH, CAPABILITIES_EN]) {
       assert(
         !/模型|数据库|工具|接口|API|架构|系统提示|提示词|白名单|路由|database|\bmodel\b|\btools?\b|\bapi\b|\barchitecture\b/i.test(
-          note
+          text
         ),
-        "身份事实不得暴露内部架构 / 工具 / 模型 / 数据库"
+        "住户可见文案不得暴露内部架构 / 工具 / 模型 / 数据库"
       );
     }
     // 锚点来自 doctrine 的硬规则：「AI」两字不能省。
-    assert.deepEqual([...COORDINATOR_ROLE_ANCHORS], ["AI"], "报身份的锚点就是「AI」不能省");
+    assert.deepEqual([...COORDINATOR_IDENTITY_ANCHORS], ["AI"], "报身份的锚点就是「AI」不能省");
   });
 
-  check("自称问答：中文问句给身份事实 + 列全专门优化，且不背这段给别的问法", () => {
+  check("自称问答：中文问句只读内容文件的中文身份段，别的问法不背这一段", () => {
     const selfBundle = buildFeatureQaFacts({
       openFeatures: OPEN_FEATURES,
       question: "你是谁？",
       selfIntro: true,
     });
-    assert(
-      selfBundle.selfIntro?.note === COORDINATOR_ROLE_NOTE,
-      "问起我自己时事实源才给身份事实"
-    );
-    assert.deepEqual([...selfBundle.selfIntro!.anchors], ["AI"]);
+    assert.equal(selfBundle.blocks.length, 1, "问身份只读一段");
+    assert.equal(selfBundle.blocks[0].kind, "identity", "读的是身份段");
+    assert.equal(selfBundle.blocks[0].text, IDENTITY_ZH, "原文逐字来自内容文件的 identity.zh");
     // 别的问法不背这段（省 token，也不跑题）。
     const boundaryBundle = buildFeatureQaFacts({
       openFeatures: OPEN_FEATURES,
       question: combinedQuestion,
     });
-    assert.equal(boundaryBundle.selfIntro, null, "功能边界问句不带身份事实");
-    assert.equal(
-      buildFeatureQaFacts({ openFeatures: OPEN_FEATURES, question: "为什么不能让他清理地漏的头发？" })
-        .selfIntro,
-      null,
-      "黑名单主题问句不带身份事实"
+    assert(
+      !boundaryBundle.blocks.some((b) => b.kind === "identity"),
+      "功能边界问句不带身份段"
+    );
+    assert(
+      !buildFeatureQaFacts({ openFeatures: OPEN_FEATURES, question: "为什么不能让他清理地漏的头发？" })
+        .blocks.some((b) => b.kind === "identity"),
+      "黑名单主题问句不带身份段"
     );
 
-    // 兜底：问起自己时先说身份、再列全专门优化功能，且过 grounding 闸。
+    // 兜底：问起自己时说的就是那段原文——不列功能、不讲办不到的事，且过 grounding 闸。
     const fb = featureQaFallback({ question: "你是谁？", openFeatures: OPEN_FEATURES });
-    assert(fb.includes(COORDINATOR_ROLE_NOTE), "自称兜底必须含身份事实");
-    assert(openLabels.every((l) => fb.includes(l)), "自称兜底仍要列全专门优化功能");
-    assert(fb.includes("不是做不到"), "自称兜底仍要说明清单外走完整流程");
-    assert.deepEqual(findGroundingViolations(fb), [], "自称兜底必须过 grounding 闸");
-    // 漏说身份（少了「AI」）或漏列功能，都要被 grounding 抓出来。
-    assert.deepEqual(
-      findUngroundedFeatureQaFacts(fb, selfBundle, { requireOpenLabels: true }),
-      []
-    );
-    const noRole = `我是这套房子的协调员。${listOpen}`;
+    assert.equal(fb, IDENTITY_ZH, "自称兜底逐字等于内容文件的身份段");
+    assert(!openLabels.some((l) => fb.includes(l)), "自称兜底不列功能清单");
     assert(
-      findUngroundedFeatureQaFacts(noRole, selfBundle, { requireOpenLabels: true }).some((m) =>
-        m.includes("身份")
-      ),
+      !/办不了|没法|不能做|不是做不到/.test(fb),
+      "问身份不顺带讲办不到的事，也不背完整流程那段"
+    );
+    assert.deepEqual(findGroundingViolations(fb), [], "自称兜底必须过 grounding 闸");
+    // 漏说身份（少了「AI」）要被 grounding 抓出来。
+    assert.deepEqual(findUngroundedFeatureQaFacts(fb, selfBundle), []);
+    const noRole = "我是这套房子的协调员，帮住在这里的人沟通日常合住的事。";
+    assert(
+      findUngroundedFeatureQaFacts(noRole, selfBundle).some((m) => m.includes("身份")),
       "不说「AI」= 没披露身份，必须报缺"
     );
   });
 
   await checkAsync("自称问答：英文问句用英文回答，中文问句口径不变", async () => {
     const enQuestion = "Who are you?";
-    // 英文正文：说身份（含 AI）+ 两个**英文显示名** + 完整流程那条 —— 长度按英文上限放宽后要能过。
-    const enReply =
-      "I'm the AI coordinator for this house — not a person, not the landlord. I handle " +
-      `${openLabelsEn.join(" and ")}, which run faster and cheaper; anything else that needs ` +
-      "coordinating goes through the full coordination flow, so it's not that I can't do it.";
-    assert(
-      !containsHan(enReply),
-      "英文自称正文里不得出现任何汉字（功能名取英文显示名）"
-    );
+    // 英文正文：内容文件那两段英文原文 + 一句最简短的英文收尾 —— 长度落在「中文上限之外、
+    // 英文上限之内」，用来证明上限是按语言取的（英文上限本来就该比中文宽）。
+    const enReply = `${IDENTITY_EN} ${CAPABILITIES_EN} If anything comes up around the house, just let me know.`;
+    assert(!containsHan(enReply), "英文自称正文里不得出现任何汉字");
     assert(
       enReply.length > FEATURE_QA_MAX_CHARS && enReply.length <= FEATURE_QA_MAX_CHARS_EN,
-      "这条英文正文正好落在「中文上限之外、英文上限之内」，用来证明上限是按语言取的"
+      `这条英文正文要落在「中文上限之外、英文上限之内」（实际 ${enReply.length}），用来证明上限是按语言取的`
     );
     assert.equal(featureQaMaxChars(enQuestion), FEATURE_QA_MAX_CHARS_EN);
     assert.equal(featureQaMaxChars("你是谁？"), FEATURE_QA_MAX_CHARS, "中文上限一字不动");
@@ -4056,58 +4139,50 @@ async function main() {
       llm: en.llm,
     });
     assert(enQa, "英文自称问句必须进功能问答");
-    assert.equal(enQa!.reply, enReply, "含身份 + 全英文功能名 + 完整流程的英文正文要原样接受");
+    assert.equal(enQa!.reply, enReply, "含英文原文的正文要原样接受");
     assert(!("error" in enQa!), "英文正文不得因为中文口径的长度上限被误换兜底");
     assert.equal(en.calls.length, 1, "自称问答只花一次模型调用");
     assert.equal(en.calls[0].name, FEATURE_QA_NAME);
-    // 交给模型的事实清单里也必须是英文显示名：不给中文名让它自己译。
-    assert(
-      openLabelsEn.every((l) => en.calls[0].system.includes(l)) &&
-        !openLabels.some((l) => en.calls[0].system.includes(l)),
-      "英文轮次的事实包只给英文显示名"
-    );
-    // 英文兜底也是英文（一个汉字都没有），且同样含身份与两个功能名。
+    // 交给模型的事实里不再有功能名（问身份不列清单，中文名更不该出现）。
+    for (const l of [...openLabelsEn, ...openLabels]) {
+      assert(!en.calls[0].system.includes(l), `英文轮次不得把功能名交给模型：${l}`);
+    }
+    // 英文兜底也是英文（一个汉字都没有），说的就是文件里的英文身份段。
     const enFb = featureQaFallback({
       question: enQuestion,
       openFeatures: OPEN_FEATURES,
       language: decideLanguage(enQuestion),
     });
-    assert(
-      enFb.includes(COORDINATOR_ROLE_NOTE_EN) && enFb.includes("AI coordinator"),
-      "英文自称兜底必须是英文身份事实"
-    );
+    assert.equal(enFb, IDENTITY_EN, "英文自称兜底逐字等于内容文件的 identity.en");
     assert(!containsHan(enFb), "英文自称兜底里一个汉字都不许有");
     assert(
-      openLabelsEn.every((l) => enFb.includes(l)) &&
-        !openLabels.some((l) => enFb.includes(l)) &&
-        !/办不了|没法|不是做不到/.test(enFb),
-      "英文兜底要用英文显示名列全专门优化功能，且不得编造办不了"
+      !openLabelsEn.some((l) => enFb.includes(l)) && !/办不了|没法|不是做不到/.test(enFb),
+      "英文兜底不列功能清单，也不得编造办不了"
     );
-    // 中文问句走中文兜底（口径与扩展前一字不差）。
+    // 中文问句走中文兜底。
     assert(
-      featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES }) === listOpen,
-      "问能力的中文兜底文案不变"
+      featureQaFallback({ question: combinedQuestion, openFeatures: OPEN_FEATURES }) ===
+        CAPABILITIES_ZH,
+      "问能力的中文兜底就是内容文件的能力段"
     );
     // 语言判定复用 language.ts：混了中文的英文问句仍按中文处理。
     assert.equal(featureQaMaxChars("提醒 Alex 晚上别用烘干机"), FEATURE_QA_MAX_CHARS);
   });
 
-  await checkAsync("自称问答：泄露内部 / 说成「只有两项」/ 自创方案一律回落兜底", async () => {
+  await checkAsync("自称问答：泄露内部 / 列出功能 / 说成「只有两项」/ 自创方案一律回落兜底", async () => {
     const fb = featureQaFallback({ question: "你是谁？", openFeatures: OPEN_FEATURES });
-    const good =
-      "我是这套房子的 AI 协调员，不是真人也不是管理员。我目前对" +
-      `${openLabels.join("、")}有专门优化，处理起来更快、更省；其它需要协调同住人的请求，` +
-      "会走完整的协调流程来处理，不是做不到。";
+    const good = IDENTITY_ZH;
     const okRun = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply: good }) });
     const okQa = await runFeatureQa({ text: "你是谁？", openFeatures: OPEN_FEATURES, llm: okRun.llm });
-    assert.equal(okQa!.reply, good, "说清身份 + 列全功能的中文正文要接受");
+    assert.equal(okQa!.reply, good, "内容文件的身份段原文要接受");
     assert(!("error" in okQa!));
 
-    // 三类必须回落：暴露内部实现 / 把两项说成全部能力 / 承诺去联系。逐条都要报出原因。
+    // 四类必须回落：暴露内部实现 / 列出功能 / 把两项说成全部能力 / 承诺去联系。逐条报原因。
     for (const [label, reply] of [
-      ["暴露内部实现", "我是这套房子的 AI 协调员，背后是一个大模型加数据库和一堆工具。"],
-      ["说成只有两项功能", `我是这套房子的 AI 协调员，只有这两项功能：${openLabels.join("、")}。`],
-      ["承诺去联系", `我是这套房子的 AI 协调员。我目前对${openLabels.join("、")}有专门优化；` + "我这就去跟阿川说。"],
+      ["暴露内部实现", "我是这套房的 AI 协调员，背后是一个大模型加数据库和一堆工具。"],
+      ["列出功能清单", `${IDENTITY_ZH}我还能${openLabels.join("、")}。`],
+      ["说成只有两项功能", `${IDENTITY_ZH}只有这两项功能：${openLabels.join("、")}。`],
+      ["承诺去联系", `${IDENTITY_ZH}我这就去跟阿川说。`],
     ] as Array<[string, string]>) {
       const m = mockLlm({ [FEATURE_QA_NAME]: JSON.stringify({ reply }) });
       const qa = await runFeatureQa({ text: "你是谁？", openFeatures: OPEN_FEATURES, llm: m.llm });
@@ -4119,9 +4194,7 @@ async function main() {
 
   await checkAsync("自称问答：不调工具、不产生任何第三方出站（与既有口径同一条）", async () => {
     const { llm, calls } = mockLlm({
-      [FEATURE_QA_NAME]: JSON.stringify({
-        reply: `我是这套房子的 AI 协调员。我目前对${openLabels.join("、")}有专门优化，处理起来更快、更省；其它需要协调同住人的请求，会走完整的协调流程来处理，不是做不到。`,
-      }),
+      [FEATURE_QA_NAME]: JSON.stringify({ reply: IDENTITY_ZH }),
     });
     const qa = await runFeatureQa({ text: "你是谁？", openFeatures: OPEN_FEATURES, llm });
     assert(qa, "自称问句要进功能问答");
@@ -8987,6 +9060,99 @@ async function main() {
         reportSrc.includes("turnLedger: t.turnLedger,"),
       "HTML 报告必须把提示词组成 / 收据 / 本轮账并进 Context Engineering 面板"
     );
+  });
+
+  /**
+   * ── 评测产出成对：`.json` 旁边自动有一份同名 `.html` ────────────────────
+   *
+   * 渲染器**只有一处**（`scripts/coliving-report.ts` 的 `writeReportHtml`）。
+   * 这条检查钉住两件在真实跑批里才会暴露的事：
+   *  1. **导入不等于执行**：`coliving-eval` 是 `import` 这个模块来复用渲染器的，
+   *     若 CLI 的 `main()` 在导入时无条件执行，跑批会中途被报告脚本抢走
+   *     （读 `--report`、写文件、甚至 `process.exit`）。本闸自身就是活证据
+   *     （它导入了这个模块还跑到了这里），这里再把守卫写成可读的断言；
+   *  2. **真的成对落盘**：用真实的写出函数产出一对同名产物，并确认页面是
+   *     自包含的（双击就能看，没有外链脚本）。
+   *
+   * 不跑模型、不连数据库、不发送；只在系统临时目录里写两个小文件。
+   */
+  check("评测报告成对产出：共用同一渲染器，导入不执行 CLI，落盘同名 .html", () => {
+    const reportSrc = readFileSync("scripts/coliving-report.ts", "utf8");
+    const evalSrc = readFileSync("scripts/coliving-eval.ts", "utf8");
+
+    // ① 渲染器只有一处：报告脚本导出它，评测脚本 import 它（不 shell 出去、不复制）。
+    assert(
+      /export function writeReportHtml\(/.test(reportSrc) &&
+        reportSrc.includes("renderReportHtml(results, sourcePath)"),
+      "报告脚本必须导出唯一的写出函数 writeReportHtml"
+    );
+    assert(
+      /import \{[^}]*writeReportHtml[^}]*\} from "\.\/coliving-report"/.test(evalSrc),
+      "评测脚本必须 import 同一个渲染器，而不是另写一份 / 起子进程"
+    );
+    assert(
+      !/child_process|execSync|spawnSync/.test(evalSrc),
+      "评测脚本不得 shell 出去跑报告命令"
+    );
+    // ② CLI 必须留在直接执行的守卫后面——否则导入方一进来就被抢走。
+    assert(
+      /if \(isDirectRun\(\)\) \{\s*try \{\s*main\(\);/.test(reportSrc),
+      "报告脚本的 CLI 必须只在直接执行时运行（import 不得触发 main）"
+    );
+    // ③ 同名规则只有一处：评测那边也必须用它取名，不许自己再拼一遍。
+    assert(
+      /export function reportHtmlPathFor\(/.test(reportSrc) &&
+        evalSrc.includes("reportHtmlPathFor(reportPath)") &&
+        evalSrc.includes('const reportPath = path.join(reportDir, `${stamp}.json`)'),
+      "评测产出必须由同一个 stamp 出 .json、并用报告脚本的同名规则取名 .html"
+    );
+    assert(
+      evalSrc.includes("writeReportHtml(htmlPath, results, reportPath)") &&
+        evalSrc.indexOf("报告网页已写入") < evalSrc.indexOf("报告数据已写入"),
+      "写完 JSON 后必须紧接着用同一份 results 写 HTML，且终端先打印网页路径"
+    );
+
+    // ④ 真的写一对出来（用真实写出函数，走真实的报告结构）。
+    const tmp = mkdtempSync(path.join(tmpdir(), "coliving-pair-"));
+    try {
+      const jsonPath = path.join(tmp, "2026-01-01T00-00-00-000Z.json");
+      const results = [{
+        id: "pair-fixture",
+        source: "离线夹具：只验产出成对，不是模型跑批结果",
+        pass: true,
+        failures: [],
+        turns: [{
+          fromName: "甲",
+          fromRole: "resident",
+          said: "提醒一下乙",
+          reply: "好的。",
+          toolsUsed: [],
+          outbound: [],
+        }],
+        judge: { pass: true, verified: false, findings: [] },
+        ms: 1,
+      }];
+      writeFileSync(jsonPath, JSON.stringify(results, null, 2), "utf8");
+      // 走**评测那条路的同一个取名规则**，不在这里另写一条。
+      const htmlPath = reportHtmlPathFor(jsonPath);
+      writeReportHtml(htmlPath, results, jsonPath);
+
+      assert(existsSync(htmlPath), "同名 .html 必须被写出来");
+      assert.equal(
+        path.basename(htmlPath).replace(/\.html$/, ""),
+        path.basename(jsonPath).replace(/\.json$/, ""),
+        ".html 必须与 .json 同名（同目录、同基名）"
+      );
+      const html = readFileSync(htmlPath, "utf8");
+      assert(html.startsWith("<!doctype html>"), "页面必须是完整 HTML 文档");
+      assert(html.includes("pair-fixture"), "页面必须渲染出这一次的场景");
+      assert(
+        !/<script[^>]+src=/i.test(html) && !/https?:\/\//.test(html.replace(/https?:\/\/www\.w3\.org/g, "")),
+        "页面必须自包含：不引外链脚本 / CDN"
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   /**

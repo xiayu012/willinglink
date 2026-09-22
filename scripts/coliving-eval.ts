@@ -67,6 +67,9 @@ process.env.COLIVING_LOCAL_WRITE = "1";
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+// 报告页面的渲染器只有一处（`coliving-report.ts`）——这里 import 它的纯函数，
+// 不复制渲染逻辑、也不 shell 出去另跑一个命令。
+import { reportHtmlPathFor, writeReportHtml } from "./coliving-report";
 import type { JudgeResult } from "../lib/chat/coliving/evals/judge";
 import type {
   EvalScenario,
@@ -980,12 +983,19 @@ async function main() {
 
   const reportDir = path.join(process.cwd(), "tests/coliving-eval/reports");
   mkdirSync(reportDir, { recursive: true });
-  const reportPath = path.join(
-    reportDir,
-    `${new Date().toISOString().replace(/[:.]/g, "-")}.json`
-  );
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const reportPath = path.join(reportDir, `${stamp}.json`);
   writeFileSync(reportPath, JSON.stringify(results, null, 2), "utf8");
-  console.log(`报告已写入 ${reportPath}`);
+  /**
+   * **紧跟着写出同名 HTML**——渲染器只有 `coliving-report.ts` 那一个
+   * （`writeReportHtml`），这里不重复实现、也不另起子进程；跑完一次就有一对
+   * 同名产物，人不用再记得手动跑一次报告脚本。
+   */
+  const htmlPath = reportHtmlPathFor(reportPath);
+  writeReportHtml(htmlPath, results, reportPath);
+  // 先报网页（人主要看这个），再报数据文件。
+  console.log(`报告网页已写入 ${htmlPath}`);
+  console.log(`报告数据已写入 ${reportPath}`);
 
   process.exit(overallFailCount > 0 ? 1 : 0);
 }

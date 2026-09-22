@@ -32,6 +32,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 // 计费面板是**纯函数模块**（只用 `import type` 引 gateway-ledger，运行时不
 // 依赖 server-only 的台账），所以普通 tsx 脚本也能安全 import。
 import {
@@ -83,7 +84,7 @@ type JudgeFinding = {
   quote: string;
 };
 
-type ScenarioResult = {
+export type ScenarioResult = {
   id: string;
   source: string;
   pass: boolean;
@@ -109,8 +110,6 @@ function argValue(name: string): string | null {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? (process.argv[i + 1] ?? null) : null;
 }
-const REPORT_ARG = argValue("report");
-const OUT_ARG = argValue("out");
 
 const REPORT_DIR = path.join(process.cwd(), "tests/coliving-eval/reports");
 
@@ -440,7 +439,11 @@ function renderScenario(r: ScenarioResult): string {
 }
 
 // ── 渲染：整页 ───────────────────────────────────────────────────────────
-function renderPage(results: ScenarioResult[], reportPath: string): string {
+/**
+ * **整页 HTML 的唯一渲染器**——本脚本的 CLI 与 `coliving-eval.ts` 都从这里出页面，
+ * 不存在第二份渲染逻辑。纯函数：给同样的 `results` / `sourcePath`，就给同样的字符串。
+ */
+export function renderReportHtml(results: ScenarioResult[], sourcePath: string): string {
   const total = results.length;
   const structFail = results.filter((r) => !r.pass).length;
   const judgeFail = results.filter((r) => r.judge.verified && !r.judge.pass).length;
@@ -471,7 +474,7 @@ function renderPage(results: ScenarioResult[], reportPath: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>合租房 AI 评测验收 · ${escapeHtml(path.basename(reportPath))}</title>
+<title>合租房 AI 评测验收 · ${escapeHtml(path.basename(sourcePath))}</title>
 <style>
 /* 颜色全部走变量：浅色写在 :root，深色只覆盖变量本身，
    body 显式设背景色（否则深色模式下会露出浏览器默认白底）。 */
@@ -751,7 +754,7 @@ h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
 <div class="wrap">
 <header>
   <h1>合租房 AI 评测验收</h1>
-  <div class="sub">报告：${escapeHtml(reportPath)}<br>生成时间：${escapeHtml(generated)}</div>
+  <div class="sub">报告：${escapeHtml(sourcePath)}<br>生成时间：${escapeHtml(generated)}</div>
   <div class="stats">
     <div class="stat"><div class="n">${total}</div><div class="l">场景总数</div></div>
     <div class="stat ok"><div class="n">${allOk}</div><div class="l">全部通过</div></div>
@@ -783,17 +786,42 @@ document.querySelectorAll(".controls button").forEach(function (b) {
 }
 
 // ── main ─────────────────────────────────────────────────────────────────
+/**
+ * **同名 `.html` 的取名规则——只有这一处。**
+ *
+ * 同目录、同基名。`coliving-eval` 自动产出的那一对、以及手动 `coliving-report`
+ * 不带 `--out` 时的默认输出，都走这个函数；两边不会各自写一条正则而慢慢漂开。
+ */
+export function reportHtmlPathFor(jsonPath: string): string {
+  return path.join(
+    path.dirname(jsonPath),
+    `${path.basename(jsonPath, ".json")}.html`
+  );
+}
+
+/**
+ * **渲染并写出报告的 HTML——产出报告页面的唯一出口。**
+ *
+ * `coliving-eval` 写完 `<时间戳>.json` 后紧接着用同一份 `results` 调这里，
+ * 于是跑完一次自动成对产出；手动 `pnpm coliving-report` 也走这一段，
+ * 两条路出来的页面因此保证是同一份渲染器、同一套行为。
+ */
+export function writeReportHtml(
+  outPath: string,
+  results: ScenarioResult[],
+  sourcePath: string
+): void {
+  writeFileSync(outPath, renderReportHtml(results, sourcePath), "utf8");
+}
+
 function main() {
-  const reportPath = path.resolve(REPORT_ARG ?? findLatestReport());
+  const reportPath = path.resolve(argValue("report") ?? findLatestReport());
   const results = loadReport(reportPath);
   if (results.length === 0) {
     fail(`报告 ${reportPath} 里一个场景都没有，没什么可渲染的。`);
   }
-  const outPath = path.resolve(
-    OUT_ARG ??
-      path.join(path.dirname(reportPath), `${path.basename(reportPath, ".json")}.html`)
-  );
-  writeFileSync(outPath, renderPage(results, reportPath), "utf8");
+  const outPath = path.resolve(argValue("out") ?? reportHtmlPathFor(reportPath));
+  writeReportHtml(outPath, results, reportPath);
 
   const bad = results.filter((r) => !r.pass || (r.judge && !r.judge.pass)).length;
   console.log(
@@ -802,8 +830,28 @@ function main() {
   console.log(`页面已写入 ${outPath}`);
 }
 
-try {
-  main();
-} catch (e) {
-  fail(e instanceof Error ? e.message : String(e));
+/**
+ * **只有被直接执行时才跑 CLI。**
+ *
+ * `coliving-eval` 要复用上面的渲染器自动产出同名 `.html`，它会 `import` 本文件；
+ * 若这里无条件执行 `main()`，导入方一进来就会被本脚本的 CLI 抢走（读 `--report`、
+ * 写文件、甚至 `process.exit`）。用入口路径与 `import.meta.url` 比一次，
+ * 导入时整个模块只剩纯函数。
+ */
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(entry);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) {
+  try {
+    main();
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
 }
