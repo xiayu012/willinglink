@@ -17,6 +17,13 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // 公开只读的协调历史页（`app/coordination-history`）。给合作方看的演示窗口，
+  // 靠 URL 分享，不挂首页入口，所以没有会话 cookie 也该放行——否则会被
+  // 重定向到 /api/auth/guest，对方拿到的是一个访客账号的页面。
+  if (pathname.startsWith("/coordination-history")) {
+    return NextResponse.next();
+  }
+
   // 小红书**房源采集与帖子评论草稿**（不是实时消息渠道，私信/出站通道已下线）
   // 走自己的 token 鉴权，别被 guest-auth 重定向掉。
   if (pathname.startsWith("/api/xhs/")) {
