@@ -12,9 +12,10 @@ import type {
  * 两栏：左边房子列表 / 右边整栋房子的消息记录。
  *
  * **每一行要回答的是「谁发给谁」，不是「说了什么」。** 所以一行里发件人和
- * 收件人各占一个色块、各带一个名字，名字比正文大、颜色比正文重，中间一个
- * 箭头指明方向——扫一列箭头就知道这栋房子的往来是怎么流的。正文退到第二行、
- * 小一号、颜色压淡。
+ * 收件人各占一个色块、各带一个名字，中间一个箭头指明方向——扫一列箭头就
+ * 知道这栋房子的往来是怎么流的。正文退到第二行，只比名字小一点点（17 → 15），
+ * **颜色跟发件人的名字完全一致**：名字和正文一个色，整段读下来就是这个人的
+ * 声音，不用靠字号去分「谁是说话人」。
  *
  * 色块只有颜色、不带字：29 条记录就是 58 个色块，每个里面都塞两个字的话，
  * 读起来是负担而不是帮助。颜色配着旁边的名字看，一次就记住了。
@@ -72,7 +73,7 @@ function personColor(index: number): string {
   return `hsl(${hue} 68% ${[45, 62, 32][ring]}%)`;
 }
 
-/** 纯色块，不带字。中枢是圆角方块，人是圆 */
+/** 纯色块，不带字。中枢是正正方方的正方形，人是圆 */
 function Dot({
   color,
   size = 38,
@@ -80,6 +81,7 @@ function Dot({
 }: {
   color: string;
   size?: number;
+  /** 中枢的色块：正正方形，一点圆角都不给 */
   square?: boolean;
 }) {
   return (
@@ -89,7 +91,7 @@ function Dot({
       style={{
         width: size,
         height: size,
-        borderRadius: square ? Math.round(size * 0.3) : 999,
+        borderRadius: square ? 0 : 999,
         background: color,
       }}
     />
@@ -138,9 +140,13 @@ function MessageRow({
           {TIME_FMT.format(new Date(msg.sentAt))}
         </span>
       </div>
-      {/* 正文：这页要看的是往来流向，内容退到次要位置——小一号、颜色压淡，
-          但仍然逐字照登，不截断、不改写 */}
-      <div className="mt-2 whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-[#6c757d]">
+      {/* 正文：只比名字小一点点（17 → 15），肉眼看得出但差得不多；颜色跟
+          发件人的名字完全一致，一行读下来就是这个人的语气。仍然逐字照登，
+          不截断、不改写 */}
+      <div
+        className="mt-2 whitespace-pre-wrap break-words text-[15px] leading-[1.7]"
+        style={{ color: senderColor }}
+      >
         {msg.body}
       </div>
     </div>
