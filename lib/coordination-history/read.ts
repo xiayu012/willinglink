@@ -115,13 +115,22 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
 
   try {
     const [households, memberships, messages] = await Promise.all([
-      // 隔离测试屋整栋排除。这一页是给合作方长期看的，测试屋里装的都是
-      // 评测语料（含刻意构造的冲突、辱骂、歧视内容），混进来等于拿测试数据
-      // 冒充真实住户的协调记录。eyeball 判断在 SQL 这一层做，不靠前端隐藏。
+      // 合成数据整栋排除。这一页是给合作方长期看的，两类房子装的都不是真实
+      // 住户的协调记录，混进来等于拿构造数据冒充：
+      //
+      //   · is_test = true —— 隔离测试屋（评测语料，含刻意构造的冲突、辱骂、
+      //     歧视内容），这 400 多栋本来就不该见人。
+      //   · label like '影子验证%' —— 影子跑生成的房子。它们**没有**被标成
+      //     is_test（影子跑那批是手工建的，比 shadow_run 落表还早），但成员
+      //     是「房东 / 住客甲」这种占位名，同样是合成的。命名约定是唯一稳定
+      //     的判据：shadow_run 里那三栋、加上最早手工建的这栋，都叫这个前缀。
+      //
+      // 判断在 SQL 这一层做，不靠前端隐藏。
       sql<HouseholdRow[]>`
         select id, label, status, is_test, created_at
         from coliving.household
         where is_test = false
+          and label not like '影子验证%'
         order by created_at desc
       `,
       sql<MembershipRow[]>`
@@ -184,8 +193,8 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
         const known = new Set(people.map((p) => p.id));
         const houseMessages = messagesByHousehold.get(h.id) ?? [];
 
-        // 消息里出现过、但当前 membership 里没有的人，也补成节点，
-        // 否则那段历史在图上没有落点
+        // 消息里出现过、但当前 membership 里没有的人，也补进来，
+        // 否则那段历史就没有归属
         const seen = new Map<string, HistoryPerson>();
         for (const msg of houseMessages) {
           if (!known.has(msg.personId) && !seen.has(msg.personId)) {
@@ -198,12 +207,28 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
           }
         }
 
+        // **顺序必须确定**：展示层的颜色是按这个顺序发的，顺序一飘，同一个
+        // 人刷新两次就换了个颜色。membership 那条查询没有 order by，所以这里
+        // 按「第一次说话的时间」排——既确定，又正好是这栋房子里出场的先后。
+        // 从没说过话的人排在最后，按名字定序。
+        const firstSeen = new Map<string, string>();
+        for (const msg of houseMessages) {
+          if (!firstSeen.has(msg.personId)) {
+            firstSeen.set(msg.personId, msg.sentAt);
+          }
+        }
+        const everyone = [...people, ...seen.values()].sort((a, b) => {
+          const fa = firstSeen.get(a.id) ?? "9999";
+          const fb = firstSeen.get(b.id) ?? "9999";
+          return fa === fb ? a.name.localeCompare(b.name) : fa < fb ? -1 : 1;
+        });
+
         return {
           id: h.id,
           label: h.label,
           status: h.status,
           isTest: h.is_test,
-          people: [...people, ...seen.values()],
+          people: everyone,
           messages: houseMessages,
           // 查询已按 sent_at 升序，所以最后一条就是最新的
           lastMessageAt:
@@ -212,7 +237,9 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
       })
       .filter((h) => h.messages.length > 0)
       // 最近有动静的排最前——历史列表的常规排法，也保证一进来不是空房子
-      .sort((a, b) => (b.lastMessageAt ?? "").localeCompare(a.lastMessageAt ?? ""));
+      .sort((a, b) =>
+        (b.lastMessageAt ?? "").localeCompare(a.lastMessageAt ?? "")
+      );
 
     return {
       households: withMessages,

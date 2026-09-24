@@ -44,9 +44,6 @@ importers:
       '@mantine/core':
         specifier: ^8.3.18
         version: 8.3.18(@mantine/hooks@8.3.18(react@19.0.1))(@types/react@18.3.18)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)
-      '@mantine/hooks':
-        specifier: ^8.3.18
-        version: 8.3.18(react@19.0.1)
       '@neondatabase/serverless':
         specifier: ^1.1.0
         version: 1.1.0
