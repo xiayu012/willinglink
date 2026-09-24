@@ -62,6 +62,8 @@ export type HistoryHousehold = {
   isTest: boolean;
   people: HistoryPerson[];
   messages: HistoryMessage[];
+  /** 最后一条消息的时间。列表按这个倒序——最近的排最前 */
+  lastMessageAt: string | null;
 };
 
 export type CoordinationHistoryData = {
@@ -113,9 +115,13 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
 
   try {
     const [households, memberships, messages] = await Promise.all([
+      // 隔离测试屋整栋排除。这一页是给合作方长期看的，测试屋里装的都是
+      // 评测语料（含刻意构造的冲突、辱骂、歧视内容），混进来等于拿测试数据
+      // 冒充真实住户的协调记录。eyeball 判断在 SQL 这一层做，不靠前端隐藏。
       sql<HouseholdRow[]>`
         select id, label, status, is_test, created_at
         from coliving.household
+        where is_test = false
         order by created_at desc
       `,
       sql<MembershipRow[]>`
@@ -199,11 +205,14 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
           isTest: h.is_test,
           people: [...people, ...seen.values()],
           messages: houseMessages,
+          // 查询已按 sent_at 升序，所以最后一条就是最新的
+          lastMessageAt:
+            houseMessages[houseMessages.length - 1]?.sentAt ?? null,
         };
       })
       .filter((h) => h.messages.length > 0)
-      // 演示页从信息量最大的房子开始，别一进来就是空的
-      .sort((a, b) => b.messages.length - a.messages.length);
+      // 最近有动静的排最前——历史列表的常规排法，也保证一进来不是空房子
+      .sort((a, b) => (b.lastMessageAt ?? "").localeCompare(a.lastMessageAt ?? ""));
 
     return {
       households: withMessages,
