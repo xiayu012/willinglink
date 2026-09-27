@@ -1,8 +1,10 @@
 "use client";
 
 import { Badge, ScrollArea, TextInput } from "@mantine/core";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import type { ImportReport } from "@/lib/coordination-history/import";
 import type {
   HistoryHousehold,
   HistoryMessage,
@@ -20,7 +22,10 @@ import type {
  * 色块只有颜色、不带字：29 条记录就是 58 个色块，每个里面都塞两个字的话，
  * 读起来是负担而不是帮助。颜色配着旁边的名字看，一次就记住了。
  *
- * 没有任何数据写入，也没有筛选——从头到尾就是整栋房子的完整记录。
+ * 没有按人筛选——从头到尾就是整栋房子的完整记录。
+ *
+ * 页面上**唯一会写库的东西是顶栏那个绿色长条按钮**（合作方名单导入，见
+ * `lib/coordination-history/import.ts`）。除此之外这里不发送任何写请求。
  * ────────────────────────────────────────────────────────────────────────── */
 
 /** 中枢自己的颜色。永远是圆角方块，跟人的圆点区分开 */
@@ -153,6 +158,144 @@ function MessageRow({
   );
 }
 
+/** 往上送进托盘：一眼看得懂是「导入文件」，不是下载 */
+function UploadIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-[19px] w-[19px] shrink-0"
+      aria-hidden
+    >
+      <path d="M12 15V3" />
+      <path d="m7 8 5-5 5 5" />
+      <path d="M3 15v3a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-3" />
+    </svg>
+  );
+}
+
+/**
+ * 导入结果。
+ *
+ * **把模型认出来的列结构原样摆出来**：导入是一次性动作、没法撤销，事后想不通
+ * 「怎么多出来这几个人」时，唯一的线索就是它当初把哪一列当成了电话列。
+ * 认错列在这儿是一眼可见的，藏起来就只能对着错数据猜。
+ */
+function ImportResult({
+  report,
+  onClose,
+}: {
+  report: ImportReport | { ok: false; error: string };
+  onClose: () => void;
+}) {
+  if (!report.ok) {
+    return (
+      <div className="border-b border-[#ffc9c9] bg-[#fff5f5] px-4 py-3 sm:px-5">
+        <div className="mx-auto flex w-full max-w-[1100px] items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-bold text-[#c92a2a]">
+              Import failed
+            </div>
+            <div className="mt-0.5 break-words text-[12px] text-[#a61e1e]">
+              {report.error}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 text-[18px] leading-none text-[#c92a2a]"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const newPeople = report.residents.filter((r) => r.created).length;
+  const newHouses = report.households.filter((h) => h.created).length;
+  const column = (index: number | null) =>
+    index === null ? "none" : `#${index}`;
+
+  return (
+    <div className="max-h-[45dvh] overflow-y-auto border-b border-[#b2f2bb] bg-[#ebfbee] px-4 py-3 sm:px-5">
+      <div className="mx-auto flex w-full max-w-[1100px] items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-bold text-[#2b8a3e]">
+            Imported {report.residents.length} residents
+            {newHouses > 0 ? `, created ${newHouses} new household` : ""}
+            {newHouses > 1 ? "s" : ""}
+            {newPeople > 0 ? ` · ${newPeople} new` : ""}
+          </div>
+
+          <div className="mt-1 text-[11px] text-[#2f6f3e]">
+            Sheet “{report.sheetName}” · rows start at{" "}
+            {report.layout.dataStartRow}
+            {" · "}name {column(report.layout.nameColumn)}
+            {" · "}phone {column(report.layout.phoneColumn)}
+            {" · "}household {column(report.layout.householdColumn)}
+            {report.layout.householdName
+              ? ` (“${report.layout.householdName}” for the whole file)`
+              : ""}
+          </div>
+
+          <div className="mt-2 flex flex-wrap gap-2">
+            {report.households.map((h) => (
+              <span
+                key={h.id}
+                className="rounded-full bg-white px-2.5 py-1 text-[11px] text-[#2b8a3e]"
+              >
+                {h.label}
+                <span className="opacity-70">
+                  {" "}
+                  +{h.added}
+                  {h.created ? " · new household" : ""}
+                </span>
+              </span>
+            ))}
+          </div>
+
+          <div className="mt-2 break-words text-[11px] text-[#2f6f3e]">
+            {report.residents.map((r) => `${r.name} ${r.phone}`).join(" · ")}
+          </div>
+
+          {report.skipped.length > 0 ? (
+            <div className="mt-2 text-[11px] text-[#a26a00]">
+              Skipped {report.skipped.length} row
+              {report.skipped.length === 1 ? "" : "s"} with no readable phone
+              number (rows{" "}
+              {report.skipped
+                .slice(0, 12)
+                .map((s) => s.row)
+                .join(", ")}
+              {report.skipped.length > 12 ? ", …" : ""}).
+            </div>
+          ) : null}
+          {report.truncated > 0 ? (
+            <div className="mt-2 text-[11px] text-[#a26a00]">
+              {report.truncated} more rows were left out — this importer takes
+              1000 at a time.
+            </div>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="shrink-0 text-[18px] leading-none text-[#2b8a3e]"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function HistoryCanvas({
   households,
   emptyHouseholdCount,
@@ -183,6 +326,14 @@ export function HistoryCanvas({
   const people = household?.people ?? [];
 
   const viewportRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  /** 导入中 / 上次导入的结果。`null` = 还没导过 */
+  const [importing, setImporting] = useState(false);
+  const [report, setReport] = useState<
+    ImportReport | { ok: false; error: string } | null
+  >(null);
 
   /** 人 id → 颜色。整页只有这一处发色，别处一律查这张表 */
   const colorByPerson = useMemo(() => {
@@ -236,16 +387,57 @@ export function HistoryCanvas({
     window.history.replaceState(null, "", `?h=${next}`);
   }
 
+  /**
+   * 上传一份名单。**这是整页唯一会写库的动作**，只在按下那个按钮时发生。
+   *
+   * 服务端做三件事：解析表格 → 一次模型调用认出列 → 逐行走生产的
+   * `addResident` 落库。这里只负责把文件递过去、把回执原样摆出来。
+   */
+  async function upload(file: File) {
+    setImporting(true);
+    setReport(null);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch("/api/coordination-history/import", {
+        method: "POST",
+        body,
+      });
+      const result = (await response.json()) as
+        | ImportReport
+        | { ok: false; error: string };
+      setReport(result);
+      if (result.ok && result.households.length > 0) {
+        // 直接跳到刚写进去的那栋房子：导完还停在原来那套上，等于要用户自己
+        // 去列表里找证据。先选上，再 refresh 让新数据回来填进去。
+        switchHousehold(result.households[0].id);
+        router.refresh();
+      }
+    } catch (error) {
+      setReport({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setImporting(false);
+      // 清掉 value，否则同一个文件再选一次不会触发 change
+      if (fileRef.current) {
+        fileRef.current.value = "";
+      }
+    }
+  }
+
   if (!household) {
     return (
       <div className="p-8">
         <div className="text-[15px] font-semibold text-[#212529]">
           No conversation records
         </div>
+        {/* 走到这里说明**一栋房子都没有**——空房子现在也进列表，所以
+            「有房子但都没说过话」不再落到这一支 */}
         <p className="mt-1 text-[13px] text-[#868e96]">
-          {emptyHouseholdCount > 0
-            ? `${emptyHouseholdCount} households exist in the database, but none has any messages yet.`
-            : "No coliving.household rows were found, or POSTGRES_URL was not available to this deployment."}
+          No coliving.household rows were found, or POSTGRES_URL was not
+          available to this deployment.
         </p>
       </div>
     );
@@ -254,25 +446,68 @@ export function HistoryCanvas({
   return (
     <div className="flex h-[100dvh] flex-col bg-white">
       {/* ── 顶栏 ───────────────────────────────────────────────────── */}
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[#e9ecef] px-4 py-2.5 sm:px-5 sm:py-3">
-        <div className="flex min-w-0 items-center gap-2.5">
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-[#e9ecef] px-4 py-2.5 sm:px-5 sm:py-3">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <Dot color={HUB_COLOR} size={30} square />
           <div className="min-w-0">
             <div className="truncate text-[16px] font-bold leading-tight text-[#212529]">
               Coordination History
             </div>
-            <div className="text-[11px] text-[#868e96]">
-              WillingLink · read-only
+            <div className="hidden text-[11px] text-[#868e96] sm:block">
+              {households.length} household{households.length === 1 ? "" : "s"}
+              {emptyHouseholdCount > 0
+                ? ` · ${emptyHouseholdCount} with no messages yet`
+                : ""}
             </div>
           </div>
         </div>
-        <div className="hidden shrink-0 text-right text-[11px] text-[#868e96] sm:block">
-          {households.length} household{households.length === 1 ? "" : "s"}
-          {emptyHouseholdCount > 0
-            ? ` · ${emptyHouseholdCount} more with no messages`
-            : ""}
-        </div>
+
+        {/* 整页**唯一**会写库的入口。做成绿色长条、带一个往上送文件的图标，
+            跟旁边那排纯展示的文字分明是两种东西 */}
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          disabled={importing}
+          className={`flex shrink-0 items-center gap-2.5 rounded-full bg-[#2f9e44] px-4 py-2 text-left text-white shadow-sm ${
+            importing ? "cursor-wait opacity-70" : "hover:bg-[#2b8a3e]"
+          }`}
+        >
+          <UploadIcon />
+          <span className="min-w-0">
+            <span className="block text-[13px] font-bold leading-tight">
+              {importing ? (
+                "Importing…"
+              ) : (
+                <>
+                  <span className="sm:hidden">Import numbers</span>
+                  <span className="hidden sm:inline">
+                    Import resident phone numbers
+                  </span>
+                </>
+              )}
+            </span>
+            <span className="hidden text-[11px] leading-tight opacity-90 sm:block">
+              CSV or Excel (.xlsx) · AI works out which column is which
+            </span>
+          </span>
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) {
+              void upload(file);
+            }
+          }}
+        />
       </header>
+
+      {report ? (
+        <ImportResult report={report} onClose={() => setReport(null)} />
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         {/* ── 左：房子列表（宽屏常驻；窄屏是一整屏）──────────────── */}
@@ -375,8 +610,10 @@ export function HistoryCanvas({
                   {household.label}
                 </div>
                 <div className="mt-0.5 text-[12px] text-[#868e96]">
-                  {people.length} people · {messages.length} messages · complete
-                  record
+                  {people.length} people ·{" "}
+                  {messages.length === 0
+                    ? "no messages yet"
+                    : `${messages.length} messages · complete record`}
                 </div>
               </div>
             </div>

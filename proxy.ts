@@ -24,6 +24,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // 那一页顶上的导入按钮打进来的接口。**它不 under /coordination-history**，
+  // 上面那条 startsWith 盖不到，漏了的表现是上传转圈然后跳去 /api/auth/guest。
+  if (pathname.startsWith("/api/coordination-history/")) {
+    return NextResponse.next();
+  }
+
   // 小红书**房源采集与帖子评论草稿**（不是实时消息渠道，私信/出站通道已下线）
   // 走自己的 token 鉴权，别被 guest-auth 重定向掉。
   if (pathname.startsWith("/api/xhs/")) {

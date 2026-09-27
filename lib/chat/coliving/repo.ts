@@ -238,7 +238,9 @@ export async function getMembers(
   `;
 }
 
-export async function getActiveRules(householdId: string): Promise<HouseRule[]> {
+export async function getActiveRules(
+  householdId: string
+): Promise<HouseRule[]> {
   return await db()<HouseRule[]>`
     select r.id, r.kind, r.statement,
            r.consulted_at as "consultedAt",
@@ -325,7 +327,12 @@ export async function appendMessage(args: {
 export async function pendingCommunication(
   personId: string,
   withinHours = 72
-): Promise<{ purpose: string | null; body: string; sentAt: Date; act: string | null } | null> {
+): Promise<{
+  purpose: string | null;
+  body: string;
+  sentAt: Date;
+  act: string | null;
+} | null> {
   const rows = await db()<
     { purpose: string | null; body: string; sentAt: Date; act: string | null }[]
   >`
@@ -387,7 +394,8 @@ export async function getRecentTurns(
     ) t order by sent_at asc
   `;
   return rows.map((r) => ({
-    role: r.direction === "inbound" ? ("user" as const) : ("assistant" as const),
+    role:
+      r.direction === "inbound" ? ("user" as const) : ("assistant" as const),
     content: r.body,
   }));
 }
@@ -515,7 +523,9 @@ export async function recordCasePosition(args: {
   return rows[0].id;
 }
 
-export async function getCasePositions(caseId: string): Promise<CasePosition[]> {
+export async function getCasePositions(
+  caseId: string
+): Promise<CasePosition[]> {
   return await db()<CasePosition[]>`
     select cp.id, cp.person_id as "personId", p.display_name as "personName",
            cp.kind, cp.statement, cp.created_at as "createdAt",
@@ -685,7 +695,9 @@ export async function scheduleReminder(args: {
 }
 
 /** 到期且还没处理的提醒。outreach.ts 的 obligation_due job 用这个扫描。 */
-export async function dueObligations(householdId: string): Promise<DueObligation[]> {
+export async function dueObligations(
+  householdId: string
+): Promise<DueObligation[]> {
   return await db()<DueObligation[]>`
     select o.id, o.household_id as "householdId", o.person_id as "personId",
            p.display_name as "personName", o.rule_id as "ruleId",
@@ -846,11 +858,15 @@ export type CommunicationAct =
  * 按言语行为推出「什么时候之前该有回音」。**不让模型填具体时间**——
  * 它会乱填（第十五批的设计决定）。只有真的在等的那几类才有时限。
  */
-function replyDueFor(act: CommunicationAct | null, expectsReply: boolean): Date | null {
+function replyDueFor(
+  act: CommunicationAct | null,
+  expectsReply: boolean
+): Date | null {
   if (!expectsReply || !act) {
     return null;
   }
-  const hours = act === "remind" ? 12 : act === "ask" || act === "confirm" ? 24 : null;
+  const hours =
+    act === "remind" ? 12 : act === "ask" || act === "confirm" ? 24 : null;
   return hours === null ? null : new Date(Date.now() + hours * 3600 * 1000);
 }
 
@@ -887,7 +903,12 @@ export async function findRecentOpenCommunication(args: {
   channel: string;
   body: string;
   withinHours?: number;
-}): Promise<{ id: string; status: string; sentAt: Date | null; createdAt: Date } | null> {
+}): Promise<{
+  id: string;
+  status: string;
+  sentAt: Date | null;
+  createdAt: Date;
+} | null> {
   const rows = await db()<
     { id: string; status: string; sentAt: Date | null; createdAt: Date }[]
   >`
@@ -1111,7 +1132,7 @@ export async function recallMemories(args: {
   Array<{ who: string | null; kind: string; content: string; basis: string }>
 > {
   const vec = `[${args.queryVector.join(",")}]`;
-  return await db()`
+  return (await db()`
     select p.display_name as who, m.kind, m.content, m.basis
     from coliving.memory m
     left join coliving.person p on p.id = m.person_id
@@ -1119,7 +1140,7 @@ export async function recallMemories(args: {
       and m.embedding is not null
     order by m.embedding <=> ${vec}::vector
     limit ${args.limit ?? 5}
-  ` as never;
+  `) as never;
 }
 
 // ── 按需展开的查询（Context Builder 默认不带，模型要了才查）──────────────────
@@ -1174,7 +1195,7 @@ export async function nearbyObservations(args: {
   }>
 > {
   const win = args.windowMinutes ?? 180;
-  return await db()`
+  return (await db()`
     select o.kind, o.summary, o.observed_at as "observedAt",
            o.severity, o.confidence,
            coalesce(round(st_distance(o.geog, pl.geog)::numeric)::int, 0)
@@ -1199,7 +1220,7 @@ export async function nearbyObservations(args: {
         and ${args.at}::timestamptz + (${win} || ' minutes')::interval
     order by o.observed_at desc
     limit 5
-  ` as never;
+  `) as never;
 }
 
 /**
@@ -1230,7 +1251,7 @@ export async function findSimilarCases(args: {
   const limit = args.limit ?? 5;
   if (args.queryVector?.length) {
     const vec = `[${args.queryVector.join(",")}]`;
-    return await db()`
+    return (await db()`
       select id, title, kind, status, resolution,
              round((1 - (embedding <=> ${vec}::vector))::numeric, 3)::float as score
       from coliving.case_file
@@ -1239,9 +1260,9 @@ export async function findSimilarCases(args: {
         and (${args.kind ?? null}::text is null or kind = ${args.kind ?? null})
       order by embedding <=> ${vec}::vector
       limit ${limit}
-    ` as never;
+    `) as never;
   }
-  return await db()`
+  return (await db()`
     select id, title, kind, status, resolution,
            round(similarity(title, ${args.query})::numeric, 3)::float as score
     from coliving.case_file
@@ -1250,7 +1271,7 @@ export async function findSimilarCases(args: {
       and (title % ${args.query} or kind = ${args.kind ?? null})
     order by similarity(title, ${args.query}) desc, last_activity_at desc
     limit ${limit}
-  ` as never;
+  `) as never;
 }
 
 /** 检索治理资料/判例（Knowledge 域）。同样先结构化后语义。 */
@@ -1261,7 +1282,7 @@ export async function searchKnowledge(args: {
   limit?: number;
 }): Promise<Array<{ title: string; body: string; score: number }>> {
   const vec = `[${args.queryVector.join(",")}]`;
-  return await db()`
+  return (await db()`
     select d.title, c.body,
            round((1 - (c.embedding <=> ${vec}::vector))::numeric, 3)::float as score
     from coliving.knowledge_chunk c
@@ -1272,7 +1293,7 @@ export async function searchKnowledge(args: {
            or d.jurisdiction = ${args.jurisdiction ?? null})
     order by c.embedding <=> ${vec}::vector
     limit ${args.limit ?? 4}
-  ` as never;
+  `) as never;
 }
 
 export async function setCaseEmbedding(
@@ -1289,11 +1310,13 @@ export async function setCaseEmbedding(
 /** 还没算过向量的 Case，供离线补算 */
 export async function casesMissingEmbedding(
   limit = 50
-): Promise<Array<{ id: string; title: string; kind: string; resolution: string | null }>> {
-  return await db()`
+): Promise<
+  Array<{ id: string; title: string; kind: string; resolution: string | null }>
+> {
+  return (await db()`
     select id, title, kind, resolution from coliving.case_file
     where embedding is null order by last_activity_at desc limit ${limit}
-  ` as never;
+  `) as never;
 }
 
 /**
@@ -1445,8 +1468,16 @@ export async function addResident(args: {
       if (existing.role !== null) {
         // 这人已经在这栋房子的名册上。**只补明说的事实，不做减法**
         const merged = mergeMembershipFacts(
-          { role: existing.role, resides: existing.resides, note: existing.note },
-          { role: suppliedRole, resides: suppliedResides, note: args.note ?? null }
+          {
+            role: existing.role,
+            resides: existing.resides,
+            note: existing.note,
+          },
+          {
+            role: suppliedRole,
+            resides: suppliedResides,
+            note: args.note ?? null,
+          }
         );
         await tx`
           update coliving.membership
@@ -1544,7 +1575,11 @@ export async function moveOut(args: {
     const [p] = await tx<{ display_name: string }[]>`
       select display_name from coliving.person where id = ${args.personId}
     `;
-    await rollEpoch(tx, args.householdId, `${p?.display_name ?? "某人"} 搬出后`);
+    await rollEpoch(
+      tx,
+      args.householdId,
+      `${p?.display_name ?? "某人"} 搬出后`
+    );
     // 他个人的偏好记忆也随之失效——那是关于「他住在这里时」的事实
     await tx`
       update coliving.memory set valid_to = now()
@@ -1773,7 +1808,14 @@ export async function markFollowedUp(caseId: string): Promise<void> {
  */
 export async function recentlyAdded(householdId: string): Promise<Member[]> {
   const rows = await getMembers(householdId);
-  const all = await db()<{ id: string; onboarded_at: Date | null; last_outreach_at: Date | null; proactive_ok: boolean }[]>`
+  const all = await db()<
+    {
+      id: string;
+      onboarded_at: Date | null;
+      last_outreach_at: Date | null;
+      proactive_ok: boolean;
+    }[]
+  >`
     select id, onboarded_at, last_outreach_at, proactive_ok from coliving.person
     where onboarded_at > now() - interval '14 days'
   `;
@@ -1799,7 +1841,8 @@ export async function addContact(args: {
   kind: string;
   value: string;
 }): Promise<void> {
-  const value = args.kind === "sms" ? normalizePhone(args.value) : args.value.trim();
+  const value =
+    args.kind === "sms" ? normalizePhone(args.value) : args.value.trim();
   await db()`
     insert into coliving.person_contact (person_id, kind, value, is_primary)
     values (${args.personId}, ${args.kind}, ${value}, false)
@@ -1920,7 +1963,7 @@ export async function recentOutbound(
 ): Promise<
   Array<{ to: string; body: string; sentAt: Date; direction: string }>
 > {
-  return await db()`
+  return (await db()`
     select p.display_name as "to", m.body, m.sent_at as "sentAt", m.direction
     from coliving.message m
     join coliving.conversation c on c.id = m.conversation_id
@@ -1929,7 +1972,7 @@ export async function recentOutbound(
       and m.direction = 'outbound'
     order by m.sent_at desc
     limit ${limit}
-  ` as never;
+  `) as never;
 }
 
 /** 记一个人说的"这屋一共住几个"。只存这一个数字，**不存判断结果** */
@@ -1985,6 +2028,51 @@ export async function createTestHousehold(
   });
 }
 
+/**
+ * 按房子名找一栋，找不到就开一栋**真实**的房子（`is_test` 走默认 false）。
+ *
+ * 这是给**表格导入**用的入口（`/api/coordination-history/import`），不是对话路径：
+ * 合作方给一份住户名单，里面写着每间房的名字，我们得先把房子对上号。骨架跟
+ * `enrollLandlord` 建的一模一样（place → dwelling → household → epoch），
+ * 少任何一个环节，这栋房子在别处就查不出来。
+ *
+ * 名字按 trim + 忽略大小写比对：「A101」和「 a101 」是同一间，不能各开一栋。
+ * 并发导入同一份名单时用咨询锁按名字串行化，否则两个事务会同时查不到、
+ * 各建一栋同名的房子。
+ */
+export async function ensureHouseholdByLabel(
+  rawLabel: string
+): Promise<{ householdId: string; created: boolean }> {
+  const label = rawLabel.trim() || "这栋房子";
+  // 锁的 key 单独加前缀：`addResident` 也按 householdId 上锁，两者是不同的
+  // 命名空间，撞上了会白白互相等
+  const lockKey = `household-label:${label.toLowerCase()}`;
+  return await db().begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${lockKey}::text))`;
+    const [existing] = await tx<{ id: string }[]>`
+      select id from coliving.household
+      where lower(label) = lower(${label})
+      order by created_at
+      limit 1`;
+    if (existing) {
+      return { householdId: existing.id, created: false };
+    }
+    const [place] = await tx<{ id: string }[]>`
+      insert into coliving.place (kind, label, country)
+      values ('dwelling', ${label}, 'US') returning id`;
+    const [dw] = await tx<{ id: string }[]>`
+      insert into coliving.dwelling (place_id, label)
+      values (${place.id}, ${label}) returning id`;
+    const [h] = await tx<{ id: string }[]>`
+      insert into coliving.household (dwelling_id, label)
+      values (${dw.id}, ${label}) returning id`;
+    await tx`
+      insert into coliving.household_epoch (household_id, seq, label, started_at)
+      values (${h.id}, 1, '开张', now())`;
+    return { householdId: h.id, created: true };
+  });
+}
+
 export async function listHouseholds(): Promise<
   Array<{ id: string; label: string }>
 > {
@@ -2004,7 +2092,7 @@ export async function recentActivity(
 ): Promise<
   Array<{ at: Date; layer: string; label: string; detail: string | null }>
 > {
-  return await db()`
+  return (await db()`
     select * from (
       select e.recorded_at as at, 'EVENT' as layer,
              (e.kind || coalesce(' /' || e.severity, '')) as label,
@@ -2025,7 +2113,7 @@ export async function recentActivity(
         join coliving.case_file cf on cf.id = o.case_id
        where cf.household_id = ${householdId}
     ) t order by at desc limit ${limit}
-  ` as never;
+  `) as never;
 }
 
 export async function findPersonByName(

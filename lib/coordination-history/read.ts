@@ -12,6 +12,8 @@ import postgres from "postgres";
  *
  * 三条硬性质：
  *   · **只读**——本文件里没有 insert / update / delete，也不引入 guard.ts。
+ *     （页面上唯一的写入口是那个导入按钮，代码在隔壁 `import.ts`，跟这里
+ *     没有交集：导入走的是生产那句 `addResident`，不经过这个文件。）
  *   · **不改 schema**——建表的事实来源仍是 `lib/db/migrations/manual/coliving-world.sql`。
  *   · **出错不拖垮主站**——查询失败或没有 POSTGRES_URL 时返回空集，页面照常渲染。
  */
@@ -67,9 +69,16 @@ export type HistoryHousehold = {
 };
 
 export type CoordinationHistoryData = {
-  /** 只包含**有聊天记录**的房子 */
+  /**
+   * 全部真实房子，**包括还没有任何消息的**。
+   *
+   * 以前这里只留「说过话的」，因为空白房子对着一份聊天记录没有意义。改主意是
+   * 因为导入：名单进库之后**新房子天生是空的**，把它们滤掉，用户刚导完一刷新
+   * 什么都看不到，只能对着一个数字猜。房子在库里就该在列表里，点进去是空的
+   * 就如实说「还没有消息」。排序仍然把最近的聊天顶在前面。
+   */
   households: HistoryHousehold[];
-  /** 库里其余没有任何消息的房子数量。页面上标一句，不假装它们不存在 */
+  /** 其中还没有任何消息的房子数。页面上标一句，不假装它们不存在 */
   emptyHouseholdCount: number;
 };
 
@@ -235,15 +244,17 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
             houseMessages[houseMessages.length - 1]?.sentAt ?? null,
         };
       })
-      .filter((h) => h.messages.length > 0)
-      // 最近有动静的排最前——历史列表的常规排法，也保证一进来不是空房子
+      // 最近有动静的排最前——历史列表的常规排法，也保证一进来不是空房子。
+      // 没说过话的 `lastMessageAt` 是空串，自然沉到最后；它们之间保持上面那条
+      // 查询给的 `created_at desc`（sort 是稳定的），刚导入的新房子排在前面。
       .sort((a, b) =>
         (b.lastMessageAt ?? "").localeCompare(a.lastMessageAt ?? "")
       );
 
     return {
       households: withMessages,
-      emptyHouseholdCount: households.length - withMessages.length,
+      emptyHouseholdCount: withMessages.filter((h) => h.messages.length === 0)
+        .length,
     };
   } catch (error) {
     console.error("[coordination-history] 读取失败，按空集渲染", error);
