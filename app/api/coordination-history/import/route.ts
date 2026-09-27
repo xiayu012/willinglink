@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     const file = form.get("file");
     if (!(file instanceof File)) {
       return NextResponse.json(
-        { ok: false, error: "没有收到文件" },
+        { ok: false, error: "No file was received." },
         { status: 400 }
       );
     }

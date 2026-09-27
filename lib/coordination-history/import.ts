@@ -150,7 +150,8 @@ function readSheet(buffer: ArrayBuffer): {
   );
   const sheetName = workbook.SheetNames[0] ?? "";
   if (!sheetName) {
-    throw new Error("这个文件里一张工作表都没有");
+    // 抛给用户看的文案一律英文：这一页整个是英文界面，混一句中文没人读得懂
+    throw new Error("This file has no worksheets in it.");
   }
   const raw = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], {
     header: 1,
@@ -273,13 +274,15 @@ export async function importResidents(
 ): Promise<ImportReport> {
   const { sheetName, rows } = readSheet(buffer);
   if (rows.length === 0) {
-    throw new Error("这张表是空的，一行数据都没有");
+    throw new Error("This spreadsheet has no rows in it.");
   }
 
   const layout = await identifyLayout(rows);
   if (layout.phoneColumn === null) {
+    // **认不出电话列就整份不收。** 猜一列硬着头皮写进去，写错的是人名和号码
+    // 的对应关系——那是没法从库里认出来、只能一条条手工收拾的脏数据
     throw new Error(
-      "认不出哪一列是电话号码。这份名单里没有可以落库的号码，换一份试试"
+      "Couldn't tell which column holds the phone numbers, so nothing was written. Try another file."
     );
   }
 
@@ -329,17 +332,20 @@ export async function importResidents(
     // 名字留空就让 `addResident` 按角色编号给占位名（「3号住客」），
     // 绝不拿电话号当名字。
     //
-    // `role: "tenant"` —— 表格交上来的就是住户名单。但 `residence` **不给**：
-    // 名单上有名字和号码，不等于我们能替他说「他确实住在这儿」。这一条是本项目
-    // 反复修过的推论（见 `membership-facts.ts` 开头的注释）：号码到手就记成
-    // 住在这里，会让共用资源按人头算错、共同规则多征询一个不该问的人。库里
-    // 存成「还不知道」，大脑在往后的对话里自己问出来，用 `setResides` 落定。
+    // `role: "tenant"` + `residence: "confirmed_lives"` —— **这份名单就是
+    // 「这些人住这儿」的确认**（老板 2026-09-27 定）。合作方交上来的不是一本
+    // 通讯录，是某间房的住户名单；房号加人名加号码，本身就是居住事实的声明。
+    //
+    // 这里跟「房东短信报来一个号码」是两回事，后者仍然是 `unknown`：那边
+    // 报的可能只是宿管、物业、中介的号码，号码本身不构成「他住在这儿」。
+    // 判据是**这份数据的来处**说明了什么，不是「拿到号码就按住着算」——
+    // `membership-facts.ts` 开头那条警告针对的是后者，别把它套到名单上。
     const added = await addResident({
       householdId: house.id,
       phone,
       name: name || null,
       role: "tenant",
-      residence: "unknown",
+      residence: "confirmed_lives",
     });
     house.added += 1;
     residents.push({

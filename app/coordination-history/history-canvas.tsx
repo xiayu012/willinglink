@@ -3,6 +3,7 @@
 import { Badge, ScrollArea, TextInput } from "@mantine/core";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useDropzone } from "react-dropzone";
 
 import type { ImportReport } from "@/lib/coordination-history/import";
 import type {
@@ -24,8 +25,9 @@ import type {
  *
  * 没有按人筛选——从头到尾就是整栋房子的完整记录。
  *
- * 页面上**唯一会写库的东西是顶栏那个绿色长条按钮**（合作方名单导入，见
- * `lib/coordination-history/import.ts`）。除此之外这里不发送任何写请求。
+ * 页面上**唯一会写库的东西是顶栏那个绿色长条方框**（合作方名单导入，见
+ * `lib/coordination-history/import.ts`）：文件拖进去 / Ctrl+V 粘进去 / 点它
+ * 选一个，三条路都通。除此之外这里不发送任何写请求。
  * ────────────────────────────────────────────────────────────────────────── */
 
 /** 中枢自己的颜色。永远是圆角方块，跟人的圆点区分开 */
@@ -296,6 +298,97 @@ function ImportResult({
   );
 }
 
+/**
+ * 只收这三种。**按扩展名判，不看浏览器报的 MIME**——同一个 `.csv` 在不同系统
+ * 上 `file.type` 从 `text/csv` 到 `application/vnd.ms-excel` 到空字符串都有，
+ * 照 MIME 卡会把正常文件挡在外面。真正读不读得动由服务端说了算。
+ */
+const SPREADSHEET_EXTENSIONS = [".csv", ".xlsx", ".xls"];
+
+/**
+ * 导入名单的**长条方框**：拖进来 / Ctrl+V 粘进来 / 点一下选文件，三条路都通。
+ *
+ * 做成方框而不是按钮，是因为要它同时当**拖放目标**——按钮没有「拖到这儿」的
+ * 含义，员工看到按钮不会想到能把文件拖上去。框里用大白话把三种用法写全，
+ * 因为用的人不一定熟悉电脑：说「按 Ctrl + V 粘贴」比说「从剪贴板导入」有用。
+ *
+ * 拖拽和点击交给 `react-dropzone`（成熟、轻、就干这一件事）；**粘贴它不管**
+ * （20.1.2 的 dist 里连一个 `paste` 字样都没有），所以下面自己接一个 window
+ * 监听——员工不会先点一下框再粘贴，他就是复制完随手一按。
+ */
+function ImportDropZone({
+  importing,
+  onFile,
+}: {
+  importing: boolean;
+  onFile: (file: File) => void;
+}) {
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    multiple: false,
+    disabled: importing,
+    onDrop: (accepted) => {
+      const file = accepted[0];
+      if (file) {
+        onFile(file);
+      }
+    },
+  });
+
+  // `onFile` 每次渲染都是新的箭头函数，用 ref 兜住，免得粘贴的监听每次渲染
+  // 都拆了重挂
+  const onFileRef = useRef(onFile);
+  useEffect(() => {
+    onFileRef.current = onFile;
+  });
+
+  useEffect(() => {
+    function handlePaste(event: ClipboardEvent) {
+      if (importing) {
+        return;
+      }
+      const file = event.clipboardData?.files?.[0];
+      // **只有剪贴板里真有文件才接管。** 复制一段文字再按 Ctrl+V 是往左边那个
+      // 筛选框里打字，被这里抢走就成了「粘贴没反应」
+      if (!file) {
+        return;
+      }
+      event.preventDefault();
+      onFileRef.current(file);
+    }
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [importing]);
+
+  return (
+    <div
+      {...getRootProps({
+        className: [
+          "flex min-w-[260px] flex-1 cursor-pointer items-center gap-3 rounded-lg border-2 border-dashed px-3 py-2 transition-colors",
+          isDragActive
+            ? "border-[#2f9e44] bg-[#d3f9d8]"
+            : "border-[#8ce99a] bg-[#f8fdf9]",
+          importing ? "cursor-wait opacity-70" : "hover:bg-[#ebfbee]",
+        ].join(" "),
+      })}
+    >
+      <input {...getInputProps({ accept: SPREADSHEET_EXTENSIONS.join(",") })} />
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#2f9e44] text-white">
+        <UploadIcon />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[13px] font-bold leading-tight text-[#2b8a3e]">
+          {importing ? "Importing…" : "Import resident phone numbers"}
+        </span>
+        <span className="mt-0.5 block text-[11px] leading-snug text-[#5c7a63]">
+          {isDragActive
+            ? "Let go to import this file."
+            : "Drag a file into this box, paste it with Ctrl + V, or click here to pick one. CSV or Excel (.xlsx)."}
+        </span>
+      </span>
+    </div>
+  );
+}
+
 export function HistoryCanvas({
   households,
   emptyHouseholdCount,
@@ -327,7 +420,6 @@ export function HistoryCanvas({
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
-  const fileRef = useRef<HTMLInputElement>(null);
 
   /** 导入中 / 上次导入的结果。`null` = 还没导过 */
   const [importing, setImporting] = useState(false);
@@ -388,12 +480,23 @@ export function HistoryCanvas({
   }
 
   /**
-   * 上传一份名单。**这是整页唯一会写库的动作**，只在按下那个按钮时发生。
+   * 上传一份名单。**这是整页唯一会写库的动作**，只在拖进来 / 粘进来 / 选中
+   * 一个文件时才发生。
    *
    * 服务端做三件事：解析表格 → 一次模型调用认出列 → 逐行走生产的
    * `addResident` 落库。这里只负责把文件递过去、把回执原样摆出来。
    */
   async function upload(file: File) {
+    // 拖进来的东西五花八门（照片、压缩包、整个文件夹）。在这里挡一下，比让
+    // 服务端去猜、回来报一句「解析不了」要清楚
+    const lower = file.name.toLowerCase();
+    if (!SPREADSHEET_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
+      setReport({
+        ok: false,
+        error: `“${file.name}” isn't a spreadsheet. This box takes .csv, .xlsx or .xls files.`,
+      });
+      return;
+    }
     setImporting(true);
     setReport(null);
     try {
@@ -420,10 +523,6 @@ export function HistoryCanvas({
       });
     } finally {
       setImporting(false);
-      // 清掉 value，否则同一个文件再选一次不会触发 change
-      if (fileRef.current) {
-        fileRef.current.value = "";
-      }
     }
   }
 
@@ -447,7 +546,7 @@ export function HistoryCanvas({
     <div className="flex h-[100dvh] flex-col bg-white">
       {/* ── 顶栏 ───────────────────────────────────────────────────── */}
       <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-[#e9ecef] px-4 py-2.5 sm:px-5 sm:py-3">
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <Dot color={HUB_COLOR} size={30} square />
           <div className="min-w-0">
             <div className="truncate text-[16px] font-bold leading-tight text-[#212529]">
@@ -462,47 +561,9 @@ export function HistoryCanvas({
           </div>
         </div>
 
-        {/* 整页**唯一**会写库的入口。做成绿色长条、带一个往上送文件的图标，
-            跟旁边那排纯展示的文字分明是两种东西 */}
-        <button
-          type="button"
-          onClick={() => fileRef.current?.click()}
-          disabled={importing}
-          className={`flex shrink-0 items-center gap-2.5 rounded-full bg-[#2f9e44] px-4 py-2 text-left text-white shadow-sm ${
-            importing ? "cursor-wait opacity-70" : "hover:bg-[#2b8a3e]"
-          }`}
-        >
-          <UploadIcon />
-          <span className="min-w-0">
-            <span className="block text-[13px] font-bold leading-tight">
-              {importing ? (
-                "Importing…"
-              ) : (
-                <>
-                  <span className="sm:hidden">Import numbers</span>
-                  <span className="hidden sm:inline">
-                    Import resident phone numbers
-                  </span>
-                </>
-              )}
-            </span>
-            <span className="hidden text-[11px] leading-tight opacity-90 sm:block">
-              CSV or Excel (.xlsx) · AI works out which column is which
-            </span>
-          </span>
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (file) {
-              void upload(file);
-            }
-          }}
-        />
+        {/* 整页**唯一**会写库的入口。绿色长条方框，跟旁边那排纯展示的文字分明
+            是两种东西；窄屏上它自己占一整行 */}
+        <ImportDropZone importing={importing} onFile={upload} />
       </header>
 
       {report ? (
