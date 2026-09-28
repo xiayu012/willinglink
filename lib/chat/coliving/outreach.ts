@@ -20,7 +20,7 @@ import "server-only";
  * 2. **不留待发消息。** 所有入口返回空结果，调用方（cron / enroll 路由）
  *    的投递循环自然空转，不会碰 Twilio 短信 —— 那是已授权排队消息
  *    的投递路由，本次不改。
- * 3. **保留签名。** `kickoffLandlord` / `runOutreachForHousehold` /
+ * 3. **保留签名。** `kickoffFirstContact` / `runOutreachForHousehold` /
  *    `runOutreach` 与返回类型原样保留，路由不改；要走回来必须显式改这个
  *    文件并重新过一遍「谁允许往别的住户发自由文本」这个决定。
  *
@@ -43,12 +43,13 @@ export type OutreachResult = {
 };
 
 /**
- * 开张第一条：原本是房东刚进库时主动联系他、拿到住户号码。
+ * 开张第一条：原本是第一个号码进库时主动联系他、拿到其余号码。
  *
- * 现在**不发**：那是自由文本第三方出站。房东入库仍然建房子、建人，
+ * 现在**不发**：那是自由文本第三方出站。第一个号码入库仍然建房子、建人，
  * 只是不再主动开口——他知道房子的事时自己来问，走普通对话链路。
+ * **他可能是谁一律不在这里假设**（首个号码不代表房东，见 `enrollFirstContact`）。
  */
-export async function kickoffLandlord(_args: {
+export async function kickoffFirstContact(_args: {
   householdId: string;
   personId: string;
 }): Promise<OutreachMessage[]> {

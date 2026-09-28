@@ -10666,6 +10666,31 @@ async function main() {
       "工具描述必须把宿管/物业与系统自己的协调者身份分开"
     );
   });
+  check("名册登记：第一个号码入库不预设他是房东、也不预设他住在这儿", () => {
+    const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
+    const start = repo.indexOf("export async function enrollFirstContact(");
+    assert(start > 0, "必须能定位 enrollFirstContact（第一个号码入库的唯一入口）");
+    const body = repo.slice(start, repo.indexOf("export async function addResident(", start));
+    // 号码本身不说明任何一件事：角色落 other、居住落 null、占位名也按 other 给
+    // （「1号联系人」，不是「1号房东」——名字不能顺手替人安一个身份）。
+    assert(
+      body.includes('placeholderName("other", 1)'),
+      "占位名必须按 other 给，不得写成房东"
+    );
+    const membership = body.slice(body.indexOf("insert into coliving.membership"));
+    assert(
+      /insert into coliving\.membership[\s\S]{0,200}'other', null/.test(membership),
+      "membership 必须显式写 role='other' / resides=null（两件都不知道）"
+    );
+    assert(
+      !/'landlord'/.test(body),
+      "第一个号码不得被默认成 landlord——号码不代表身份"
+    );
+    assert(
+      !/, true\)/.test(membership.slice(0, membership.indexOf("`;"))),
+      "第一个号码不得被默认成住在这儿——号码也不说明居住"
+    );
+  });
   check("名册登记：schema 与迁移放行 manager，且既有记录不被降级", () => {
     const base = readFileSync("lib/db/migrations/manual/coliving-world.sql", "utf8");
     assert(

@@ -1340,13 +1340,21 @@ export async function renamePerson(args: {
 // ── 开张与加人 ──────────────────────────────────────────────────────────────
 
 /**
- * 房东入库：没有房子就开一栋，把他放进去当 landlord。
+ * 第一个号码入库：没有房子就开一栋，把这个人放进去当**还不知道是谁的联系人**。
  *
- * **这是整个系统的起点。** 用户先认识房东、先有房东的号码，
- * 剩下的住户号码由 AI 从房东那里问出来（`addResident`）。
- * 幂等：同一个号码重复调用不会重复建人。
+ * **这是整个系统的起点。** 用户先拿到一个号码——通常是先认识的那个人，
+ * 但**号码本身从来不说明他是谁**：他可能是房东、租客、宿管、物业、中介，
+ * 或者我们压根还不知道。所以这里登记成 `role = 'other'` / `resides = null`
+ * / 占位名「1号联系人」，身份与居住等往后的对话里听出来再补
+ * （`renamePerson` / `addResident`）。
+ *
+ * **绝不默认 landlord，也绝不当成住在这儿**：共用资源按人头分、共同规则按人
+ * 征询，都建在 `resides` 上，一开始就猜错，后面每一步都跟着错。
+ *
+ * 其余住户的号码由 AI 在对话里问出来（`addResident`）。幂等：同一个号码重复
+ * 调用不会重复建人。
  */
-export async function enrollLandlord(args: {
+export async function enrollFirstContact(args: {
   phone: string;
   label?: string | null;
 }): Promise<{ personId: string; householdId: string; created: boolean }> {
@@ -1386,15 +1394,15 @@ export async function enrollLandlord(args: {
 
     const [p] = await tx<{ id: string }[]>`
       insert into coliving.person (display_name, onboarded_at)
-      values ('房东', now()) returning id`;
+      values (${placeholderName("other", 1)}, now()) returning id`;
     await tx`
       insert into coliving.person_contact (person_id, kind, value, is_primary)
       values (${p.id}, 'sms', ${phone}, true)`;
-    // resides 默认 true —— 房东完全可能住在自己房子里，这是事实不是角色推导。
-    // 不确定时按住着算，AI 聊出来再改。
+    // 角色 other / 居住 null —— **两件都不知道**，不是「不确定所以按住着算」。
+    // 见 membership-facts.ts：号码不说明任何一件事，猜错就是算错。
     await tx`
       insert into coliving.membership (household_id, person_id, role, resides)
-      values (${h.id}, ${p.id}, 'landlord', true)`;
+      values (${h.id}, ${p.id}, 'other', null)`;
 
     return { personId: p.id, householdId: h.id, created: true };
   });
@@ -2033,7 +2041,7 @@ export async function createTestHousehold(
  *
  * 这是给**表格导入**用的入口（`/api/coordination-history/import`），不是对话路径：
  * 合作方给一份住户名单，里面写着每间房的名字，我们得先把房子对上号。骨架跟
- * `enrollLandlord` 建的一模一样（place → dwelling → household → epoch），
+ * `enrollFirstContact` 建的一模一样（place → dwelling → household → epoch），
  * 少任何一个环节，这栋房子在别处就查不出来。
  *
  * 名字按 trim + 忽略大小写比对：「A101」和「 a101 」是同一间，不能各开一栋。
