@@ -20,6 +20,7 @@ import type {
 import type {
   HistoryHousehold,
   HistoryMessage,
+  HistoryPerson,
 } from "@/lib/coordination-history/read";
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -42,9 +43,14 @@ import type {
  * 数据层，不值得），但**用户看得见的字必须是 apartment / unit**——合作方看的
  * 就是一套套单元房，「household（住户/一家人）」会让他们以为这是按家庭分的。
  *
- * ## 两栏布局
+ * ## 三栏布局
  *
- * 左边房子列表 / 右边整栋房子的消息记录。
+ * 左边套房列表 / 中间这套房的完整消息记录 / 右边这套房的成员。
+ *
+ * **右边那栏要一直在**（像群聊的成员列表），不是只在没消息时才出现：点进一套房
+ * 看的就是这套房里的人怎么来往，记录里只有色块没有名字，看不到有谁是哪些人，
+ * 那些颜色就白上了。窄屏（< lg）摆不下三栏，改成从标题下面那行
+ * 「N residents ›」拉开的抽屉，盖在记录上、点遮罩关掉。
  *
  * **每一行要回答的是「谁发给谁」，不是「说了什么」。** 所以一行里发件人和
  * 收件人各占一个色块、各带一个名字，中间一个箭头指明方向——扫一列箭头就
@@ -53,9 +59,10 @@ import type {
  * 声音，不用靠字号去分「谁是说话人」。
  *
  * 色块只有颜色、不带字：29 条记录就是 58 个色块，每个里面都塞两个字的话，
- * 读起来是负担而不是帮助。颜色配着旁边的名字看，一次就记住了。
+ * 读起来是负担而不是帮助。颜色配着旁边的名字看，一次就记住了。**右栏那张
+ * 对照表就是「配着看」的那一半**，两条要一起看。
  *
- * 没有按人筛选——从头到尾就是整栋房子的完整记录。
+ * 没有按人筛选——从头到尾就是这套房的完整记录。
  *
  * 页面上**唯一会写库的东西是顶栏那个绿色长条方框**（合作方名单导入，见
  * `lib/coordination-history/import.ts`）：文件拖进去 / Ctrl+V 粘进去 / 点它
@@ -596,6 +603,84 @@ function ImportDropZone({
   );
 }
 
+/**
+ * 这套房里有哪些人。**像群聊的成员列表**：名字竖着排，一排一个，前面一个小
+ * 色点。
+ *
+ * 色点走的是跟记录栏**同一个发色规则**（`personColor(序号)`，序号由数据层
+ * 定死），所以往下读记录时看到某个颜色，抬头就能在这张表里认出是谁。这是这个
+ * 列表存在的**主要理由**——记录里只有色块没有名字，没有这张对照表，颜色就白上了。
+ *
+ * 身份只在不等于 `tenant` 时标出来。这套系统里绝大多数人就是住户，每行都缀
+ * 一个「tenant」等于一列噪音，反而把房东 / 协调员这种**真的需要一眼看出**的
+ * 身份淹掉了。
+ */
+function MemberList({ people }: { people: HistoryPerson[] }) {
+  if (people.length === 0) {
+    return (
+      <div className="px-3 py-4 text-[12px] leading-snug text-[#868e96]">
+        No residents on record for this unit.
+      </div>
+    );
+  }
+  return (
+    <ul>
+      {people.map((person, index) => (
+        <li
+          key={person.id}
+          className="flex items-center gap-2 border-b border-[#f8f9fa] px-3 py-1.5 last:border-b-0"
+        >
+          <Dot color={personColor(index)} size={10} />
+          <span className="min-w-0 flex-1 break-words text-[12px] leading-snug text-[#343a40]">
+            {person.name}
+          </span>
+          {person.role && person.role !== "tenant" ? (
+            <span className="shrink-0 text-[10px] uppercase tracking-wide text-[#adb5bd]">
+              {person.role}
+            </span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * 成员栏：一个标题条 + 一份成员表。**宽屏常驻、窄屏抽屉共用同一份**，两边只
+ * 差在外层容器和那个关闭按钮上。
+ */
+function MembersPanel({
+  people,
+  onClose,
+}: {
+  people: HistoryPerson[];
+  /** 给了才有那行关闭按钮。常驻栏不需要关，就不传 */
+  onClose?: () => void;
+}) {
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-2 border-b border-[#eef0f3] px-3 py-2.5">
+        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-[#868e96]">
+          Members · {people.length}
+        </span>
+        {onClose ? (
+          <button
+            type="button"
+            onClick={onClose}
+            className="-mr-1 shrink-0 px-1 text-[16px] leading-none text-[#868e96]"
+            aria-label="Close members"
+          >
+            ×
+          </button>
+        ) : null}
+      </div>
+      <ScrollArea className="min-h-0 flex-1" type="auto">
+        <MemberList people={people} />
+      </ScrollArea>
+    </>
+  );
+}
+
 export function HistoryCanvas({
   households,
   emptyHouseholdCount,
@@ -611,13 +696,21 @@ export function HistoryCanvas({
   );
   const [query, setQuery] = useState("");
   /**
-   * 窄屏下一次只显示一栏，所以得记住在看哪一栏。宽屏两栏并排，用不上这个
+   * 窄屏下一次只显示一栏，所以得记住在看哪一栏。宽屏三栏并排，用不上这个
    * 状态。带着 ?h= 打开说明是别人分享的链接，直接落到记录栏，别让人再多点
    * 一下。
    */
   const [mobilePane, setMobilePane] = useState<"list" | "chat">(
     initialHouseholdId ? "chat" : "list"
   );
+  /**
+   * 窄屏上成员表是**盖在记录上的一层**，不是第三栏。
+   *
+   * 三栏并排在 768px 上会把记录栏挤到只剩两百多像素、一行字断成四五截，所以
+   * 窄屏改成抽屉：默认收起，点标题那行「N residents」拉开。宽屏（lg 起）它是
+   * 常驻的右栏，这个状态用不上。
+   */
+  const [peopleOpen, setPeopleOpen] = useState(false);
 
   const household =
     households.find((h) => h.id === householdId) ?? households[0] ?? null;
@@ -709,6 +802,9 @@ export function HistoryCanvas({
     setHouseholdId(next);
     // 窄屏：选完直接进记录栏，不用再点一次
     setMobilePane("chat");
+    // 换房时把成员抽屉收起来：留着的话，新一套房的成员会直接盖在屏幕上，
+    // 看起来像是刚才那套房的
+    setPeopleOpen(false);
     // 让 URL 可分享：发给别人时带上 ?h=<房子 id> 直接落在同一套房上
     window.history.replaceState(null, "", `?h=${next}`);
   }
@@ -895,11 +991,11 @@ export function HistoryCanvas({
           </ScrollArea>
         </aside>
 
-        {/* ── 右：整栋房子的消息记录（宽屏常驻；窄屏是一整屏）───── */}
+        {/* ── 中：这套房的完整消息记录（宽屏常驻；窄屏是一整屏）─── */}
         <section
           className={`${
-            mobilePane === "list" ? "hidden" : "flex"
-          } min-w-0 flex-1 flex-col md:flex`}
+            mobilePane === "chat" ? "flex" : "hidden"
+          } relative min-w-0 flex-1 flex-col md:flex`}
         >
           {/* 内容限宽 820px 居中：正文虽然退到次要，行太长一样难读 */}
           <div className="shrink-0 border-b border-[#eef0f3] px-4 py-3">
@@ -916,12 +1012,25 @@ export function HistoryCanvas({
                 <div className="break-words text-[16px] font-bold text-[#212529]">
                   {household.label}
                 </div>
-                <div className="mt-0.5 text-[12px] text-[#868e96]">
-                  {people.length} resident{people.length === 1 ? "" : "s"} ·{" "}
-                  {messages.length === 0
-                    ? "no messages yet"
-                    : `${messages.length} messages · complete record`}
-                </div>
+                {messages.length === 0 ? (
+                  <div className="mt-0.5 text-[12px] text-[#868e96]">
+                    {people.length} resident
+                    {people.length === 1 ? "" : "s"} · no messages yet
+                  </div>
+                ) : (
+                  <div className="mt-0.5 text-[12px] text-[#868e96]">
+                    {messages.length} messages · complete record
+                  </div>
+                )}
+                {/* 窄屏上成员表收在抽屉里，这一行就是拉开它的把手；宽屏有常驻的
+                    右栏，这个按钮跟着一起消失 */}
+                <button
+                  type="button"
+                  onClick={() => setPeopleOpen(true)}
+                  className="mt-0.5 text-[12px] font-semibold text-[#5f3dc4] lg:hidden"
+                >
+                  {people.length} resident{people.length === 1 ? "" : "s"} ›
+                </button>
               </div>
             </div>
           </div>
@@ -947,47 +1056,42 @@ export function HistoryCanvas({
                   />
                 </div>
               ))}
-              {/* 还没说过话的房子不是一片空白：**它已经有人了**，只是没人发过
-                  消息。尤其刚导完名单，这一屏是用户唯一能确认「人真的进去了」
-                  的地方——只写一句「还没有消息」等于让人对着空气怀疑导入成功没有。
-                  成员名字用跟上面记录栏**同一个发色规则**，点回有消息的房子时
-                  颜色能对上号 */}
+              {/* 没人说过话的房子不是一片空白：**它已经有人了**。这里只说
+                  「还没有消息」——有哪些人是**右边那栏**的事，别在同一个页面
+                  上摆两份成员表 */}
               {messages.length === 0 ? (
-                <div className="p-4">
-                  <div className="text-[13px] text-[#868e96]">
-                    No messages in this unit yet.
-                  </div>
-                  {people.length > 0 ? (
-                    <>
-                      <div className="mt-4 text-[11px] font-semibold uppercase tracking-wide text-[#adb5bd]">
-                        {people.length} resident
-                        {people.length === 1 ? "" : "s"} in this unit
-                      </div>
-                      <ul className="mt-2">
-                        {people.map((p, index) => (
-                          <li
-                            key={p.id}
-                            className="flex items-center gap-2.5 border-b border-[#f8f9fa] py-1.5 last:border-b-0"
-                          >
-                            <Dot color={personColor(index)} size={12} />
-                            <span className="min-w-0 flex-1 break-words text-[13px] text-[#212529]">
-                              {p.name}
-                            </span>
-                            {p.role ? (
-                              <span className="shrink-0 text-[11px] text-[#adb5bd]">
-                                {p.role}
-                              </span>
-                            ) : null}
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
+                <div className="p-4 text-[13px] text-[#868e96]">
+                  No messages in this unit yet.
                 </div>
               ) : null}
             </div>
           </ScrollArea>
+
+          {/* 窄屏的成员抽屉。点后面那层半透明遮罩也能关 */}
+          {peopleOpen ? (
+            <div className="absolute inset-0 z-20 flex justify-end lg:hidden">
+              <button
+                type="button"
+                className="absolute inset-0 bg-[#212529]/20"
+                onClick={() => setPeopleOpen(false)}
+                aria-label="Close members"
+              />
+              <div className="relative flex w-[220px] max-w-[80%] flex-col border-[#e9ecef] border-l bg-white shadow-xl">
+                <MembersPanel
+                  people={people}
+                  onClose={() => setPeopleOpen(false)}
+                />
+              </div>
+            </div>
+          ) : null}
         </section>
+
+        {/* ── 右：这套房的成员（宽屏常驻；窄屏收进抽屉）────────────
+            像群聊的成员列表一样**一直在**——点进一套房就是在看这套房里的人
+            怎么来往，看不到有谁，颜色和名字就对不上号。 */}
+        <aside className="hidden w-[190px] shrink-0 flex-col border-[#e9ecef] lg:flex lg:border-l">
+          <MembersPanel people={people} />
+        </aside>
       </div>
     </div>
   );
