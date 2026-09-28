@@ -115,7 +115,13 @@ export type ImportReport = {
   layout: ImportLayout;
   households: Array<{
     id: string;
+    /** 归一之后的套房名，也是库里 `household.label` 真正写下的那个 */
     label: string;
+    /**
+     * 被折进这套房的**原始房号**（`501-A` / `401-1` …），不含与 label 相同的那些。
+     * 归一是一次不可撤销的判断，回执里得让它一眼可查：这几行当初是并进这里的。
+     */
+    aliases: string[];
     /** 这套房是这次新建的，还是库里本来就有的 */
     created: boolean;
     added: number;
@@ -134,6 +140,7 @@ export type ImportStage =
   | { stage: "read" }
   | { stage: "identify" }
   | { stage: "repair"; count: number }
+  | { stage: "units"; count: number }
   | { stage: "write"; done: number; total: number };
 
 type OnStage = (stage: ImportStage) => void;
@@ -460,6 +467,216 @@ function composeLabel(
   return wholeFile?.trim() || "Unnamed unit";
 }
 
+// ── 套房归一 ────────────────────────────────────────────────────────────────
+
+/**
+ * 一次最多送多少个不同的房号原文去做归一分组。
+ *
+ * 一栋公寓楼的单元数撑死几百个，超过这个数说明这多半不是一份「一栋楼」的名单，
+ * 超出部分原样保留并在回执里报出来，不静默丢。
+ */
+const MAX_UNIT_LABELS = 500;
+
+/**
+ * 一次调用里放多少条原文。
+ *
+ * **分成几批不是性能取舍，是防截断。** 输出是「每条原文一个 `{raw, unit}`」，
+ * 条数一多 JSON 本身就长；而生产模型是推理模型，**reasoning tokens 计入
+ * `maxOutputTokens`**（见 `feature-llm.ts` 那张表）。几百条一次问，推理加上
+ * 几千字的 JSON 很容易把额度用光、`finishReason: "length"`，整条导入就跟着
+ * 失败了——为了一个「能合并得更细」的附带好处，把正事赔进去不划算。
+ *
+ * 分批之后每批的输出都是短而确定的，**批与批之间并行跑**，等待时间不叠加。
+ * 代价是跨批的相似房号模型看不到（`501-A` 和 `501-B` 落在两批里就合不起来），
+ * 所以宁可每批塞大一点、批数少一点。
+ */
+const UNIT_CHUNK_SIZE = 80;
+
+/**
+ * 归一这一步自己的输出上限。
+ *
+ * **比通用短调用那档（4096）高**：那一档是给「一个 token、两个字段、一条短信」
+ * 定的，这里的输出是**几十条**映射，不是一句话。低了下场就是推理把额度吃光、
+ * 一条映射都没吐出来。
+ */
+const UNIT_RESOLVE_MAX_OUTPUT_TOKENS = 8192;
+
+/** 原文 → 套房。`raw === unit` 表示这一条没被折叠 */
+export type UnitResolution = { raw: string; unit: string };
+
+const unitResolutionSchema = z.object({
+  units: z.array(
+    z.object({
+      raw: z
+        .preprocess(
+          (v) => (v === null || v === undefined ? "" : String(v)),
+          z.string()
+        )
+        .nullable(),
+      unit: z
+        .preprocess(
+          (v) => (v === null || v === undefined ? "" : String(v)),
+          z.string()
+        )
+        .nullable(),
+    })
+  ),
+});
+
+const UNIT_RESOLUTION_SYSTEM = [
+  "用户给你一份住户名单里**出现过的全部房号原文**，一行一个，写成 `raw N: <原文>`。",
+  "",
+  "这份名单常常记到比「一套房」更细的粒度：房号上还挂着一间房 / 一个床位 / 一个",
+  "子单元的编号。你的任务是把每一行原文映射到它所属的**那套房**。",
+  "",
+  "原文有时是**几列拼起来的**，中间用 ` · ` 隔开（楼栋名 · 楼座 · 房号）。",
+  "这种情况下**每一段都要留着**，只砍掉最后那段里属于房间 / 床位的尾缀。",
+  "",
+  "例子：",
+  '  "501-A"、"501-B"、"501"      → 都是 501 这套房',
+  '  "401-1"、"401-2"             → 都是 401 这套房',
+  '  "Bldg A Unit 101 Bed 3"      → 是 "Bldg A Unit 101" 这套房',
+  '  "Maple Court · A · 501-A"    → 是 "Maple Court · A · 501" 这套房',
+  '  "Maple Court · A · 501-B"    → 也是 "Maple Court · A · 501"',
+  "",
+  "规则：",
+  "  · **只有确实是同一套房时才合并。** 不同楼、不同层、不同单元号就是不同的房，",
+  "    哪怕看着很像——**认不出来的编号一个都不许并**。",
+  "  · 只砍掉明确是「房间 / 床位 / 子单元」的限定部分，房号本身（楼号字母、单元号）",
+  "    要留着，` · ` 两边的段也要留着。",
+  "  · **套房名必须是原文的一部分，一字不差。** 你只能**删字**，不能改字、不能缩写、",
+  "    不能重排、不能另起一个名字、不能翻译，标点和空格也照抄。原文里没有的东西",
+  "    不许出现在结果里。",
+  "  · **拿不准就原样返回。** 猜错合并比不合并糟得多：并错了是把人塞进别人家，",
+  "    用户很难发现也很难撤；没并顶多是列表里多几行，他一眼就能看出来。",
+  "  · 每一条给你的原文都必须在结果里**恰好出现一次**，`raw` 照抄你收到的原文。",
+  "",
+  "只输出一个 JSON 对象，不要任何解释：",
+  '  {"units": [{"raw": "501-A", "unit": "501"}, {"raw": "501", "unit": "501"}]}',
+].join("\n");
+
+/** 比较时把空白和大小写抹平，免得为了一个空格判成「不包含」 */
+function normalizeForCompare(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * 把「房间 / 床位级」的房号原文收拢到「套房级」。
+ *
+ * 为什么值得多花一次模型调用：这件事**判断不了靠正则**。合作方把房间号挂上去的
+ * 写法五花八门（`501-A` / `401-1` / `101 bed 3` / `#2` …），而且同样的 `-A`
+ * 在一份表里是房间、在另一份表里可能就是楼座。写死一套剥离规则，等于拿这一份
+ * 文件的样式去赌下一份。
+ *
+ * 而且**把原始房号一次性全摆给模型看**，它才能看出「501-A 和 501-B 是一家人」
+ * 这种要横着比才知道的事——只看前十几行是看不出来的。这也正是 `renderPreview`
+ * 那种「看个开头」做不到的部分。
+ *
+ * **代码这关必须过**：模型给的套房名要能在原文里找得到（只许删、不许编），
+ * 找不到就丢掉、那条原文保持原样。否则模型可以凭空造一个房号，把两拨不相干的
+ * 人合并到同一个不存在的名字底下，而库里看起来完全正常。
+ */
+async function resolveUnits(
+  labels: string[],
+  onStage?: OnStage
+): Promise<UnitResolution[]> {
+  const distinct = [...new Set(labels.filter(Boolean))];
+  // 只有一种房号时没什么可归一的，不花这笔钱
+  if (distinct.length < 2) {
+    return distinct.map((raw) => ({ raw, unit: raw }));
+  }
+
+  const batch = distinct.slice(0, MAX_UNIT_LABELS);
+  onStage?.({ stage: "units", count: batch.length });
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < batch.length; i += UNIT_CHUNK_SIZE) {
+    chunks.push(batch.slice(i, i + UNIT_CHUNK_SIZE));
+  }
+
+  // 并行跑：分几批是为了防截断，不该让用户多等几倍时间
+  const answers = await Promise.all(chunks.map((chunk) => resolveUnitChunk(chunk)));
+
+  const resolved = new Map<string, string>();
+  for (const { raw, unit } of answers.flat()) {
+    if (!resolved.has(raw)) {
+      resolved.set(raw, unit);
+    }
+  }
+
+  // 模型漏答的原文一律保持原样——宁可多几套房，也不能因为模型没提就把人丢掉
+  for (const raw of batch) {
+    if (!resolved.has(raw)) {
+      resolved.set(raw, raw);
+    }
+  }
+  // 超过上限没送去的，原样保留
+  for (const raw of distinct.slice(MAX_UNIT_LABELS)) {
+    resolved.set(raw, raw);
+  }
+
+  return [...resolved].map(([raw, unit]) => ({ raw, unit }));
+}
+
+/**
+ * 一批原文 → 一批映射。**这一批问不出来就整批原样返回，不往上抛。**
+ *
+ * 归一只是让列表好看一点的**附带好处**，不该有权把整次导入判死：模型超时、
+ * 输出被截断、回来的 JSON 不合 schema，这时候最想要的结果是「房号没合并，
+ * 但人是照样导进去了」，而不是用户等了两分钟等到一句失败、还要重来一遍。
+ * 所以这里吞掉异常，让调用方拿到等同「这批什么都没合」的结果。
+ */
+async function resolveUnitChunk(chunk: string[]): Promise<UnitResolution[]> {
+  const identity: UnitResolution[] = chunk.map((raw) => ({ raw, unit: raw }));
+  let items: Array<{ raw: string | null; unit: string | null }>;
+  try {
+    const llm = productionFeatureLlm(colivingModelId());
+    const { value } = await structuredCall(llm, {
+      stage: "import:resolve-units",
+      name: "resident-unit-resolution",
+      system: UNIT_RESOLUTION_SYSTEM,
+      user: chunk.map((label, index) => `raw ${index}: ${label}`).join("\n"),
+      maxOutputTokens: UNIT_RESOLVE_MAX_OUTPUT_TOKENS,
+      schema: unitResolutionSchema,
+    });
+    items = (value as { units: Array<{ raw: string | null; unit: string | null }> })
+      .units;
+  } catch (error) {
+    console.error("[coordination-history] 房号归一这批没成，按原样保留", error);
+    return identity;
+  }
+
+  const known = new Set(chunk);
+  const resolved = new Map<string, string>();
+  for (const item of items) {
+    const raw = (item.raw ?? "").trim();
+    const unit = (item.unit ?? "").trim();
+    // 原文不是我们给过的（模型编的）→ 丢掉
+    if (!known.has(raw) || resolved.has(raw)) {
+      continue;
+    }
+    // 空、过长、或者**不是原文的一部分**（模型改名 / 缩写 / 翻译了）→ 不采纳，
+    // 保持原样。这条是整套归一里唯一的硬约束：模型只能做减法
+    if (
+      !unit ||
+      unit.length > 120 ||
+      !normalizeForCompare(raw).includes(normalizeForCompare(unit))
+    ) {
+      resolved.set(raw, raw);
+      continue;
+    }
+    resolved.set(raw, unit);
+  }
+
+  // 模型漏答的，原样保留
+  for (const raw of chunk) {
+    if (!resolved.has(raw)) {
+      resolved.set(raw, raw);
+    }
+  }
+  return [...resolved].map(([raw, unit]) => ({ raw, unit }));
+}
+
 // ── 计划（不写库） ──────────────────────────────────────────────────────────
 
 export type PlannedResident = {
@@ -473,7 +690,10 @@ export type PlannedResident = {
 export type ImportPlan = {
   sheetName: string;
   layout: ImportLayout;
+  /** `householdLabel` 已经是**归一之后的套房名**，不是原表里的原文 */
   residents: PlannedResident[];
+  /** 原文房号 → 套房名的完整对应，回执里据此展示「这几行并进了哪套房」 */
+  unitResolutions: UnitResolution[];
   skipped: Array<{ row: number; raw: string; reason: string }>;
   truncated: number;
 };
@@ -557,9 +777,21 @@ export async function planResidents(
     });
   }
 
+  // 归一在**最终住户列表**上做，不是在原始行上：只有真正会被写进库的那些房号
+  // 才值得摆给模型看，被跳过的行不该影响它的判断
+  const unitResolutions = await resolveUnits(
+    residents.map((r) => r.householdLabel),
+    onStage
+  );
+  const unitByRaw = new Map(unitResolutions.map((r) => [r.raw, r.unit]));
+  for (const resident of residents) {
+    resident.householdLabel =
+      unitByRaw.get(resident.householdLabel) ?? resident.householdLabel;
+  }
+
   residents.sort((a, b) => a.row - b.row);
   skipped.sort((a, b) => a.row - b.row);
-  return { sheetName, layout, residents, skipped, truncated };
+  return { sheetName, layout, residents, unitResolutions, skipped, truncated };
 }
 
 // ── 写入 ────────────────────────────────────────────────────────────────────
@@ -577,9 +809,27 @@ export async function importResidents(
 ): Promise<ImportReport> {
   const plan = await planResidents(buffer, onStage);
 
+  // 哪几行原文并进了哪套房。回执要能回答「501 里明明有六个人，原表哪六行」，
+  // 所以归一这一步的结果**必须随回执一起交出来**，不能只体现在最终的 label 上
+  const aliasesByUnit = new Map<string, string[]>();
+  for (const { raw, unit } of plan.unitResolutions) {
+    if (raw === unit) {
+      continue;
+    }
+    const list = aliasesByUnit.get(unit) ?? [];
+    list.push(raw);
+    aliasesByUnit.set(unit, list);
+  }
+
   const households = new Map<
     string,
-    { id: string; label: string; created: boolean; added: number }
+    {
+      id: string;
+      label: string;
+      aliases: string[];
+      created: boolean;
+      added: number;
+    }
   >();
   const residents: ImportedResident[] = [];
 
@@ -596,6 +846,7 @@ export async function importResidents(
       house = {
         id: found.householdId,
         label: planned.householdLabel,
+        aliases: aliasesByUnit.get(planned.householdLabel) ?? [],
         created: found.created,
         added: 0,
       };

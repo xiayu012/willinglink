@@ -2,7 +2,14 @@
 
 import { Badge, ScrollArea, TextInput } from "@mantine/core";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useDropzone } from "react-dropzone";
 
 import type {
@@ -206,11 +213,60 @@ function UploadIcon({ className }: { className?: string }) {
 }
 
 /**
- * 导入结果。
+ * 回执框的壳子：**浮在右下角的半透明小卡片**。
  *
- * **把模型认出来的列结构原样摆出来**：导入是一次性动作、没法撤销，事后想不通
- * 「怎么多出来这几个人」时，唯一的线索就是它当初把哪一列当成了电话列。
- * 认错列在这儿是一眼可见的，藏起来就只能对着错数据猜。
+ * **它不在正常文档流里**（`fixed`），这一点是整个设计的重点。早先回执是一条
+ * 占位横条，导完就顶在顶栏和记录栏之间不走——那是块**永久占着地方**的信息，
+ * 看一次就够，留着只是把下面的记录往下挤。
+ *
+ * 半透明 + 模糊，是为了让它读起来像「飘在上面的一层」，而不是页面的一部分；
+ * 外层容器 `pointer-events-none`、只有卡片本身 `pointer-events-auto`，
+ * 这样它盖住的那条缝还是能点到下面的东西。
+ */
+function Shell({
+  tone,
+  onClose,
+  children,
+}: {
+  tone: "good" | "bad";
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const good = tone === "good";
+  return (
+    <div className="pointer-events-none fixed inset-x-3 bottom-3 z-50 flex justify-end">
+      <div
+        className={`pointer-events-auto flex max-h-[70dvh] w-full max-w-[560px] items-start gap-3 overflow-y-auto rounded-lg border px-4 py-3 shadow-lg backdrop-blur-sm ${
+          good
+            ? "border-[#b2f2bb] bg-[#ebfbee]/90"
+            : "border-[#ffc9c9] bg-[#fff5f5]/90"
+        } max-md:max-w-none`}
+      >
+        {children}
+        <button
+          type="button"
+          onClick={onClose}
+          className={`shrink-0 text-[18px] leading-none ${
+            good ? "text-[#2b8a3e]" : "text-[#c92a2a]"
+          }`}
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 导入结果浮层。
+ *
+ * **半透明、浮在上面、自己消失。** 见 `Shell` 上面那段：它不占布局，看完就走。
+ *
+ * **但仍然把模型认出来的列结构原样摆出来**：导入是一次性动作、没法撤销，事后
+ * 想不通「怎么多出来这几个人」时，唯一的线索就是它当初把哪一列当成了电话列、
+ * 又把哪些房号并成了一套。为了让人来得及看完，成功 12 秒、失败 30 秒（失败要
+ * 读完才知道该换文件还是重试），点一下可以立刻关。
  */
 function ImportResult({
   report,
@@ -219,28 +275,31 @@ function ImportResult({
   report: ImportReport | { ok: false; error: string };
   onClose: () => void;
 }) {
+  /**
+   * 到点自己走。
+   *
+   * 依赖里带上 `report`：又一次导入换了新的回执时，计时**重新开始**，不然
+   * 第二次的结果会继承第一次剩下的秒数、还没看清就没了。
+   */
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, report.ok ? 12_000 : 30_000);
+    return () => window.clearTimeout(timer);
+  }, [report, onClose]);
+
   if (!report.ok) {
     return (
-      <div className="border-b border-[#ffc9c9] bg-[#fff5f5] px-4 py-3 sm:px-5">
-        <div className="mx-auto flex w-full max-w-[1100px] items-start gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-bold text-[#c92a2a]">
-              Import failed
-            </div>
-            <div className="mt-0.5 break-words text-[12px] text-[#a61e1e]">
-              {report.error}
-            </div>
+      <Shell tone="bad" onClose={onClose}>
+        {/* 和成功那支一样包一层：`Shell` 里是个 flex 行，直接塞两个兄弟节点
+            会被并排摆成两栏 */}
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-bold text-[#c92a2a]">
+            Import failed
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="shrink-0 text-[18px] leading-none text-[#c92a2a]"
-            aria-label="Dismiss"
-          >
-            ×
-          </button>
+          <div className="mt-0.5 break-words text-[12px] text-[#a61e1e]">
+            {report.error}
+          </div>
         </div>
-      </div>
+      </Shell>
     );
   }
 
@@ -255,80 +314,75 @@ function ImportResult({
       : "none";
 
   return (
-    <div className="max-h-[45dvh] overflow-y-auto border-b border-[#b2f2bb] bg-[#ebfbee] px-4 py-3 sm:px-5">
-      <div className="mx-auto flex w-full max-w-[1100px] items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-bold text-[#2b8a3e]">
-            Imported {report.residents.length} resident
-            {report.residents.length === 1 ? "" : "s"}
-            {newUnits > 0
-              ? ` · ${newUnits} new unit${newUnits === 1 ? "" : "s"}`
-              : ""}
-            {newPeople > 0 ? ` · ${newPeople} new` : ""}
-          </div>
-
-          {/* 认出来的列结构**原样摆出来**：导入不可撤销，事后想不通「怎么多出来
-              这几个人」时，唯一的线索就是它当初把哪几列当成了房号 */}
-          <div className="mt-1 text-[11px] text-[#2f6f3e]">
-            Sheet “{report.sheetName}” · rows start at{" "}
-            {report.layout.dataStartRow}
-            {" · "}name {column(report.layout.nameColumn)}
-            {" · "}phone {column(report.layout.phoneColumn)}
-            {" · "}unit from {unitColumns}
-            {report.layout.householdName
-              ? ` (“${report.layout.householdName}” for the whole file)`
-              : ""}
-          </div>
-
-          <div className="mt-2 flex flex-wrap gap-2">
-            {report.households.map((h) => (
-              <span
-                key={h.id}
-                className="rounded-full bg-white px-2.5 py-1 text-[11px] text-[#2b8a3e]"
-              >
-                {h.label}
-                <span className="opacity-70">
-                  {" "}
-                  +{h.added}
-                  {h.created ? " · new" : ""}
-                </span>
-              </span>
-            ))}
-          </div>
-
-          <div className="mt-2 break-words text-[11px] text-[#2f6f3e]">
-            {report.residents.map((r) => `${r.name} ${r.phone}`).join(" · ")}
-          </div>
-
-          {report.skipped.length > 0 ? (
-            <div className="mt-2 text-[11px] text-[#a26a00]">
-              Skipped {report.skipped.length} row
-              {report.skipped.length === 1 ? "" : "s"} with no readable phone
-              number (rows{" "}
-              {report.skipped
-                .slice(0, 12)
-                .map((s) => s.row)
-                .join(", ")}
-              {report.skipped.length > 12 ? ", …" : ""}).
-            </div>
-          ) : null}
-          {report.truncated > 0 ? (
-            <div className="mt-2 text-[11px] text-[#a26a00]">
-              {report.truncated} more rows were left out — this importer takes
-              1000 at a time.
-            </div>
-          ) : null}
+    <Shell tone="good" onClose={onClose}>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-bold text-[#2b8a3e]">
+          Imported {report.residents.length} resident
+          {report.residents.length === 1 ? "" : "s"}
+          {newUnits > 0
+            ? ` · ${newUnits} new unit${newUnits === 1 ? "" : "s"}`
+            : ""}
+          {newPeople > 0 ? ` · ${newPeople} new` : ""}
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 text-[18px] leading-none text-[#2b8a3e]"
-          aria-label="Dismiss"
-        >
-          ×
-        </button>
+
+        {/* 认出来的列结构**原样摆出来**：导入不可撤销，事后想不通「怎么多出来
+            这几个人」时，唯一的线索就是它当初把哪几列当成了房号 */}
+        <div className="mt-1 text-[11px] text-[#2f6f3e]">
+          Sheet “{report.sheetName}” · rows start at {report.layout.dataStartRow}
+          {" · "}name {column(report.layout.nameColumn)}
+          {" · "}phone {column(report.layout.phoneColumn)}
+          {" · "}unit from {unitColumns}
+          {report.layout.householdName
+            ? ` (“${report.layout.householdName}” for the whole file)`
+            : ""}
+        </div>
+
+        {/* 每套房带上它**收拢了哪些原始房号**。归一是一次不可撤销的判断，
+            只显示合并后的结果，用户没法核对「501 里怎么会有六个人」——
+            这几行原文就是他能对回原表的东西 */}
+        <ul className="mt-2 space-y-1">
+          {report.households.map((h) => (
+            <li key={h.id} className="flex flex-wrap items-baseline gap-x-2">
+              <span className="text-[12px] font-semibold text-[#2b8a3e]">
+                {h.label}
+              </span>
+              <span className="text-[11px] text-[#2f6f3e]">
+                +{h.added}
+                {h.created ? " · new" : ""}
+              </span>
+              {h.aliases.length > 0 ? (
+                <span className="break-all text-[11px] text-[#5c7a63]">
+                  from {h.aliases.join(", ")}
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-2 break-words text-[11px] text-[#2f6f3e]">
+          {report.residents.map((r) => `${r.name} ${r.phone}`).join(" · ")}
+        </div>
+
+        {report.skipped.length > 0 ? (
+          <div className="mt-2 text-[11px] text-[#a26a00]">
+            Skipped {report.skipped.length} row
+            {report.skipped.length === 1 ? "" : "s"} with no readable phone
+            number (rows{" "}
+            {report.skipped
+              .slice(0, 12)
+              .map((s) => s.row)
+              .join(", ")}
+            {report.skipped.length > 12 ? ", …" : ""}).
+          </div>
+        ) : null}
+        {report.truncated > 0 ? (
+          <div className="mt-2 text-[11px] text-[#a26a00]">
+            {report.truncated} more rows were left out — this importer takes
+            1000 at a time.
+          </div>
+        ) : null}
       </div>
-    </div>
+    </Shell>
   );
 }
 
@@ -417,6 +471,12 @@ function describeStage(stage: ImportStage | null): {
         headline: "Reading the columns…",
         detail:
           "Asking the AI which column holds the phone numbers. This is the slow part.",
+      };
+    case "units":
+      return {
+        headline: `Sorting out ${stage.count} unit label${stage.count === 1 ? "" : "s"}…`,
+        detail:
+          "Some entries look like a room inside a unit — the AI is working out which ones are the same apartment.",
       };
     case "repair":
       return {
@@ -576,6 +636,12 @@ export function HistoryCanvas({
   /** 服务端推过来的当前步骤。导入中才非空 */
   const [stage, setStage] = useState<ImportStage | null>(null);
   const [elapsed, setElapsed] = useState(0);
+
+  /**
+   * **必须是稳定引用**：回执框靠 `useEffect` 到点自己关，依赖里带着这个回调，
+   * 每次渲染新发一个箭头函数的话，计时会被反复重置、永远关不掉。
+   */
+  const closeReport = useCallback(() => setReport(null), []);
 
   /**
    * 秒表。**这是「等很久」最直接的解药**：秒数在跳，就说明还在动。
@@ -745,7 +811,7 @@ export function HistoryCanvas({
       </header>
 
       {report ? (
-        <ImportResult report={report} onClose={() => setReport(null)} />
+        <ImportResult report={report} onClose={closeReport} />
       ) : null}
 
       <div className="flex min-h-0 flex-1">
