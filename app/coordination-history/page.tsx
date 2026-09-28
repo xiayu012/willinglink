@@ -12,7 +12,7 @@ import { HistoryCanvas } from "./history-canvas";
  */
 export const metadata: Metadata = {
   title: "Coordination history · WillingLink",
-  description: "Read-only view of coordination threads across households.",
+  description: "Read-only view of coordination threads across units.",
   // 公开可访问，但不进搜索引擎：这个链接是发给特定的人看的
   robots: { index: false, follow: false },
 };

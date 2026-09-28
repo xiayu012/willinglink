@@ -5,14 +5,39 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 
-import type { ImportReport } from "@/lib/coordination-history/import";
+import type {
+  ImportFailure,
+  ImportReport,
+  ImportStage,
+} from "@/lib/coordination-history/import";
 import type {
   HistoryHousehold,
   HistoryMessage,
 } from "@/lib/coordination-history/read";
 
 /* ──────────────────────────────────────────────────────────────────────────
- * 两栏：左边房子列表 / 右边整栋房子的消息记录。
+ * ⚠️ **这一页的界面文字一律英文，写死，别改。**
+ *
+ * 改这条要老板明确发话。原因：这一页是**直接分享给合作方**看的窗口，对面
+ * 未必读中文，而它又长期靠 vibe coding 往下加东西——不写死的话，下一次顺手的
+ * 改动就会掺回中文，而且是**悄悄**掺回来，谁也不会在本地注意到。
+ *
+ * **只约束界面（UI）**：按钮、标题、提示、报错、空状态、aria-label 这些。
+ * **聊天记录本身不翻译、不改写**，数据库里是什么语言就照原样显示什么——那是
+ * 证据，不是文案，翻过一遍就不再是原始记录了。
+ *
+ * 这条是整个 `app/coordination-history/` 的规矩，不只这一个文件。
+ *
+ * ## 「household」在这页上写作 apartment / unit
+ *
+ * 项目已经转向**公寓**：以前是本地打工人合租的独栋，现在一套房就是一个单位。
+ * 代码里 `household` 这个标识符沿用（库表、repo 函数都叫这个，改名要动整个
+ * 数据层，不值得），但**用户看得见的字必须是 apartment / unit**——合作方看的
+ * 就是一套套单元房，「household（住户/一家人）」会让他们以为这是按家庭分的。
+ *
+ * ## 两栏布局
+ *
+ * 左边房子列表 / 右边整栋房子的消息记录。
  *
  * **每一行要回答的是「谁发给谁」，不是「说了什么」。** 所以一行里发件人和
  * 收件人各占一个色块、各带一个名字，中间一个箭头指明方向——扫一列箭头就
@@ -161,7 +186,7 @@ function MessageRow({
 }
 
 /** 往上送进托盘：一眼看得懂是「导入文件」，不是下载 */
-function UploadIcon() {
+function UploadIcon({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -170,7 +195,7 @@ function UploadIcon() {
       strokeWidth={2}
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-[19px] w-[19px] shrink-0"
+      className={`h-[19px] w-[19px] shrink-0 ${className ?? ""}`}
       aria-hidden
     >
       <path d="M12 15V3" />
@@ -220,27 +245,36 @@ function ImportResult({
   }
 
   const newPeople = report.residents.filter((r) => r.created).length;
-  const newHouses = report.households.filter((h) => h.created).length;
+  const newUnits = report.households.filter((h) => h.created).length;
   const column = (index: number | null) =>
     index === null ? "none" : `#${index}`;
+  // 房号可能散在好几列里，摆出来的是**有序的那一组**
+  const unitColumns =
+    report.layout.householdColumns.length > 0
+      ? report.layout.householdColumns.map((c) => `#${c}`).join(" + ")
+      : "none";
 
   return (
     <div className="max-h-[45dvh] overflow-y-auto border-b border-[#b2f2bb] bg-[#ebfbee] px-4 py-3 sm:px-5">
       <div className="mx-auto flex w-full max-w-[1100px] items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-bold text-[#2b8a3e]">
-            Imported {report.residents.length} residents
-            {newHouses > 0 ? `, created ${newHouses} new household` : ""}
-            {newHouses > 1 ? "s" : ""}
+            Imported {report.residents.length} resident
+            {report.residents.length === 1 ? "" : "s"}
+            {newUnits > 0
+              ? ` · ${newUnits} new unit${newUnits === 1 ? "" : "s"}`
+              : ""}
             {newPeople > 0 ? ` · ${newPeople} new` : ""}
           </div>
 
+          {/* 认出来的列结构**原样摆出来**：导入不可撤销，事后想不通「怎么多出来
+              这几个人」时，唯一的线索就是它当初把哪几列当成了房号 */}
           <div className="mt-1 text-[11px] text-[#2f6f3e]">
             Sheet “{report.sheetName}” · rows start at{" "}
             {report.layout.dataStartRow}
             {" · "}name {column(report.layout.nameColumn)}
             {" · "}phone {column(report.layout.phoneColumn)}
-            {" · "}household {column(report.layout.householdColumn)}
+            {" · "}unit from {unitColumns}
             {report.layout.householdName
               ? ` (“${report.layout.householdName}” for the whole file)`
               : ""}
@@ -256,7 +290,7 @@ function ImportResult({
                 <span className="opacity-70">
                   {" "}
                   +{h.added}
-                  {h.created ? " · new household" : ""}
+                  {h.created ? " · new" : ""}
                 </span>
               </span>
             ))}
@@ -306,6 +340,102 @@ function ImportResult({
 const SPREADSHEET_EXTENSIONS = [".csv", ".xlsx", ".xls"];
 
 /**
+ * 读服务端推回来的 NDJSON：每收到一条 stage 就回调一次，最后那条 report 当
+ * 返回值。
+ *
+ * **单独抽成一个模块级函数，不只是为了短。** 写在 `upload` 里面的话，回调里
+ * 给外层变量赋值这件事 TypeScript 的控制流分析看不到——它仍然认为那个变量是
+ * 初始值 `null`，后面所有分支都会被收窄成 `never`，报一堆莫名其妙的类型错。
+ */
+async function readImportStream(
+  body: ReadableStream<Uint8Array>,
+  onStage: (stage: ImportStage) => void
+): Promise<ImportReport | ImportFailure> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let report: ImportReport | ImportFailure | null = null;
+
+  const handleLine = (line: string) => {
+    const text = line.trim();
+    if (!text) {
+      return;
+    }
+    let event: { type?: string; report?: unknown };
+    try {
+      event = JSON.parse(text) as { type?: string; report?: unknown };
+    } catch {
+      // 半行 / 脏行直接跳过。进度是锦上添花，不值得为它把整次导入判失败
+      return;
+    }
+    if (event.type === "stage") {
+      onStage(event as unknown as ImportStage);
+    } else if (event.type === "report") {
+      report = event.report as ImportReport | ImportFailure;
+    }
+  };
+
+  let reading = true;
+  while (reading) {
+    const chunk = await reader.read();
+    reading = !chunk.done;
+    if (chunk.value) {
+      pending += decoder.decode(chunk.value, { stream: true });
+      const lines = pending.split("\n");
+      // 最后一段可能是半行，留到下一块再拼
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        handleLine(line);
+      }
+    }
+  }
+  // 服务端最后一行**不带换行**收尾的话，它还在 pending 里
+  handleLine(pending);
+
+  return (
+    report ?? {
+      ok: false,
+      error: "The server closed the connection without answering.",
+    }
+  );
+}
+
+/**
+ * 服务端那一步 → 用户看得懂的一句话。
+ *
+ * **写成大白话，不是日志。** 「identify」对用这个框的人来说没有任何意义，
+ * 「Which column holds the phone numbers?」才让他知道机器在忙什么、还要不要
+ * 继续等。用词也照着「可能要等一会儿」来排：越靠后的步骤越慢。
+ */
+function describeStage(stage: ImportStage | null): {
+  headline: string;
+  detail: string;
+} {
+  switch (stage?.stage) {
+    case "identify":
+      return {
+        headline: "Reading the columns…",
+        detail:
+          "Asking the AI which column holds the phone numbers. This is the slow part.",
+      };
+    case "repair":
+      return {
+        headline: `Fixing up ${stage.count} phone number${stage.count === 1 ? "" : "s"}…`,
+        detail: "Some entries weren't in a standard format, so the AI is having a look.",
+      };
+    case "write":
+      return {
+        headline: `Saving resident ${Math.min(stage.done + 1, stage.total)} of ${stage.total}…`,
+        detail: "Writing them into the database one by one.",
+      };
+    case "read":
+      return { headline: "Opening the file…", detail: "Reading the first sheet." };
+    default:
+      return { headline: "Importing…", detail: "Working on it." };
+  }
+}
+
+/**
  * 导入名单的**长条方框**：拖进来 / Ctrl+V 粘进来 / 点一下选文件，三条路都通。
  *
  * 做成方框而不是按钮，是因为要它同时当**拖放目标**——按钮没有「拖到这儿」的
@@ -318,9 +448,16 @@ const SPREADSHEET_EXTENSIONS = [".csv", ".xlsx", ".xls"];
  */
 function ImportDropZone({
   importing,
+  progress,
   onFile,
 }: {
   importing: boolean;
+  /**
+   * 正在做的那一步 + 已经过去多少秒。**等待本身是可以被讲清楚的**：同样是三十
+   * 秒，「Importing…」让人怀疑卡死，而「Asking the AI which column holds the
+   * phone numbers… 12s」让人知道它在干活、知道钱花在哪了。
+   */
+  progress: { headline: string; detail: string; seconds: number } | null;
   onFile: (file: File) => void;
 }) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -373,16 +510,26 @@ function ImportDropZone({
     >
       <input {...getInputProps({ accept: SPREADSHEET_EXTENSIONS.join(",") })} />
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#2f9e44] text-white">
-        <UploadIcon />
+        {/* 导入中让它转起来。**同一时刻只有这一个动的东西**，静止的界面配上
+            一个转圈，一眼就知道「还在跑，不是在等我」 */}
+        <UploadIcon className={importing ? "animate-pulse" : undefined} />
       </span>
-      <span className="min-w-0">
+      <span className="min-w-0 flex-1">
         <span className="block text-[13px] font-bold leading-tight text-[#2b8a3e]">
-          {importing ? "Importing…" : "Import resident phone numbers"}
+          {importing
+            ? (progress?.headline ?? "Importing…")
+            : "Import resident phone numbers"}
         </span>
         <span className="mt-0.5 block text-[11px] leading-snug text-[#5c7a63]">
-          {isDragActive
-            ? "Let go to import this file."
-            : "Drag a file into this box, paste it with Ctrl + V, or click here to pick one. CSV or Excel (.xlsx)."}
+          {importing
+            ? `${progress?.detail ?? "Working on it."}${
+                progress && progress.seconds >= 2
+                  ? ` · ${progress.seconds}s`
+                  : ""
+              }`
+            : isDragActive
+              ? "Let go to import this file."
+              : "Drag a file into this box, paste it with Ctrl + V, or click here to pick one. CSV or Excel (.xlsx)."}
         </span>
       </span>
     </div>
@@ -426,6 +573,27 @@ export function HistoryCanvas({
   const [report, setReport] = useState<
     ImportReport | { ok: false; error: string } | null
   >(null);
+  /** 服务端推过来的当前步骤。导入中才非空 */
+  const [stage, setStage] = useState<ImportStage | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+
+  /**
+   * 秒表。**这是「等很久」最直接的解药**：秒数在跳，就说明还在动。
+   *
+   * 只在导入期间跑，停下来的时候清掉——不然一个一直在涨的秒数留在界面上，
+   * 下次看到会以为又卡住了。
+   */
+  useEffect(() => {
+    if (!importing) {
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsed(0);
+    const timer = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [importing]);
 
   /** 人 id → 颜色。整页只有这一处发色，别处一律查这张表 */
   const colorByPerson = useMemo(() => {
@@ -498,6 +666,7 @@ export function HistoryCanvas({
       return;
     }
     setImporting(true);
+    setStage(null);
     setReport(null);
     try {
       const body = new FormData();
@@ -506,12 +675,16 @@ export function HistoryCanvas({
         method: "POST",
         body,
       });
-      const result = (await response.json()) as
-        | ImportReport
-        | { ok: false; error: string };
+      if (!response.body) {
+        throw new Error("The server closed the connection without answering.");
+      }
+
+      // 服务端按 NDJSON 一行一条推。**边收边更新界面**，不是收完再一次性渲染
+      // ——那样中途的进度就白推了
+      const result = await readImportStream(response.body, setStage);
       setReport(result);
       if (result.ok && result.households.length > 0) {
-        // 直接跳到刚写进去的那栋房子：导完还停在原来那套上，等于要用户自己
+        // 直接跳到刚写进去的那套房：导完还停在原来那套上，等于要用户自己
         // 去列表里找证据。先选上，再 refresh 让新数据回来填进去。
         switchHousehold(result.households[0].id);
         router.refresh();
@@ -522,6 +695,7 @@ export function HistoryCanvas({
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      setStage(null);
       setImporting(false);
     }
   }
@@ -553,7 +727,7 @@ export function HistoryCanvas({
               Coordination History
             </div>
             <div className="hidden text-[11px] text-[#868e96] sm:block">
-              {households.length} household{households.length === 1 ? "" : "s"}
+              {households.length} unit{households.length === 1 ? "" : "s"}
               {emptyHouseholdCount > 0
                 ? ` · ${emptyHouseholdCount} with no messages yet`
                 : ""}
@@ -563,7 +737,11 @@ export function HistoryCanvas({
 
         {/* 整页**唯一**会写库的入口。绿色长条方框，跟旁边那排纯展示的文字分明
             是两种东西；窄屏上它自己占一整行 */}
-        <ImportDropZone importing={importing} onFile={upload} />
+        <ImportDropZone
+          importing={importing}
+          progress={{ ...describeStage(stage), seconds: elapsed }}
+          onFile={upload}
+        />
       </header>
 
       {report ? (
@@ -580,7 +758,7 @@ export function HistoryCanvas({
           <div className="border-b border-[#f1f3f5] p-3">
             <TextInput
               size="xs"
-              placeholder="Filter households"
+              placeholder="Filter units"
               value={query}
               onChange={(e) => setQuery(e.currentTarget.value)}
             />
@@ -620,7 +798,9 @@ export function HistoryCanvas({
                     ) : null}
                   </div>
                   <div className="mt-1 text-[11px] text-[#868e96]">
-                    {h.people.length} people · {h.messages.length} messages
+                    {h.people.length} resident
+                    {h.people.length === 1 ? "" : "s"} · {h.messages.length}{" "}
+                    message{h.messages.length === 1 ? "" : "s"}
                   </div>
                   {/* 这栋房子里有谁，用他们各自的颜色点出来——色点跟右边
                       记录栏里的色块是同一个来源 */}
@@ -643,7 +823,7 @@ export function HistoryCanvas({
             })}
             {visibleHouseholds.length === 0 ? (
               <div className="p-4 text-[12px] text-[#868e96]">
-                No household matches “{query}”.
+                No unit matches “{query}”.
               </div>
             ) : null}
           </ScrollArea>
@@ -662,7 +842,7 @@ export function HistoryCanvas({
                 type="button"
                 onClick={() => setMobilePane("list")}
                 className="-ml-1 shrink-0 rounded-md px-1.5 text-[20px] leading-tight text-[#868e96] md:hidden"
-                aria-label="Back to households"
+                aria-label="Back to units"
               >
                 ‹
               </button>
@@ -671,7 +851,7 @@ export function HistoryCanvas({
                   {household.label}
                 </div>
                 <div className="mt-0.5 text-[12px] text-[#868e96]">
-                  {people.length} people ·{" "}
+                  {people.length} resident{people.length === 1 ? "" : "s"} ·{" "}
                   {messages.length === 0
                     ? "no messages yet"
                     : `${messages.length} messages · complete record`}
@@ -701,9 +881,42 @@ export function HistoryCanvas({
                   />
                 </div>
               ))}
+              {/* 还没说过话的房子不是一片空白：**它已经有人了**，只是没人发过
+                  消息。尤其刚导完名单，这一屏是用户唯一能确认「人真的进去了」
+                  的地方——只写一句「还没有消息」等于让人对着空气怀疑导入成功没有。
+                  成员名字用跟上面记录栏**同一个发色规则**，点回有消息的房子时
+                  颜色能对上号 */}
               {messages.length === 0 ? (
-                <div className="p-4 text-[13px] text-[#868e96]">
-                  No messages in this household yet.
+                <div className="p-4">
+                  <div className="text-[13px] text-[#868e96]">
+                    No messages in this unit yet.
+                  </div>
+                  {people.length > 0 ? (
+                    <>
+                      <div className="mt-4 text-[11px] font-semibold uppercase tracking-wide text-[#adb5bd]">
+                        {people.length} resident
+                        {people.length === 1 ? "" : "s"} in this unit
+                      </div>
+                      <ul className="mt-2">
+                        {people.map((p, index) => (
+                          <li
+                            key={p.id}
+                            className="flex items-center gap-2.5 border-b border-[#f8f9fa] py-1.5 last:border-b-0"
+                          >
+                            <Dot color={personColor(index)} size={12} />
+                            <span className="min-w-0 flex-1 break-words text-[13px] text-[#212529]">
+                              {p.name}
+                            </span>
+                            {p.role ? (
+                              <span className="shrink-0 text-[11px] text-[#adb5bd]">
+                                {p.role}
+                              </span>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </div>
