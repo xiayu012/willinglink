@@ -1,0 +1,24 @@
+{
+  "id": "corpus-048-open-title-onboarding-2026-09-28",
+  "source": "虚构的公寓 MVP 入门回归：建房和加人不能先问或假定谁是房东。发起人自称 CEO 不获得特殊资格；被加入的人自称 Chief Vibes Officer，也只是要如实记下的称谓。两人的称谓都不能推出谁住在这里。这里特意不把 CEO 加进 role 枚举：现实中的自称是开放文本，系统只记录，不拿它做权限或居住判断。",
+  "household": { "label": "评测-开放称谓入门" },
+  "people": [
+    { "phone": "+15550480001", "name": "Mira", "role": "other" }
+  ],
+  "setup": {
+    "confirmedNames": ["Mira"]
+  },
+  "turns": [
+    {
+      "from": "+15550480001",
+      "text": "I'm Mira. I call myself the CEO of our friend group, but that is just my own title and gives me no special say here. Please add Jordan at 15550480002. Jordan calls themself Chief Vibes Officer; we do not know whether Jordan lives in this apartment yet."
+    }
+  ],
+  "expect": {
+    "mustUseTools": ["addResident"],
+    "replyMustNotMatch": [
+      "[Yy]ou (?:are|sound like) (?:the )?(?:owner|landlord)",
+      "[Jj]ordan (?:lives|is living|will live)"
+    ]
+  }
+}
