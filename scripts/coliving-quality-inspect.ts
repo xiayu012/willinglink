@@ -10666,6 +10666,64 @@ async function main() {
       "工具描述必须把宿管/物业与系统自己的协调者身份分开"
     );
   });
+  /**
+   * 名册登记：**自称头衔只是照原样记下来的一件事，不是身份判定**（老板 2026-09-28）。
+   *
+   * 公寓这块还在早期：谁都能建一套房、谁都能把人加进来，进门**不该先被身份卡住**。
+   * 所以 `addResident` 收一个**可选**的 `statedTitle`（对方的自称：「我是房东」「我是她
+   * 表哥」「我是二房东」），只把它**原样并进 note**；**绝不用它去推 role / residence**——
+   * 权限与居住各由各自的事实决定。这条闸只钉这四件结构事实，不重跑上面那条事实层断言。
+   */
+  check("名册登记：自称头衔是可选自由文本、只并进 note，不参与判定角色与居住", () => {
+    const turn = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const declStart = turn.indexOf("addResident: tool({");
+    assert(declStart > 0, "必须能定位 addResident 工具");
+    const execIdx = turn.indexOf("execute: async", declStart);
+    assert(execIdx > declStart, "必须能定位 addResident 的 execute");
+    const decl = turn.slice(declStart, execIdx);
+    const callStart = turn.indexOf("repo.addResident({", execIdx);
+    const exec = turn.slice(execIdx, callStart);
+    const call = turn.slice(callStart, turn.indexOf("});", callStart));
+    // ① 自称头衔是**可选自由文本**：不收成枚举、也不是必填。
+    assert(
+      /statedTitle:\s*z\s*\.string\(\)\s*\.optional\(\)/.test(decl),
+      "statedTitle 必须是可选自由文本（z.string().optional()）——自称的说法收不进有限档位"
+    );
+    assert(
+      !/statedTitle:[\s\S]{0,40}?\.enum\(/.test(decl),
+      "statedTitle 不得被收成枚举，否则「我是她表哥」这类自称会被丢掉"
+    );
+    // ② 角色与居住仍是**各自独立、可选**的两件事。
+    assert(
+      /role:\s*z\s*\.enum\(\[[\s\S]*?\]\)\s*\.optional\(\)/.test(decl),
+      "role 必须仍是可选枚举"
+    );
+    assert(
+      /residence:\s*z\s*\.enum\(\[[\s\S]*?\]\)\s*\.optional\(\)/.test(decl),
+      "residence 必须仍是可选枚举"
+    );
+    // ③ 自称头衔**只并进 note**：取原话、带「自称：」前缀照记，两边都不丢。
+    assert(/statedTitle\?\.trim\(\)/.test(exec), "execute 必须真的取用 statedTitle");
+    assert(/`自称：\$\{title\}`/.test(exec), "自称头衔必须以「自称：」原样并进 note");
+    assert(
+      /note:\s*noteText\s*\|\|\s*null/.test(call),
+      "并好的 note 必须交给 repo.addResident"
+    );
+    // ④ 它**不得**被拿去推 role / residence：入库只转出各自的字段、缺省一律 null。
+    assert(/role:\s*role\s*\?\?\s*null/.test(call), "role 只由 role 自己决定（缺省 null）");
+    assert(
+      /residence:\s*residence\s*\?\?\s*null/.test(call),
+      "residence 只由 residence 自己决定（缺省 null）"
+    );
+    for (const line of call.split(/\r?\n/)) {
+      if (/^\s*(role|residence)\s*:/.test(line)) {
+        assert(
+          !/statedTitle|\btitle\b/.test(line),
+          `自称头衔不得参与设定 role / residence：${line.trim()}`
+        );
+      }
+    }
+  });
   check("名册登记：第一个号码入库不预设他是房东、也不预设他住在这儿", () => {
     const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
     const start = repo.indexOf("export async function enrollFirstContact(");

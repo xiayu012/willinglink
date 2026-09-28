@@ -3554,16 +3554,30 @@ export async function runColivingTurn(args: {
               "不是「住在这儿」"
           ),
         note: z.string().optional().describe("顺带提到的信息，比如住哪间"),
+        statedTitle: z
+          .string()
+          .optional()
+          .describe(
+            "对方**自称**的头衔或关系（「我是房东」「我是她表哥」「我是二房东」），" +
+              "照原样记下，不翻译、不改写。**这只是他自称的说法：不构成任何权限，" +
+              "也不说明他住不住这儿**——权限、居住各由各自的事实决定，" +
+              "别拿它去推 role 或 residence。对方没说就别填。"
+          ),
       }),
-      execute: async ({ phone, name, role, residence, note }) => {
+      execute: async ({ phone, name, role, residence, note, statedTitle }) => {
         try {
+          // 自述头衔并进 note，两边都不丢（repo 侧对已有关系是「只补不减」的合并）
+          const title = statedTitle?.trim();
+          const noteText = [note?.trim(), title ? `自称：${title}` : null]
+            .filter((s): s is string => Boolean(s))
+            .join("；");
           const r = await repo.addResident({
             householdId: sender.householdId,
             phone,
             name: name ?? null,
             role: role ?? null,
             residence: residence ?? null,
-            note: note ?? null,
+            note: noteText || null,
           });
           return {
             ok: true,
