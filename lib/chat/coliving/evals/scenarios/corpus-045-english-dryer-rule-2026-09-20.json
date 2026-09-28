@@ -10,9 +10,9 @@
   "setup": {
     "confirmedNames": ["Maya", "Jordan", "Priya"],
     "priorMessages": [
-      { "person": "Maya", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." },
-      { "person": "Jordan", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." },
-      { "person": "Priya", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." }
+      { "person": "Maya", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "Jordan", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "Priya", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." }
     ]
   },
   "turns": [

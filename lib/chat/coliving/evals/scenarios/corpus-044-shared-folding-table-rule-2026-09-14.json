@@ -10,9 +10,9 @@
   "setup": {
     "confirmedNames": ["小乔", "阿远", "宁宁"],
     "priorMessages": [
-      { "person": "小乔", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" },
-      { "person": "阿远", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" },
-      { "person": "宁宁", "direction": "outbound", "body": "我是这套房子的 AI 协调员，之后有同住的事可以直接发消息。" }
+      { "person": "小乔", "direction": "outbound", "body": "我是这套房子的 AI resident coordinator（AI 住户协调员），之后有同住的事可以直接发消息。" },
+      { "person": "阿远", "direction": "outbound", "body": "我是这套房子的 AI resident coordinator（AI 住户协调员），之后有同住的事可以直接发消息。" },
+      { "person": "宁宁", "direction": "outbound", "body": "我是这套房子的 AI resident coordinator（AI 住户协调员），之后有同住的事可以直接发消息。" }
     ]
   },
   "turns": [

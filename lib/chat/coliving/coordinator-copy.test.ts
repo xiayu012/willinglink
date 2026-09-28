@@ -35,11 +35,11 @@ const VALID = [
   "",
   "## identity.zh",
   "",
-  "甲版本身份，我是 AI。",
+  "甲版本身份，我是 AI resident coordinator（AI 住户协调员）。",
   "",
   "## identity.en",
   "",
-  "I'm the AI coordinator.",
+  "I'm the AI resident coordinator.",
   "",
   "## capabilities.zh",
   "",
@@ -54,8 +54,8 @@ console.log("coordinator copy（内容 Markdown 的解析契约）");
 
 check("按标题把整段取出来：标题外的说明文字不是住户可见文案", () => {
   assert.deepEqual(parseCoordinatorCopy(VALID, "fixture.md"), {
-    "identity.zh": "甲版本身份，我是 AI。",
-    "identity.en": "I'm the AI coordinator.",
+    "identity.zh": "甲版本身份，我是 AI resident coordinator（AI 住户协调员）。",
+    "identity.en": "I'm the AI resident coordinator.",
     "capabilities.zh": "我能帮忙协调。",
     "capabilities.en": "I can help coordinate.",
   });
@@ -63,21 +63,21 @@ check("按标题把整段取出来：标题外的说明文字不是住户可见�
 
 check("换一份内容，解析结果就跟着换（代码里没有第二份文案）", () => {
   const v2 = VALID.replace("我能帮忙协调。", "甲版本能力。").replace(
-    "I'm the AI coordinator.",
+    "I'm the AI resident coordinator.",
     "Identity v1 (AI)."
   );
   const parsed = parseCoordinatorCopy(v2, "fixture.md");
   assert.equal(parsed["capabilities.zh"], "甲版本能力。");
   assert.equal(parsed["identity.en"], "Identity v1 (AI).");
   // 没改到的两段照旧——解析是逐段读文件，不是整体替换。
-  assert.equal(parsed["identity.zh"], "甲版本身份，我是 AI。");
+  assert.equal(parsed["identity.zh"], "甲版本身份，我是 AI resident coordinator（AI 住户协调员）。");
   assert.equal(parsed["capabilities.en"], "I can help coordinate.");
 });
 
 check("一个标题下的多行算同一段，换行原样保留", () => {
   const multi = parseCoordinatorCopy(
-    VALID.replace("甲版本身份，我是 AI。", "第一行，我是 AI。\n第二行。").replace(
-      "I'm the AI coordinator.",
+    VALID.replace("甲版本身份，我是 AI resident coordinator（AI 住户协调员）。", "第一行，我是 AI。\n第二行。").replace(
+      "I'm the AI resident coordinator.",
       "AI line one.\nline two."
     ),
     "fixture.md"
@@ -105,7 +105,7 @@ check("同一个标题出现两次直接报错（否则改一处、另一处还�
 });
 
 check("身份段少了「AI」直接报错；能力段没有这条要求", () => {
-  const role = VALID.replace("甲版本身份，我是 AI。", "我是这套房的协调员。");
+  const role = VALID.replace("甲版本身份，我是 AI resident coordinator（AI 住户协调员）。", "我是这套房的协调员。");
   assert.throws(() => parseCoordinatorCopy(role, "fixture.md"), /AI/);
 
   // 能力段说的是能帮上什么忙，不是"我是谁"——同一条锚点不该被套到这里，

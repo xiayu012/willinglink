@@ -9,8 +9,8 @@
   "setup": {
     "confirmedNames": ["阿泽", "小五"],
     "priorMessages": [
-      { "person": "阿泽", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." },
-      { "person": "小五", "direction": "outbound", "body": "I'm the household coordinator. You can text me about shared-living issues." }
+      { "person": "阿泽", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "小五", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." }
     ]
   },
   "turns": [

@@ -56,7 +56,7 @@ const replyOnlySchema = z.object({
 
 function replyOnlySystem(): string {
   return [
-    "你是这套合租房的 AI 协调员。",
+    "你是这套合租房的 AI resident coordinator（AI 住户协调员）。",
     "住户刚说的这句话，围绕的是一件你本来能替他办的提醒，但**这一轮不该执行任何动作**：",
     "他可能是在否定（让你先别发）、在犹豫、在征询你的意见，或者把这件事绑在一件还没办的事上。",
     // **不写死"用中文"**：说哪种语言由轮次语言判定（`language.ts`，经

@@ -4256,18 +4256,26 @@ async function main() {
   });
 
   check("自称问答：身份段与 doctrine 的角色名一致，住户可见内容不掺内部架构", () => {
-    // 角色名必须与权威来源一致（doctrine/always/identity.md 的「AI 协调员」「不自称管理员」）。
+    // 角色名必须与权威来源一致（doctrine/always/identity.md 的
+    // 「AI resident coordinator（AI 住户协调员）」「不自称管理员」）。
     // 这份 doctrine 是权威来源，本次改动**没有**碰它；身份段只是与它口径一致的一段文案。
     const identity = readFileSync(
       "lib/ai/brains/coliving/doctrine/always/identity.md",
       "utf8"
     );
     assert(
-      identity.includes("AI 协调员") && identity.includes("不是「管理员」"),
-      "doctrine 身份段仍是「AI 协调员 / 不是管理员」——身份文案与它同一口径"
+      identity.includes("AI resident coordinator（AI 住户协调员）") &&
+        identity.includes("不是「管理员」"),
+      "doctrine 身份段仍是「AI resident coordinator（AI 住户协调员） / 不是管理员」——身份文案与它同一口径"
     );
-    assert(IDENTITY_ZH.includes("AI 协调员"), "中文身份段必须说清角色名");
-    assert(/AI coordinator/i.test(IDENTITY_EN), "英文身份段必须说清角色名");
+    assert(
+      IDENTITY_ZH.includes("AI resident coordinator（AI 住户协调员）"),
+      "中文身份段必须说清角色名：AI resident coordinator（AI 住户协调员）"
+    );
+    assert(
+      IDENTITY_EN.includes("AI resident coordinator"),
+      "英文身份段必须逐字出现角色名 AI resident coordinator"
+    );
     // 住户可见的那几段里不得出现内部架构 / 工具 / 模型 / 数据库。
     for (const text of [IDENTITY_ZH, IDENTITY_EN, CAPABILITIES_ZH, CAPABILITIES_EN]) {
       assert(
@@ -4383,7 +4391,10 @@ async function main() {
 
     // 四类必须回落：暴露内部实现 / 列出功能 / 把两项说成全部能力 / 承诺去联系。逐条报原因。
     for (const [label, reply] of [
-      ["暴露内部实现", "我是这套房的 AI 协调员，背后是一个大模型加数据库和一堆工具。"],
+      [
+        "暴露内部实现",
+        "我是这套房的 AI resident coordinator（AI 住户协调员），背后是一个大模型加数据库和一堆工具。",
+      ],
       ["列出功能清单", `${IDENTITY_ZH}我还能${openLabels.join("、")}。`],
       ["说成只有两项功能", `${IDENTITY_ZH}只有这两项功能：${openLabels.join("、")}。`],
       ["承诺去联系", `${IDENTITY_ZH}我这就去跟阿川说。`],
