@@ -13,9 +13,7 @@ export const Greeting = () => {
         initial={{ opacity: 0, y: 10 }}
         transition={{ delay: 0.5 }}
       >
-        You can type to chat with me. Try asking about housing anywhere in
-        the California Bay Area—for example: &ldquo;Are there any places under
-        $5,000 in San Jose? I live alone.&rdquo;
+        WillingLink - FretGone LLC
       </motion.div>
     </div>
   );
