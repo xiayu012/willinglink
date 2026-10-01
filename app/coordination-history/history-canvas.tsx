@@ -64,6 +64,23 @@ import type {
  *
  * 没有按人筛选——从头到尾就是这套房的完整记录。
  *
+ * ## 一套房都没有时，这三栏照常在那儿
+ *
+ * 库是空的（新部署还没导入，或者这个部署没连上库）**不是故障**，是这个只读
+ * 窗口的正常状态之一。所以整页的外框——顶栏、导入方框、左中右三栏——无条件
+ * 渲染，**只让各自的内容区显示一句中性的英文空提示**：左栏「No units to
+ * show yet.」、中栏标题「No unit selected」配一句「No conversation records
+ * yet.」、右栏只留一个「Members」标题、内容自然留空。
+ *
+ * 这条是有代价才记住的：以前这里在拿不到房子时**提前 return 了一小块只写着
+ * 「No conversation records」加一句 `POSTGRES_URL` 的 div**，整页 UI 连同导入
+ * 入口一起消失——合作方看到的是内部错误文案，而不是一个空着的窗口。两件事都
+ * 不许再发生：**外框不许消失，环境变量 / 库表名 / 部署细节不许出现在页面上**。
+ *
+ * 「有套房、但这套房还没说过话」是**另一种**空，不是这一种：那套房在左栏里
+ * 是选中的，成员列表是实的，中栏照旧说「No messages in this unit yet.」。
+ * 判据是 `household` 在不在，不是消息多不多。
+ *
  * 页面上**唯一会写库的东西是顶栏那个绿色长条方框**（合作方名单导入，见
  * `lib/coordination-history/import.ts`）：文件拖进去 / Ctrl+V 粘进去 / 点它
  * 选一个，三条路都通。除此之外这里不发送任何写请求。
@@ -648,12 +665,18 @@ function MemberList({ people }: { people: HistoryPerson[] }) {
 /**
  * 成员栏：一个标题条 + 一份成员表。**宽屏常驻、窄屏抽屉共用同一份**，两边只
  * 差在外层容器和那个关闭按钮上。
+ *
+ * `people` 传 `null` 表示**当前根本没选中任何套房**（库里一套都没有）。这时
+ * 标题只留一个「Members」、内容区留空，而不是写「Members · 0」——那读起来是
+ * 「这套房里有 0 个人」，可这套房根本不存在。**空列表和「没有这套房」是两种
+ * 空**，见文件开头那段。
  */
 function MembersPanel({
   people,
   onClose,
 }: {
-  people: HistoryPerson[];
+  /** `null` = 没有选中任何套房 */
+  people: HistoryPerson[] | null;
   /** 给了才有那行关闭按钮。常驻栏不需要关，就不传 */
   onClose?: () => void;
 }) {
@@ -661,7 +684,7 @@ function MembersPanel({
     <>
       <div className="flex shrink-0 items-center gap-2 border-b border-[#eef0f3] px-3 py-2.5">
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-[#868e96]">
-          Members · {people.length}
+          {people ? `Members · ${people.length}` : "Members"}
         </span>
         {onClose ? (
           <button
@@ -675,7 +698,7 @@ function MembersPanel({
         ) : null}
       </div>
       <ScrollArea className="min-h-0 flex-1" type="auto">
-        <MemberList people={people} />
+        {people ? <MemberList people={people} /> : null}
       </ScrollArea>
     </>
   );
@@ -862,21 +885,9 @@ export function HistoryCanvas({
     }
   }
 
-  if (!household) {
-    return (
-      <div className="p-8">
-        <div className="text-[15px] font-semibold text-[#212529]">
-          No conversation records
-        </div>
-        {/* 走到这里说明**一栋房子都没有**——空房子现在也进列表，所以
-            「有房子但都没说过话」不再落到这一支 */}
-        <p className="mt-1 text-[13px] text-[#868e96]">
-          No coliving.household rows were found, or POSTGRES_URL was not
-          available to this deployment.
-        </p>
-      </div>
-    );
-  }
+  /** 有没有选中一套房。**没有不等于出错**——见文件开头那段：外框照旧渲染，
+   *  只是各栏内容区换成中性的空提示 */
+  const hasUnit = household !== null;
 
   return (
     <div className="flex h-[100dvh] flex-col bg-white">
@@ -931,7 +942,7 @@ export function HistoryCanvas({
 
           <ScrollArea className="min-h-0 flex-1" type="auto">
             {visibleHouseholds.map((h) => {
-              const active = h.id === household.id;
+              const active = h.id === household?.id;
               return (
                 <button
                   key={h.id}
@@ -985,7 +996,11 @@ export function HistoryCanvas({
             })}
             {visibleHouseholds.length === 0 ? (
               <div className="p-4 text-[12px] text-[#868e96]">
-                No unit matches “{query}”.
+                {/* **两种空要分开说。** 库里一套房都没有时说「没有匹配」等于
+                    怪用户筛错了词——他一个字都没打。只有真的筛掉了东西才谈匹配 */}
+                {households.length === 0
+                  ? "No units to show yet."
+                  : `No unit matches “${query}”.`}
               </div>
             ) : null}
           </ScrollArea>
@@ -1009,28 +1024,35 @@ export function HistoryCanvas({
                 ‹
               </button>
               <div className="min-w-0 flex-1">
+                {/* 标题栏不读 `household.label`：没有选中套房时它没有名字可念，
+                    给一个中性的占位标题，而不是让整栏空着没有抬头 */}
                 <div className="break-words text-[16px] font-bold text-[#212529]">
-                  {household.label}
+                  {household ? household.label : "No unit selected"}
                 </div>
-                {messages.length === 0 ? (
-                  <div className="mt-0.5 text-[12px] text-[#868e96]">
-                    {people.length} resident
-                    {people.length === 1 ? "" : "s"} · no messages yet
-                  </div>
-                ) : (
-                  <div className="mt-0.5 text-[12px] text-[#868e96]">
-                    {messages.length} messages · complete record
-                  </div>
-                )}
+                {hasUnit ? (
+                  messages.length === 0 ? (
+                    <div className="mt-0.5 text-[12px] text-[#868e96]">
+                      {people.length} resident
+                      {people.length === 1 ? "" : "s"} · no messages yet
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 text-[12px] text-[#868e96]">
+                      {messages.length} messages · complete record
+                    </div>
+                  )
+                ) : null}
                 {/* 窄屏上成员表收在抽屉里，这一行就是拉开它的把手；宽屏有常驻的
-                    右栏，这个按钮跟着一起消失 */}
-                <button
-                  type="button"
-                  onClick={() => setPeopleOpen(true)}
-                  className="mt-0.5 text-[12px] font-semibold text-[#5f3dc4] lg:hidden"
-                >
-                  {people.length} resident{people.length === 1 ? "" : "s"} ›
-                </button>
+                    右栏，这个按钮跟着一起消失。**没有选中套房时它也不出现**：
+                    「0 residents ›」是个点开空无一物的假选项，比没有更糟 */}
+                {hasUnit ? (
+                  <button
+                    type="button"
+                    onClick={() => setPeopleOpen(true)}
+                    className="mt-0.5 text-[12px] font-semibold text-[#5f3dc4] lg:hidden"
+                  >
+                    {people.length} resident{people.length === 1 ? "" : "s"} ›
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1056,12 +1078,17 @@ export function HistoryCanvas({
                   />
                 </div>
               ))}
-              {/* 没人说过话的房子不是一片空白：**它已经有人了**。这里只说
-                  「还没有消息」——有哪些人是**右边那栏**的事，别在同一个页面
-                  上摆两份成员表 */}
+              {/* 这里的空有**两种**，别混成一句：
+                  · 有套房、这套房还没说过话——它已经有人了，说「这套房还没有
+                    消息」；有哪些人是**右边那栏**的事，别在同一个页面上摆两份
+                    成员表
+                  · 库里一套房都没有——连「这套房」都不存在，只能说整页还没有
+                    记录。**它不是故障**，用不着解释为什么空 */}
               {messages.length === 0 ? (
                 <div className="p-4 text-[13px] text-[#868e96]">
-                  No messages in this unit yet.
+                  {hasUnit
+                    ? "No messages in this unit yet."
+                    : "No conversation records yet."}
                 </div>
               ) : null}
             </div>
@@ -1078,7 +1105,7 @@ export function HistoryCanvas({
               />
               <div className="relative flex w-[220px] max-w-[80%] flex-col border-[#e9ecef] border-l bg-white shadow-xl">
                 <MembersPanel
-                  people={people}
+                  people={hasUnit ? people : null}
                   onClose={() => setPeopleOpen(false)}
                 />
               </div>
@@ -1090,7 +1117,8 @@ export function HistoryCanvas({
             像群聊的成员列表一样**一直在**——点进一套房就是在看这套房里的人
             怎么来往，看不到有谁，颜色和名字就对不上号。 */}
         <aside className="hidden w-[190px] shrink-0 flex-col border-[#e9ecef] lg:flex lg:border-l">
-          <MembersPanel people={people} />
+          {/* 没有选中套房时右栏照旧在（三栏结构不塌），只是里面没有名单可列 */}
+          <MembersPanel people={hasUnit ? people : null} />
         </aside>
       </div>
     </div>
