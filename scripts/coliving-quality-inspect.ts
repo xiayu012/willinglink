@@ -11003,6 +11003,57 @@ async function main() {
     }
   });
 
+  /**
+   * 只读窗口的空状态：**库里一套房都没有不是故障**，页面外框照旧在。
+   *
+   * 这条守的是一个真实事故：`HistoryCanvas` 原先在拿不到 `household` 时提前
+   * `return` 了一小块 div，于是顶栏、绿色导入入口和左中右三栏**整页消失**，
+   * 合作方看到的只有「No conversation records」加一句 `POSTGRES_URL`。
+   * 两件事都不许回来：**外框不许消失**、**内部部署细节不许出现在页面上**。
+   * （注释里可以照旧讨论这段历史，所以先按本文件惯例去掉注释再断言。）
+   */
+  check("协调历史页空库：三栏外框照旧渲染，且不把 POSTGRES_URL / 库表名写给合作方", () => {
+    const file = "app/coordination-history/history-canvas.tsx";
+    assert(existsSync(file), `协调历史页组件必须存在：${file}`);
+    const src = readFileSync(file, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+
+    // ① 没有选中套房时**不得提前 return 整页**：那正是把外框一起吞掉的老写法
+    assert(
+      !/if\s*\(\s*!\s*household\s*\)\s*\{?\s*return/.test(src),
+      "没有选中套房时不得提前 return 整页——顶栏 / 导入入口 / 三栏必须照旧渲染"
+    );
+    // ② 数据层与部署细节是给内部看的，页面上一个字都不许有
+    for (const leak of ["POSTGRES_URL", "coliving.household"]) {
+      assert(!src.includes(leak), `页面不得出现内部细节「${leak}」`);
+    }
+    // ③ **两种空各说各的**，且都是中性陈述，不带「故障 / 连接失败」的口吻
+    for (const copy of [
+      "No units to show yet.", // 左栏：库里一套房都没有
+      "No unit selected", // 中栏标题：没有选中套房，不是出错
+      "No conversation records yet.", // 中栏：整页还没有记录
+      "No messages in this unit yet.", // 中栏：有套房、这套房还没说过话（另一种空）
+    ]) {
+      assert(src.includes(copy), `空状态文案必须保留：${copy}`);
+    }
+    // ④ 成员栏没选中套房时不得冒充「Members · 0」——那读起来是「这套房里有 0 个人」，
+    //    可这套房根本不存在；宽屏常驻栏与窄屏抽屉两处都要传 null，不是空数组。
+    assert(
+      /people\s*\?\s*`Members · \$\{people\.length\}`\s*:\s*"Members"/.test(src),
+      "成员栏没有选中套房时必须只写 Members，不得写 Members · 0"
+    );
+    assert.equal(
+      (src.match(/people=\{\s*hasUnit\s*\?\s*people\s*:\s*null\s*\}/g) ?? []).length,
+      2,
+      "宽屏右栏与窄屏抽屉都要在没有套房时传 null，不能用空数组假装 0 个成员"
+    );
+    // ⑤ 外框三件套与唯一的写库入口无条件渲染
+    for (const kept of ["<header", "ImportDropZone", "<aside"]) {
+      assert(src.includes(kept), `空库时页面外框仍要渲染：${kept}`);
+    }
+  });
+
   console.log(`${count} offline checks passed (not a live conversation-quality certification).`);
 
   const reportIndex = process.argv.indexOf("--report");
