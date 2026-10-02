@@ -434,16 +434,21 @@ the shared living room` / `Same deal for everyone in the house.`）。**这一�
 
 ## 第一次接触：两条固定动作、四个互不相同的信号（2026-10-01）
 
-任何号码第一次开口都是**两次独立外呼**：① 一条固定的自我介绍（逐字来自单点文案
-`doctrine/content/coordinator-self-description.md`，按本轮语言选 zh/en）；② 正常的回复，
-由 doctrine + 运行时上下文把还缺的登记信息问出来。第一轮**没有**第二条时就是坏了。
+任何号码**在还没成功收到过那条固定自我介绍之前**开口，都是**两次独立外呼**：
+① 一条固定的自我介绍（逐字来自单点文案 `doctrine/content/coordinator-self-description.md`，
+按本轮语言选 zh/en）；② 正常的回复，由 doctrine + 运行时上下文把还缺的登记信息问出来。
+② 只在**①成功送出、且本轮正常处理走完**之后才跟着发；介绍投递失败本来就**终止本轮**，
+那种情况没有第二条是设计如此、不是坏。（资格只看那条介绍自己的投递状态，见下面第一条——
+不是"第一次开口"这个时刻，也不看会话历史。）
 
 这几个信号**不能合成一个**（二次复审新增阻塞点）：
 
-- **要不要发介绍**（`onboarding.ts` + `repo.claimFirstIntroduction`）：只看「这条会话线上
-  还没说过话」＋库里按人加锁的原子占位（communication 表上判：已有 `sent`，或已有一条非
-  `failed` 的介绍行）。**跟 Unit / 名册齐不齐无关**——房东给了号码、或预置名册里的室友，
-  第一次说话照样先收到介绍。
+- **要不要发介绍**（`repo.claimFirstIntroduction`）：**只看这条固定介绍自己有没有真的送到过**
+  ——库里按人加锁的原子占位，在 communication 表上按**同一个 `purpose`** 判（已有 `sent`，
+  或已有一条仍在途的 `queued`，就不再发；`failed` / `skipped` 不算，允许下一轮重试）。
+  **会话历史不作数、Unit / 名册齐不齐也不相干**：普通回复、提醒、别的已发出通信**都不能
+  替代**这条介绍，所以房东给了号码的人、预置名册里的室友、乃至历史上一直没收到过这条介绍
+  的号码，开口时资料再齐、聊得再多，也照样先收到介绍（老板 2026-10-02 口径）。
 - **要不要装配入门准则**（`firstEnrollment` 结构信号 → brain 里 `force: true` 的
   **`onboarding`** 规则）：第一次开口**且登记缺项**。一句 "hi" 里没有任何话题词，话题路由
   永远命不中，真实英文评测里那一轮只装到兜底的 `complaint-risk`、第二条因此没问房号与室友。
@@ -469,8 +474,10 @@ the shared living room` / `Same deal for everyone in the house.`）。**这一�
 
 顺序与投递：**先投递、成功后回写历史**。投递方回答没送达（或没回答）→ 记 `failed` 并抛
 `IntroductionNotDelivered` **终止本轮**（第二条不发、历史不留假账），下一条入站重试。并发
-抢不到的那一轮**只读地**等实际投递状态（`repo.awaitFirstIntroductionDelivered`：`sent` /
-`failed` / `timeout`），`timeout` 只终止这一轮，**不改别轮在途的那条**；发送方中断留下的
+抢不到的那一轮**只读地**等这条介绍自己的实际投递状态（`repo.awaitFirstIntroductionDelivered`，
+同样收窄到那一个 `purpose`：这条 `sent` → `sent`；最近一条是 `queued` → 等到点仍是 `queued`
+就是 `timeout`；没有这条介绍、或最近一条是 `failed` / `skipped` → `failed`；
+**别的通信发出过都不解锁**），`timeout` 只终止这一轮，**不改别轮在途的那条**；发送方中断留下的
 死行由 `claimFirstIntroduction` 的**陈旧窗口**（10 分钟）兜底——那个窗口的**测试覆盖参数**
 （`staleAfterMinutesForTest`）在**开事务之前**先要求目标房子过 `is_test`，真人的房子拿到它
 直接抛错，不给生产留一个"超时可调"的口子。无投递回调 = **离线准备**：不占位、不落库、

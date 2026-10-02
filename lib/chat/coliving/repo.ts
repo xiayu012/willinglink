@@ -1019,13 +1019,17 @@ export async function markCommunication(args: {
  * 样的自我介绍**。这里把判断和写入放进同一个事务、按人加咨询锁，第二个事务
  * 一定看到第一个写下的那一行，直接返回 `null`。
  *
- * 判定条件（两条 `not exists`，都在 `communication` 上看，**不看正文**）：
+ * 判定条件（**收窄到同一个 `purpose`**，都在 `communication` 上看，**不看正文**）：
  *
- *   · 这个人这条渠道上**已经有一条发成功的沟通** → 早就聊过了，不再介绍
- *     （历史上已完成首轮的老用户、以及功能介绍之前就存在的会话，都命中这条）；
- *   · 已经有一条**首次自我介绍**（`queued` 也算）→ 正在发或发过了，不重复。
+ *   · 这个人这条渠道上**已经有一条这条固定介绍**，状态 `sent` 或 `queued`
+ *     → 已经送到、或正在发，不重复。
  *
- * **`failed` 的两条都不算数**：模型/网络失败时第一条没送到，下一轮该再试一次
+ * **别的沟通一概不算**（老板 2026-10-02 的口径）：普通回复、提醒、别的已发出通信
+ * 都**不能替代**这条固定介绍——「收到过那条介绍」只由**这条介绍自己**的投递状态决定。
+ * 所以历史上有过一堆 assistant 消息、甚至有过别的 `sent` 通信，只要这条固定介绍
+ * 没成功送到过，这个人下一条入站仍然先收到介绍。
+ *
+ * **`failed` / `skipped` 不算数**：模型/网络失败时这条没送到，下一轮该再试一次
  * ——这正是老板说的「模型失败时第一条仍可到达」的那条重试路径。
  *
  * decision 与 communication 在同一个事务里落：判定与沟通要么一起成立，要么
@@ -1090,10 +1094,8 @@ export async function claimFirstIntroduction(args: {
         select 1 from coliving.communication c
         where c.to_person_id = ${args.personId}
           and c.channel = ${args.channel}
-          and (
-            c.status = 'sent'
-            or (c.purpose = ${args.purpose} and c.status <> 'failed')
-          )
+          and c.purpose = ${args.purpose}
+          and c.status in ('sent', 'queued')
       ) as seen
     `;
     if (seen?.seen) {
@@ -1123,14 +1125,18 @@ export async function claimFirstIntroduction(args: {
 export type FirstIntroductionState = "sent" | "failed" | "timeout";
 
 /**
- * **等这个人被真正介绍过——按实际投递状态，不按历史、也不按谁先创建。**
+ * **等这个人真的收到那条固定介绍——按那条介绍自己的投递状态，不按历史、也不按谁先创建。**
  *
  * 同一个人的两条首消息前后脚到达时（两个 webhook 同时在跑），只有一条占到介绍
  * （见 `claimFirstIntroduction`）。抢不到的那一轮**不能径直往下发**：住户会先收到回复、
  * 后收到自我介绍，读起来像两个人。它也不能拿"历史里已经有那条 assistant 消息"当回执
- * ——历史是**先写进去**的，短信还在路上（`queued`），这中间有个真实的缝。
+ * ——会话历史**本身不是投递证据**：那条介绍送没送到，只看**这条介绍自己的投递状态**。
  *
- * **这条函数只读。** 等到点仍是 `queued` 就返回 `timeout`（调用方终止本轮），
+ * **只认同一个 `purpose`**（这就是为什么它要收 `purpose`）：别的通信即便 `sent` 过，
+ * 也**不算**这个人收到过介绍、更不解锁顺序——那正是从前"普通回复发出去就再也不介绍"
+ * 的漏洞所在。
+ *
+ * **这条函数只读。** 等到点仍有一条 `queued` 的介绍就返回 `timeout`（调用方终止本轮），
  * 绝不去改别轮**正在投递**的那条：把它判死会放第三轮重新 claim，正在发的介绍被双发。
  * 投递方自己会记账；真中断了由 `claimFirstIntroduction` 的陈旧窗口兜底。
  */
@@ -1151,6 +1157,7 @@ export async function awaitFirstIntroductionDelivered(args: {
           select 1 from coliving.communication c
           where c.to_person_id = ${args.personId}
             and c.channel = ${args.channel}
+            and c.purpose = ${args.purpose}
             and c.status = 'sent'
         ) as sent,
         (
@@ -1161,13 +1168,16 @@ export async function awaitFirstIntroductionDelivered(args: {
           order by c.created_at desc limit 1
         ) as "introStatus"
     `;
-    // 有东西已经真的发到他手机上了：顺序不再是问题（介绍本身在不在里面由预筛管）。
+    // 这条固定介绍真的发到他手机上了：顺序不再是问题。
     if (row?.sent) return "sent";
-    // 没有待投递的介绍可等，也没有任何发出过的东西——当没送到处理，不冒险先回。
-    if (row?.introStatus === null || row?.introStatus === undefined) return "failed";
-    if (row.introStatus === "failed") return "failed";
-    if (Date.now() >= deadline) return "timeout";
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // 还有一条在途的（queued）：等到点，到点仍是 queued 就是 timeout（这一轮终止）。
+    if (row?.introStatus === "queued") {
+      if (Date.now() >= deadline) return "timeout";
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      continue;
+    }
+    // 没有这条介绍，或最近一条是 failed / skipped：当没送到处理，不冒险先回。
+    return "failed";
   }
 }
 

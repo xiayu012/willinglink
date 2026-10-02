@@ -7,6 +7,9 @@
  * 这里面有几条**必须由代码保证**的性质（模型测不出来，也不该靠模型自觉）：
  *
  *   1. 介绍那条**只发一次**（同一个人并发两条首消息也只发一条），失败后**能重试**；
+ *   1b. **资格只看那条固定介绍自己的投递状态**（同一个 purpose）：会话历史里有没有
+ *      assistant 消息、有没有别的**已发出**的普通通信，都**不作数**——普通回复 / 提醒
+ *      / 别的已发出通信都不能替代它（老板 2026-10-02 口径）；
  *   2. 陌生的合法号码**建得起自己的上下文**（role other / resides unknown，同号码幂等）；
  *   3. **不按 Unit 合并房子**：两栋房子写同一个房号，也是两栋各说各话的房子，
  *      谁也看不到谁的记录；
@@ -47,12 +50,10 @@ const checks: Array<[string, () => void | Promise<void>]> = [];
 const check = (name: string, fn: () => void | Promise<void>) =>
   checks.push([name, fn]);
 
-// ── 一、纯函数：介绍文案与"要不要介绍"的判定（不碰库）─────────────────────
+// ── 一、纯函数：介绍文案（不碰库）─────────────────────────────────────────
 check("介绍逐字来自单点文案，按语言选，且不是那句兜底拒绝", async () => {
   const { coordinatorCopyText } = await import("../lib/chat/coliving/coordinator-copy");
-  const { introductionIn, needsIntroduction } = await import(
-    "../lib/chat/coliving/onboarding"
-  );
+  const { introductionIn } = await import("../lib/chat/coliving/onboarding");
   const { UNKNOWN_REPLY, UNKNOWN_REPLY_EN } = await import(
     "../lib/chat/coliving/turn"
   );
@@ -64,16 +65,8 @@ check("介绍逐字来自单点文案，按语言选，且不是那句兜底拒�
   // 陌生号码不再收到那句"我这边没有记录"——它现在只留给"号码根本解析不出来"
   assert.notEqual(introductionIn("zh"), UNKNOWN_REPLY);
   assert.notEqual(introductionIn("en"), UNKNOWN_REPLY_EN);
-
-  // 会话里出现过一条 AI 说的话 → 永远不再介绍（"已完成首轮的用户不每轮重介绍"）
-  assert.equal(needsIntroduction([]), true, "全新的会话要介绍");
-  assert.equal(needsIntroduction([{ role: "user" }]), true, "他刚开口、我们还没说话");
-  assert.equal(needsIntroduction([{ role: "assistant" }]), false, "说过了就不再介绍");
-  assert.equal(
-    needsIntroduction([{ role: "user" }, { role: "assistant" }, { role: "user" }]),
-    false,
-    "聊过一轮之后不再介绍"
-  );
+  // 「要不要介绍」不再有纯函数预筛（曾经是 needsIntroduction(history)：历史里有过
+  // assistant 就永远不再介绍）。判定只在库里（下面的 claim / await 两项）。
 });
 
 async function main() {
@@ -91,10 +84,67 @@ async function main() {
   let seq = 0;
   const freshPhone = (tag: string) => `+1999${stamp}${(seq += 1)}${tag.length % 10}`;
 
-  const houseA = (await repo.createTestHousehold(`selftest-onboarding-A-${stamp}`))
-    .householdId;
-  const houseB = (await repo.createTestHousehold(`selftest-onboarding-B-${stamp}`))
-    .householdId;
+  /**
+   * **这份自检自己造出来的测试屋**，跑完按 id 一栋栋删掉（`dropRestoredHousehold`
+   * 自己会先验 `is_test`，不是测试屋直接抛错——绝不按别的条件批量清）。
+   * 只记这次调用造的那几栋，**不做任何宽泛的 purge**。
+   */
+  const createdHouseholds: string[] = [];
+  const newTestHousehold = async (label: string): Promise<string> => {
+    const id = (await repo.createTestHousehold(label)).householdId;
+    createdHouseholds.push(id);
+    return id;
+  };
+
+  const houseA = await newTestHousehold(`selftest-onboarding-A-${stamp}`);
+  const houseB = await newTestHousehold(`selftest-onboarding-B-${stamp}`);
+
+  /** 给一个全新号码在指定测试屋里建上下文（介绍那几项各自用一个新人）。 */
+  const enroll = async (householdId: string, tag: string) =>
+    (await repo.enrollUnknownSender({
+      phone: freshPhone(tag),
+      channel: "sms",
+      intoTestHouseholdId: householdId,
+    }))!;
+
+  /**
+   * 占一条固定介绍。判定只看 `purpose`、**不看正文**，所以 `language` 传什么都行
+   * ——"语言变了也不重发"那一项就是靠换成另一种语言来验的。
+   */
+  const claimIntro = (
+    householdId: string,
+    personId: string,
+    language: "zh" | "en" = "zh"
+  ) =>
+    repo.claimFirstIntroduction({
+      householdId,
+      personId,
+      channel: "sms",
+      body: introductionIn(language),
+      purpose: INTRODUCTION_PURPOSE,
+      intent: INTRODUCTION_INTENT,
+    });
+
+  /**
+   * **造一条「已经发出去的普通通信」**——purpose 不是那条固定介绍。
+   * 用来证明：别的通信发出过，既不能让这个人算「被介绍过」，也不能解锁投递顺序。
+   */
+  const sendOrdinaryCommunication = async (args: {
+    householdId: string;
+    personId: string;
+    purpose?: string;
+    body?: string;
+  }): Promise<string> => {
+    const id = await repo.queueCommunication({
+      householdId: args.householdId,
+      toPersonId: args.personId,
+      channel: "sms",
+      purpose: args.purpose ?? "回复本人",
+      body: args.body ?? "（自检造的普通通信）",
+    });
+    await repo.markCommunication({ communicationId: id, status: "sent" });
+    return id;
+  };
 
   // ── 二、陌生号码建得起上下文，且同号码幂等 ──────────────────────────────
   check("陌生号码第一次进来就建好自己的上下文（role other / resides unknown），同号码幂等", async () => {
@@ -346,11 +396,158 @@ async function main() {
     );
   });
 
+  // ── 三·二、介绍资格只认那条固定介绍自己的投递状态（历史 / 普通通信都不算）────
+  check("介绍资格只看那条固定介绍自己的投递状态：历史与普通通信都不算「已经介绍过」", async () => {
+    const house = await newTestHousehold(`selftest-onboarding-elig-${stamp}`);
+
+    // ① 名册齐全 + 历史里有过 AI 说过的话 + 一条已发出的普通提醒 → 仍然要介绍
+    await repo.setHouseholdUnit({ householdId: house, unit: "A101" });
+    await repo.setDeclaredSize(house, 1);
+    const p1 = await enroll(house, "E1");
+    const conv1 = await repo.getOrCreateConversation({
+      personId: p1.personId,
+      householdId: house,
+      channel: "sms",
+    });
+    await repo.appendMessage({
+      conversationId: conv1,
+      personId: p1.personId,
+      direction: "inbound",
+      channel: "sms",
+      body: "之前聊过一句",
+    });
+    await repo.appendMessage({
+      conversationId: conv1,
+      personId: p1.personId,
+      direction: "outbound",
+      channel: "sms",
+      body: "（自检造的、AI 之前说过的话）",
+    });
+    await sendOrdinaryCommunication({
+      householdId: house,
+      personId: p1.personId,
+      purpose: "个人物品使用提醒",
+    });
+    assert.ok(
+      await claimIntro(house, p1.personId),
+      "名册齐全 + 有过聊天历史 + 发过普通提醒，都不能替代那条固定介绍"
+    );
+
+    // ② 普通回复（模型自己写的那种）已经发出过 → 仍然要介绍
+    const p2 = await enroll(house, "E2");
+    await sendOrdinaryCommunication({
+      householdId: house,
+      personId: p2.personId,
+      purpose: "回复本人",
+      body: "（模型自己写的一句回复）",
+    });
+    assert.ok(
+      await claimIntro(house, p2.personId),
+      "普通回复发出过，不算这个人收到过固定介绍"
+    );
+
+    // ③ 这条固定介绍已经发成功 → 无论历史空不空、正文语言变没变，都不再发
+    const p3 = await enroll(house, "E3");
+    const sentOnce = (await claimIntro(house, p3.personId, "en"))!;
+    await repo.markCommunication({
+      communicationId: sentOnce.communicationId,
+      status: "sent",
+    });
+    assert.equal(
+      await claimIntro(house, p3.personId, "zh"),
+      null,
+      "这条固定介绍发成功过，永远不再发第二遍（判定不看历史、也不看正文语言）"
+    );
+
+    // ④ failed / skipped 都不算占位 → 允许下一条入站重试
+    const p4 = await enroll(house, "E4");
+    const failedOnce = (await claimIntro(house, p4.personId))!;
+    await repo.markCommunication({
+      communicationId: failedOnce.communicationId,
+      status: "failed",
+    });
+    const afterFailed = (await claimIntro(house, p4.personId))!;
+    assert.ok(afterFailed, "记 failed 不算占位：下一条入站要能重试");
+    await repo.markCommunication({
+      communicationId: afterFailed.communicationId,
+      status: "skipped",
+    });
+    assert.ok(
+      await claimIntro(house, p4.personId),
+      "skipped 同样不算占位：这条介绍没送到就还得重试"
+    );
+
+    // ⑤ 刚写下、还在途（queued）→ 挡住并发的第二次占位
+    const p5 = await enroll(house, "E5");
+    assert.ok(await claimIntro(house, p5.personId));
+    assert.equal(
+      await claimIntro(house, p5.personId),
+      null,
+      "在途的介绍挡住并发的第二次占位（两个 webhook 不会各发一条）"
+    );
+  });
+
+  check("等这条介绍：只认同一个 purpose 的投递状态（普通通信发出过也不解锁）", async () => {
+    const house = await newTestHousehold(`selftest-onboarding-await-${stamp}`);
+    const awaitState = (personId: string) =>
+      repo.awaitFirstIntroductionDelivered({
+        personId,
+        channel: "sms",
+        purpose: INTRODUCTION_PURPOSE,
+        timeoutMs: 300,
+      });
+
+    // ① 根本没有这条介绍 → failed（不许当成已送达继续往下生成）
+    const a = await enroll(house, "W1");
+    assert.equal(await awaitState(a.personId), "failed", "没有这条介绍可等就是 failed");
+
+    // ② 普通通信发出过 + 这条介绍还在途（queued）→ timeout（普通 sent 不解锁）
+    const b = await enroll(house, "W2");
+    await sendOrdinaryCommunication({ householdId: house, personId: b.personId });
+    assert.ok(await claimIntro(house, b.personId), "占位应当成功");
+    assert.equal(
+      await awaitState(b.personId),
+      "timeout",
+      "普通通信发出过不算已送达：这条介绍还在途就是 timeout"
+    );
+
+    // ③ 普通通信发出过 + 这条介绍 failed → failed
+    const c = await enroll(house, "W3");
+    await sendOrdinaryCommunication({ householdId: house, personId: c.personId });
+    const cFailed = (await claimIntro(house, c.personId))!;
+    await repo.markCommunication({
+      communicationId: cFailed.communicationId,
+      status: "failed",
+    });
+    assert.equal(
+      await awaitState(c.personId),
+      "failed",
+      "最近的这条介绍记了 failed → 当没送到处理"
+    );
+
+    // ④ 普通通信发出过 + 这条介绍 skipped → failed
+    const d = await enroll(house, "W4");
+    await sendOrdinaryCommunication({ householdId: house, personId: d.personId });
+    const dSkipped = (await claimIntro(house, d.personId))!;
+    await repo.markCommunication({
+      communicationId: dSkipped.communicationId,
+      status: "skipped",
+    });
+    assert.equal(await awaitState(d.personId), "failed", "skipped 同样当没送到处理");
+
+    // ⑤ 这条介绍真的 sent → sent（只有它自己送到了才放行）
+    const e = await enroll(house, "W5");
+    const eSent = (await claimIntro(house, e.personId))!;
+    await repo.markCommunication({
+      communicationId: eSent.communicationId,
+      status: "sent",
+    });
+    assert.equal(await awaitState(e.personId), "sent", "这条介绍真的送到了才放行");
+  });
+
   check("资料齐全的新联系人照样先介绍：Unit 与名册齐不齐都不参与介绍资格", async () => {
     // 造一栋"资料齐全"的测试屋：房号已知、要住几个人也已声明。
-    const house = (
-      await repo.createTestHousehold(`selftest-onboarding-full-${stamp}`)
-    ).householdId;
+    const house = await newTestHousehold(`selftest-onboarding-full-${stamp}`);
     await repo.setHouseholdUnit({ householdId: house, unit: "A208" });
     await repo.setDeclaredSize(house, 1);
     const person = (
@@ -426,9 +623,7 @@ async function main() {
     );
     // 单独一栋测试屋 + 一个自己的号码：这一项要的是"从零开始的一条会话线"，
     // 跟前面几项写过的房子混在一起就分不清是谁留下的痕迹了。
-    const house = (
-      await repo.createTestHousehold(`selftest-onboarding-intro-fail-${stamp}`)
-    ).householdId;
+    const house = await newTestHousehold(`selftest-onboarding-intro-fail-${stamp}`);
     const phone = freshPhone("V");
     let deliveries = 0;
     // 投递方**如实回答没送到**（不是抛错、也不是不回答——那两种同按未送达算，
@@ -488,6 +683,99 @@ async function main() {
       (await repo.recentOutbound(house)).length,
       0,
       "一条出站都不许有——介绍自己那条没送出去，第二条更不该存在"
+    );
+  });
+
+  // ── 三点七·二、聊过的人（有普通历史 + 已发出的普通通信）也照样先介绍 ──────
+  //
+  // 这一项补的是**外层入口在"这个人早就聊过"这种情况下的行为**：从前
+  // `needsIntroduction(history)` 见过一条 assistant 就永久跳过介绍，普通回复的
+  // `sent` 通信又会把库里的占位挡住。走真正的 `runColivingTurn`，投递方如实回答
+  // "没送到"，按库里的真实痕迹验：这一轮**确实去投了介绍**（回调被调用），
+  // 且没有越过它去调模型 / 落库入站；重试再来一次。
+  check("聊过的人照样要先收介绍：有普通历史与已发出的普通通信时，首条没送到仍停在模型之前，重试会再来", async () => {
+    const { runColivingTurn } = await import("../lib/chat/coliving/turn");
+    const { IntroductionNotDelivered } = await import(
+      "../lib/chat/coliving/onboarding"
+    );
+    const house = await newTestHousehold(`selftest-onboarding-history-${stamp}`);
+    const phone = freshPhone("Y");
+    const sender = (await repo.enrollUnknownSender({
+      phone,
+      channel: "sms",
+      intoTestHouseholdId: house,
+    }))!;
+
+    // 这个人"早就聊过"：会话线上有住户自己说的话、也有 AI 说过的话；
+    // 库里还有一条**普通的、已经发出去的**通信（purpose 不是那条固定介绍）。
+    const conversationId = await repo.getOrCreateConversation({
+      personId: sender.personId,
+      householdId: house,
+      channel: "sms",
+    });
+    await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "inbound",
+      channel: "sms",
+      body: "我之前问过垃圾怎么倒",
+    });
+    const ordinary = await sendOrdinaryCommunication({
+      householdId: house,
+      personId: sender.personId,
+      purpose: "回复本人",
+      body: "（自检造的、之前发出去过的普通回复）",
+    });
+    await repo.appendMessage({
+      conversationId,
+      personId: sender.personId,
+      direction: "outbound",
+      channel: "sms",
+      body: "（自检造的、之前发出去过的普通回复）",
+      communicationId: ordinary,
+    });
+    const beforeHistory = (await repo.getRecentTurns(conversationId)).length;
+    const beforeOutbound = (await repo.recentOutbound(house)).length;
+
+    let deliveries = 0;
+    const onIntroduction = async () => {
+      deliveries += 1;
+      return { delivered: false, error: "selftest 故意让首条介绍送不到" };
+    };
+    const turn = () =>
+      runColivingTurn({
+        channel: "sms",
+        from: phone,
+        text: "hi",
+        onboardingTestHouseholdId: house,
+        onIntroduction,
+      });
+
+    for (const attempt of [1, 2]) {
+      await assert.rejects(
+        turn,
+        (error: unknown) =>
+          error instanceof IntroductionNotDelivered ||
+          (error as { name?: string } | null)?.name === "IntroductionNotDelivered",
+        `第 ${attempt} 次：历史里聊过、也有发出去的普通通信，这条固定介绍仍然要先发；没送到就终止本轮`
+      );
+    }
+    assert.equal(
+      deliveries,
+      2,
+      "两次入站都要重新占位、重新投递——历史与普通通信都不算「已经介绍过」"
+    );
+
+    // 外层次序：终止那一轮不许越过介绍去调模型 / 落库入站，也不许留下任何新出站。
+    assert.equal(
+      (await repo.getRecentTurns(conversationId)).length,
+      beforeHistory,
+      "终止那一轮不许在会话线上留下任何新消息（模型没被调用、入站也还没落库）"
+    );
+    assert.equal(
+      (await repo.recentOutbound(house)).length,
+      beforeOutbound,
+      "终止那一轮不许留下任何新出站（介绍自己那条没送出去，第二条更不该存在）"
     );
   });
 
@@ -576,8 +864,7 @@ async function main() {
     const { buildContext } = await import("../lib/chat/coliving/context");
     // 单独开一栋：这一项要的是"从什么都没有"到"齐全"的对照，
     // 跟上面几项写过的房子混在一起就看不出是哪儿变了。
-    const house = (await repo.createTestHousehold(`selftest-onboarding-C-${stamp}`))
-      .householdId;
+    const house = await newTestHousehold(`selftest-onboarding-C-${stamp}`);
     const phone = freshPhone("F");
     const sender = (await repo.enrollUnknownSender({
       phone,
@@ -629,6 +916,43 @@ async function main() {
       console.log(`  ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
+  // ── 收尾：删掉**本次调用自己造出来的**那几栋测试屋 ──────────────────────
+  // 只按上面记下的 id 一栋栋删（`dropRestoredHousehold` 自己先验 `is_test`，
+  // 不是测试屋直接抛错），**不做任何宽泛的 purge**。清理是尽力而为：删不掉就
+  // 把确切的 household id 打出来，交人工处理，不掩盖自检本身的结论。
+  let cleanupFailed: string[] = [];
+  try {
+    const { dropRestoredHousehold } = await import(
+      "../lib/chat/coliving/evals/snapshot"
+    );
+    for (const id of createdHouseholds) {
+      try {
+        await dropRestoredHousehold(id);
+      } catch (error) {
+        cleanupFailed.push(id);
+        console.log(
+          `  ✗ 测试屋没删掉：${id}（${error instanceof Error ? error.message : String(error)}）`
+        );
+      }
+    }
+  } catch (error) {
+    cleanupFailed = [...createdHouseholds];
+    console.log(
+      `  ✗ 清理模块没能加载：${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (cleanupFailed.length === 0) {
+    console.log(`✓ 已删掉本次自检造出的 ${createdHouseholds.length} 栋测试屋`);
+  } else {
+    console.log(
+      `✗ 有 ${cleanupFailed.length} 栋测试屋没删掉，请人工清理（确切 id）：`
+    );
+    for (const id of cleanupFailed) {
+      console.log(`    ${id}`);
+    }
+  }
+
   console.log(
     failed === 0
       ? `\n首次接触自检：${checks.length} 项全过（零模型、零短信；只写了测试屋）`

@@ -5169,14 +5169,19 @@ async function main() {
     // ⑤ 介绍资格**不是** firstEnrollmentTurn（二次复审新增阻塞）：资料齐全的新联系人
     //    （预置名册里的室友、房东给了号码的人）第一次说话也得先收介绍——「要不要介绍」
     //    与「要不要装配入门准则」是两件事，哨兵钉住那个条件本身。
+    //
+    //    2026-10-02：资格**只看库里那条固定介绍自己的投递状态**（同一个 purpose），
+    //    **不再拿会话历史当预筛**——普通回复 / 提醒 / 别的已发出通信都不算「收到过介绍」。
+    //    所以闸门第一句必须是「有没有投递器」：有投递器就走库里原子占位那条路，
+    //    没有（离线准备）才不发；不许改回 `needsIntroduction(history)` 那种按历史判的写法。
     const introDecl = turnSrc.indexOf(
       "let introduction: IntroductionDelivery | null = null;"
     );
     assert(introDecl > 0, "找不到那条固定介绍的占位声明");
     assert.equal(
       turnSrc.slice(introDecl).split("\n")[1].trim(),
-      "if (needsIntroduction(history)) {",
-      "介绍只按「没对话过、没发过」判（needsIntroduction + 库里原子占位），不许挂在 firstEnrollmentTurn 上"
+      "if (!args.onIntroduction) {",
+      "介绍资格只按库里那条固定介绍自己的投递状态判（claimFirstIntroduction + awaitFirstIntroductionDelivered），不许按会话历史预筛、也不许挂在 firstEnrollmentTurn 上"
     );
 
     // ⑥ 结构信号真的接进了路由，且准则侧有一条**强制**加载入门准则的规则——

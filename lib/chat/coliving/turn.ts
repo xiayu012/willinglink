@@ -29,7 +29,6 @@ import {
   INTRODUCTION_PURPOSE,
   introductionIn,
   IntroductionNotDelivered,
-  needsIntroduction,
 } from "./onboarding";
 import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
@@ -2217,98 +2216,84 @@ export async function runColivingTurn(args: {
    * 主生成、甚至主生成整个挂掉），介绍都已经先出去了，而且一定在第二条（`reply`）之前。
    * 两条是两次独立外呼，各自落在自己的 communication 上。
    *
-   * **资格只看"没对话过、没发过"，跟登记缺不缺项无关**：预置名册里的室友、房东给了号码
-   * 的人，第一次跟 AI 说话时资料是齐的，照样得先收到自我介绍。`needsIntroduction` 只是
-   * 便宜的预筛，真正的裁决是库里原子占位的 `repo.claimFirstIntroduction`。文案逐字来自
-   * 单点 `coordinator-self-description.md`（按本轮那个唯一的语言判定选）。
+   * **资格只看"这一条固定介绍自己有没有真的送到过"，跟会话历史、登记缺不缺项都无关**：
+   * 预置名册里的室友、房东给了号码的人、以及历史上一直没收到过这条介绍的号码，开口时
+   * 资料再齐、聊得再多，也照样得先收到自我介绍——**普通回复 / 提醒 / 别的已发出通信都不算**
+   * （裁决就是库里按人加锁的原子占位 `repo.claimFirstIntroduction`，它按同一个 `purpose`
+   * 收窄）。文案逐字来自单点 `coordinator-self-description.md`（按本轮那个唯一的语言判定选）。
    *
    * **没送到就终止本轮**（`IntroductionNotDelivered`）：首条没到，第二条不许发。
    */
   let introduction: IntroductionDelivery | null = null;
-  if (needsIntroduction(history)) {
-    if (!args.onIntroduction) {
-      // **没有投递器 = 离线准备**：不占位、不落库、不写历史。占位会留下一条永远没人
-      // 记账的 `queued`，那行会把之后每一次 `claimFirstIntroduction` 都挡掉。
-      console.log("[coliving] 这一轮没有投递器（离线准备）：不发首次介绍");
-    } else {
-      const deliverer = args.onIntroduction;
-      const body = introductionIn(language.language);
-      const claimed = await repo.claimFirstIntroduction({
-        householdId: sender.householdId,
-        personId: sender.personId,
-        channel,
-        body,
-        purpose: INTRODUCTION_PURPOSE,
-        intent: INTRODUCTION_INTENT,
-        modelId: colivingModelId(),
-      });
-      if (!claimed) {
-        // 并发的那一轮拿着这条介绍在发：等它**真的**发出去（投递状态才是顺序依据）。
-        const state = await repo.awaitFirstIntroductionDelivered({
-          personId: sender.personId,
-          channel,
-          purpose: INTRODUCTION_PURPOSE,
-        });
-        if (state !== "sent") {
-          throw new IntroductionNotDelivered(`另一轮正在发这条介绍，等到的是 ${state}`);
-        }
-      } else {
-        const intro: IntroductionDelivery = {
-          body,
-          communicationId: claimed.communicationId,
-        };
-        let result: IntroductionDeliveryResult | null = null;
-        try {
-          result = (await deliverer(intro)) ?? null;
-        } catch (error) {
-          console.log(
-            "[coliving] 首次介绍投递抛错：",
-            error instanceof Error ? error.message : String(error)
-          );
-        }
-        // **只有明确回了"已送达"才算送达**：没回答、抛错、说没发出去，一律按未送达。
-        if (result?.delivered !== true) {
-          // 内部诊断串（进 communication.error 与异常信息），不是住户文案——
-          // 写英文/非汉字是为了不和「住户可见中文字面量」那条静态闸撞车。
-          const reason = result?.error ?? "introduction delivery not confirmed by callback";
-          // 记 failed 之后不算占位：下一轮 `claimFirstIntroduction` 会再给一次机会。
-          // **不回写历史**，也不在上下文里说"已经介绍过"——那句话没到他手机上。
-          await repo.markCommunication({
-            communicationId: claimed.communicationId,
-            status: "failed",
-            error: reason,
-          });
-          throw new IntroductionNotDelivered(reason);
-        }
-        introduction = intro;
-        // 出站消息进会话历史：下一轮 `getRecentTurns` 读得到，模型因此知道
-        // 「我第一句已经说过了」，不会在第二条里再自我介绍一遍。
-        await repo.appendMessage({
-          conversationId,
-          personId: sender.personId,
-          direction: "outbound",
-          channel,
-          body,
-          communicationId: claimed.communicationId,
-        });
-      }
-    }
-  } else if (!history.some((h) => h.role === "user")) {
-    /**
-     * **历史里只有 AI 说过话**（并发那一轮刚把首条写进去、或我们主动先发的那条），
-     * 住户这一句还没进历史。顺序仍按**实际投递状态**判，不拿历史当回执：那条介绍要是
-     * 还在 `queued`，这里补等一次，别让回复抢到它前面。已经有东西 `sent` 就没有顺序
-     * 问题，照常往下走——只有 `timeout` 表示有一条介绍正在途中。
-     *
-     * 老用户的历史窗口里总有住户自己的话，走不到这一支，不会变成每轮轮询。
-     */
-    const state = await repo.awaitFirstIntroductionDelivered({
+  if (!args.onIntroduction) {
+    // **没有投递器 = 离线准备**：不占位、不落库、不写历史。占位会留下一条永远没人
+    // 记账的 `queued`，那行会把之后每一次 `claimFirstIntroduction` 都挡掉。
+    console.log("[coliving] 这一轮没有投递器（离线准备）：不发首次介绍");
+  } else {
+    const deliverer = args.onIntroduction;
+    const body = introductionIn(language.language);
+    const claimed = await repo.claimFirstIntroduction({
+      householdId: sender.householdId,
       personId: sender.personId,
       channel,
+      body,
       purpose: INTRODUCTION_PURPOSE,
+      intent: INTRODUCTION_INTENT,
+      modelId: colivingModelId(),
     });
-    if (state === "timeout") {
-      throw new IntroductionNotDelivered("历史里已有首条，但它仍在途中");
+    if (!claimed) {
+      /**
+       * **这条固定介绍已经存在**（并发那一轮刚占到、或早就发过）：等它**真的**发出去
+       * ——投递状态才是顺序依据。普通通信发出过 **不算**：这条等待只认同一个 `purpose`
+       * （`awaitFirstIntroductionDelivered`），别的通信既不能当介绍已送达，也不能解锁顺序。
+       */
+      const state = await repo.awaitFirstIntroductionDelivered({
+        personId: sender.personId,
+        channel,
+        purpose: INTRODUCTION_PURPOSE,
+      });
+      if (state !== "sent") {
+        throw new IntroductionNotDelivered(`这条介绍没送到（等到的是 ${state}）`);
+      }
+    } else {
+      const intro: IntroductionDelivery = {
+        body,
+        communicationId: claimed.communicationId,
+      };
+      let result: IntroductionDeliveryResult | null = null;
+      try {
+        result = (await deliverer(intro)) ?? null;
+      } catch (error) {
+        console.log(
+          "[coliving] 首次介绍投递抛错：",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+      // **只有明确回了"已送达"才算送达**：没回答、抛错、说没发出去，一律按未送达。
+      if (result?.delivered !== true) {
+        // 内部诊断串（进 communication.error 与异常信息），不是住户文案——
+        // 写英文/非汉字是为了不和「住户可见中文字面量」那条静态闸撞车。
+        const reason = result?.error ?? "introduction delivery not confirmed by callback";
+        // 记 failed 之后不算占位：下一轮 `claimFirstIntroduction` 会再给一次机会。
+        // **不回写历史**，也不在上下文里说"已经介绍过"——那句话没到他手机上。
+        await repo.markCommunication({
+          communicationId: claimed.communicationId,
+          status: "failed",
+          error: reason,
+        });
+        throw new IntroductionNotDelivered(reason);
+      }
+      introduction = intro;
+      // 出站消息进会话历史：下一轮 `getRecentTurns` 读得到，模型因此知道
+      // 「我第一句已经说过了」，不会在第二条里再自我介绍一遍。
+      await repo.appendMessage({
+        conversationId,
+        personId: sender.personId,
+        direction: "outbound",
+        channel,
+        body,
+        communicationId: claimed.communicationId,
+      });
     }
   }
 
