@@ -474,12 +474,17 @@ async function runScenario(
   const { rewritePhonesInText } = await import(
     "../lib/chat/coliving/evals/phones"
   );
-  // 名字/角色查一次就够，用来把 person_id 翻译成人能读的名字
-  const members = await repo.getMembers(householdId);
+  // 名字/角色用来把 person_id 翻译成人能读的名字。**不能只查一次用到尾**：
+  // 入门场景进屋时这栋屋子是空的（下面这几段都基于这份空快照），而这一轮模型
+  // 可能刚 `addResident` 加进新室友——所以在 turn 循环里**每跑完一轮都重新查一遍**
+  // （见那处刷新）。否则发给新室友的出站会被写成「（未知）」，`mustContactNames`
+  // 就对着**已经真发出去**的那条出站误判失败。
+  let members = await repo.getMembers(householdId);
   const nameOf = (personId: string) =>
     members.find((m) => m.personId === personId)?.name ?? "（未知）";
-  // 查不到就落 `other`，**不落 `tenant`**：`members` 是进屋那一刻的快照，
-  // 入门场景这里本来就是空的，陌生人（含不住这儿的物业/管家）查不到很正常。
+  // 查不到就落 `other`，**不落 `tenant`**：`members` 是**当时**查到的名册
+  // （每轮跑完会刷新，见 turn 循环），进门那一刻它可能是空的，陌生人
+  // （含不住这儿的物业/管家）查不到很正常。
   // 猜成「住客」等于在报告抬头里给非住户安身份——那只是给复核人看的元数据，
   // 宁可中性也不写错。**只影响这一处标签，不动库里的成员关系、不影响模型行为。**
   const roleOf = (phone: string) =>
@@ -606,6 +611,17 @@ async function runScenario(
       }
       throw error;
     }
+    /**
+     * **刷新本屋当前成员，再记这一轮的文字稿。** 这一轮模型可能刚 `addResident`
+     * 加进新室友（入门场景尤其如此，进屋时名册是空的），不刷新的话 `nameOf` /
+     * `roleOf` / `fromName` 都读的是进屋那一刻的旧快照，出站收件人被翻成「（未知）」，
+     * `mustContactNames` 于是对着**真的发出去**的那条出站误判失败。
+     *
+     * **只刷新给复核人看的元数据**（person_id → 可读名字 / 角色标签），不改运行时、
+     * 不调模型、不猜身份与居住（查不到仍落中性的 `other`）；已经记下的前几轮文字稿
+     * 不回头重写——快照只影响往后的轮次。
+     */
+    members = await repo.getMembers(householdId);
     const turnMs = Math.round(performance.now() - turnStartedAt);
     transcript.push({
       fromName:

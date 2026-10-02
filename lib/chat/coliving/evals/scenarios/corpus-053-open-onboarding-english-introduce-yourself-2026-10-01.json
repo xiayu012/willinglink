@@ -12,7 +12,7 @@
         "replyMustMatch": [
           "[Uu]nit|[Aa]partment (?:number|no)",
           "[Nn]ames?|叫(?:什么|啥)|姓名",
-          "[Pp]hone|numbers?|手机|号码",
+          "[Pp]hone\\s*numbers?",
           "[Rr]oommate|who else|live with|other (?:people|residents)"
         ],
         "replyMustNotMatch": [

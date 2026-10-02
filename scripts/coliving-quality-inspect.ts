@@ -1036,12 +1036,62 @@ async function main() {
       true,
       "记数据 + 真联系混在一句里必须仍然命中"
     );
-    // 英文的"记下号码"不落进这三支中文结构，本来就不命中——不为它另立英文启发式。
+    // 英文的"记下号码"不是"联系过谁"：英文那一支只认**联系动词**（`messaged / texted /
+    // contacted …`），`noted` 不在动词表里，所以照旧不命中——登记数据靠动词表收窄。
     assert.equal(
       claimsUnsentThirdPartyContact("I've noted Zhao Min's contact details."),
       false,
-      "英文记数据不在这三条中文判定的射程内（也不新加英文规则）"
+      "英文记数据不是声称联系过谁（英文支只认联系动词，不认 noted）"
     );
+
+    // **英文侧补丁（2026-10-02 corpus-054 第 3 轮真实跑测）**：那一轮住户交办「私下提醒
+    // Chris」，`toolsUsed` 只有 `sendReply`、`outbound` 一条没有，回复却是
+    // 「I've messaged Chris about it. Waiting on his reply.」——三支中文判定都要求中文结构，
+    // 整句漏过、`replyReview` 还判了通过（报告 2026-10-02T07-47-30-099Z）。补上英文一支后
+    // 必须命中；它只被这个函数复用，仍旧走原来那个「本轮零合格出站 → 换成登记好的真话兜底」
+    // 的替换点，不新开闸、不调模型、不触发任何工具循环。
+    assert.equal(
+      claimsUnsentThirdPartyContact("I've messaged Chris about it. Waiting on his reply."),
+      true,
+      "零出站那一轮的英文完成式「I've messaged Chris」必须判为假完成"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("I have messaged Chris."),
+      true,
+      "英文完成式（不缩写）同样要判为假完成"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("I've texted Chris and told Maya."),
+      true,
+      "换一个联系动词、换一个人名同样要命中"
+    );
+    // 反方向：**如实否认 / 将来的打算 / 对方对我说 / 对象是当前说话人 / 记下号码 / 还没发**
+    // 都不许误伤（`DEVELOPMENT_JUDGMENT`：先问这条规则会不会拒绝一个正常的好行为）。
+    for (const notAClaim of [
+      "I have not messaged Chris.",
+      "I will message Chris once I hear back from you.",
+      "Chris messaged me about the noise.",
+      "I have messaged you already — check your texts.",
+      "I have noted their phone numbers.",
+      "Nothing's been sent to Chris yet.",
+    ]) {
+      assert.equal(
+        claimsUnsentThirdPartyContact(notAClaim),
+        false,
+        `不是"我联系过第三方"的英文说法不得被判成假完成：「${notAClaim}」`
+      );
+    }
+    // 替换后的英文兜底本身不许再被判成假完成，否则替换完复核又会红灯（中文那句已有同类断言）。
+    for (const safe of [
+      TRUTHFUL_UNSENT_REPLY_EN,
+      selectUnsentContactFallback({ recordedOwnStance: true, language: "en" }),
+    ]) {
+      assert.equal(
+        claimsUnsentThirdPartyContact(safe),
+        false,
+        `英文兜底文案本身不得被判成假完成：「${safe}」`
+      );
+    }
   });
   check("resident-facing language follows the current message without translating facts", () => {
     const english = "Could you remind Alex not to run the dryer after 10 tonight?";
@@ -1088,6 +1138,80 @@ async function main() {
       block.includes("selectUnsentContactFallback({") &&
         block.includes("recordedOwnStance: ownRuleStance.recorded"),
       "假完成替换的文案必须走 selectUnsentContactFallback，且只传本人立场是否记账"
+    );
+  });
+  /**
+   * **强制 sendReply 兜底的指令前提**（2026-10-02 corpus-054）：这一轮实际零出站，发给当前
+   * 发信人的 `sendReply` 却是**写给他的第三方 Chris** 那段草稿、还带着来源姓名。独立复审给的
+   * **根因候选**是兜底那次调用里原句「上面的判断和操作都已经做完了」——主生成零工具结束时，
+   * 它等于给一次还没发生的执行背书。**台账留的是 step 级结构元数据（`finishReason`、工具名等）
+   * 与最终发出的正文，没有完整的生成正文与推理正文**，所以这里不推断模型当时怎么想，只钉
+   * **指令文本本身**与三条**正常反例**：修的是那句话怎么说，不是判定口径。
+   */
+  check("forced sendReply 兜底：指令只认已返回的工具结果，正文只回当前发信人", () => {
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const start = turnSrc.indexOf('"forced-sendReply"');
+    assert(start > 0, "强制 sendReply 兜底路径必须存在");
+    const end = turnSrc.indexOf('raw = deliveredReply ?? ""', start);
+    assert(end > start, "强制 sendReply 兜底的收口必须仍在原处");
+    const forced = turnSrc.slice(start, end);
+    // 不得再替模型断言"操作已经做完"：零工具结束时那句话变成给没发生的执行背书。
+    // 只在这段指令里判，不看整份文件——上面的注释**故意引用**了那句旧话当反例记录。
+    assert.equal(
+      /上面的判断和操作都已经做完了/.test(forced),
+      false,
+      "兜底指令不得再断言尚未执行的任务已经做完（零工具结束的主生成会把第三方草稿当已完成）"
+    );
+    // 也不得把正文说成"发给对方"的：`sendReply` 永远是回给当前这位发信人的。
+    assert.equal(
+      /把要发给对方的那句话/.test(forced),
+      false,
+      "sendReply 的正文是回给当前发信人的，不能写成「发给对方」"
+    );
+    assert(
+      forced.includes("已经返回的工具结果") &&
+        forced.includes("回给当前这位发信人") &&
+        forced.includes("如实说还没发"),
+      "兜底指令必须只说以已返回的工具结果为准、点明正文只回当前发信人、没发出去就如实说"
+    );
+    // 形状不变：仍是**同一次**小调用、只摆 `sendReply`，没有新增工具或工具循环。
+    assert(
+      forced.includes("tools: { sendReply: tools.sendReply }") &&
+        forced.includes('toolName: "sendReply"'),
+      "兜底仍必须是同一次强制 sendReply 小调用，不新增工具"
+    );
+
+    // **正常反例**（纯函数，零模型调用）——修的是指令前提，判定口径一条没动。
+    // ① 已有真实 contactPerson 成功：同一句"我联系过"是正常回执，必须照旧能说。
+    assert.equal(
+      isUnsolicitedContactClaim({
+        relayActive: true,
+        outboundCount: 1,
+        claimsCompletion: true,
+      }),
+      false,
+      "本轮真的联系成功过时，「我已经联系过他」不得被判成假完成"
+    );
+    // ② 只有记手机号不是已联系（中英各一）：登记资料不是"联系过谁"。
+    for (const recorded of [
+      "赵敏的联系方式我已经记下了。",
+      "I have noted their phone numbers.",
+    ]) {
+      assert.equal(
+        claimsUnsentThirdPartyContact(recorded),
+        false,
+        `记下号码不是已经联系过谁：「${recorded}」`
+      );
+    }
+    // ③ 未操作不叫已做完：一条出站都没有时，同一句完成声称才按假完成处理。
+    assert.equal(
+      isUnsolicitedContactClaim({
+        relayActive: true,
+        outboundCount: 0,
+        claimsCompletion: true,
+      }),
+      true,
+      "零出站时「我已经联系过他」才该按假完成处理（判定只看结构事实）"
     );
   });
   // 029 模型验收抓到的真实隐私缺陷：电视音量那轮真实出站写成了
@@ -1632,10 +1756,12 @@ async function main() {
     // 029：无主语完成式（「已经跟阿杰说了」）也必须被替换，不能只把 replyReview 标红。
     // 判定复用 checkFalseContactClaim 同源的 claimsContactCompletion，不另造大正则。
     // 2026-10-02 起这一支跑在**抹掉联系数据名词之后**的那一句上（`claim`）——
-    // 「联系方式」是名词不是动作，记数据不许被当成假称联系过谁（正反例见上面那条 check）。
+    // 「联系方式」是名词不是动作，记数据不许被当成假称联系过谁（正反例见上面那条 check）；
+    // 同一次返回上并排的是英文那一支（`EN_COMPLETED_CONTACT_PATTERN`），两条都在原地复用。
     assert(
-      turnSrc.includes("return claimsContactCompletion(claim)") &&
-        turnSrc.includes("withoutContactDataNouns(clause)"),
+      turnSrc.includes("claimsContactCompletion(claim)") &&
+        turnSrc.includes("withoutContactDataNouns(clause)") &&
+        turnSrc.includes("EN_COMPLETED_CONTACT_PATTERN.test(claim)"),
       "无主语完成式必须复用 claimsContactCompletion（不另造一套大正则），且跑在抹掉联系数据名词之后"
     );
     // 恢复的通用联系工具仍必须带发送前竞态门禁（目标人本轮开始后有新入站则跳过）。
@@ -5098,6 +5224,74 @@ async function main() {
         /名字|姓名/.test(onboardingDoc),
       "入门准则必须点明必收的两件：房号 + 室友姓名与手机号"
     );
+    // **2026-10-02 老板要求：英文里把「号码」说全。** bare "numbers" 跟房号
+    // （unit number）分不清，真实英文入门里住户正是被这句话绕住的——准则必须
+    // 点明英文说法用 phone number(s)。这不是要求整篇英译，Unit 那一件照旧。
+    assert(
+      /phone numbers?/i.test(onboardingDoc),
+      "入门准则必须写明英文问法用 phone number(s)，不能只说 bare numbers（会和房号混）"
+    );
+    // **强化后的英文场景断言不是空转（同一份纯函数验，不另抄判法）。** 同样是
+    // 「问 Unit + 姓名 + 号码 + 室友」的回复：说 bare "numbers" 必须判失败，说
+    // "phone numbers" 必须零失败——否则 050/053 那两条断言改了等于没改。
+    const enOnboardingFile =
+      "corpus-050-open-onboarding-english-hi-2026-10-01.json";
+    const enOnboarding = validateScenario(
+      JSON.parse(
+        readFileSync(
+          `lib/chat/coliving/evals/scenarios/${enOnboardingFile}`,
+          "utf8"
+        )
+      ),
+      enOnboardingFile
+    );
+    const enTurn1 = enOnboarding.turns[0].expect;
+    // 同一句「问 Unit + 室友姓名 + 号码」的回复，只换号码那半的说法，用同一份纯函数判：
+    // bare "numbers"、只说 "phones" 都必须失败，说全成 "phone numbers" 才通过。
+    const askUnitNames = (tail: string) =>
+      `What's your unit, and who else lives here — their names and ${tail}?`;
+    const enTurn1Failure = (tail: string) =>
+      evaluateTurnExpectation(enTurn1, {
+        toolsUsed: [],
+        reply: askUnitNames(tail),
+        outbound: [],
+        introduced: true,
+      });
+    // ① bare "numbers"（和房号混）→ 正好被 phone 那条判失败。
+    const bareNumberFailures = enTurn1Failure("numbers");
+    assert.equal(
+      bareNumberFailures.length,
+      1,
+      `bare "numbers" 的英文入门回复必须正好被判失败一次（phone 那条）：${bareNumberFailures.join(" | ") || "（一条都没报）"}`
+    );
+    // **失败文本里带的是「模式原文」**（字面 `\s*`，不是正则的空白）——所以用字符串
+    // 包含比对，别把模式再 double-escape 成一条正则去 match（那正是这条检查先前翻车的
+    // 地方：`/\[Pp\]hone\s\*numbers\?/` 期望空白，文本里却是反斜杠+s+星号）。期望的那条
+    // 模式直接从场景的 replyMustMatch 里取，不在这里另抄一份、也不会漂移。
+    const phonePattern =
+      (enTurn1?.replyMustMatch ?? []).find((p) => p.includes("numbers")) ?? "";
+    assert(phonePattern, "入门场景必须有一条要求 phone number(s) 的断言");
+    assert.ok(
+      bareNumberFailures[0].includes(phonePattern),
+      `bare "numbers" 的失败必须来自 phone 那条「${phonePattern}」：${bareNumberFailures[0]}`
+    );
+    // ② 只说 "phones"、没把 number 说出口 → 同样不够（要求的是显式的 phone number(s)）。
+    const barePhoneFailures = enTurn1Failure("phones");
+    assert.equal(
+      barePhoneFailures.length,
+      1,
+      `只说 "phones" 没说 number 也必须被判失败：${barePhoneFailures.join(" | ") || "（一条都没报）"}`
+    );
+    assert.ok(
+      barePhoneFailures[0].includes(phonePattern),
+      `只说 "phones" 的失败必须来自 phone 那条「${phonePattern}」：${barePhoneFailures[0]}`
+    );
+    // ③ 说全成 "phone numbers" → 零失败。
+    assert.deepEqual(
+      enTurn1Failure("phone numbers"),
+      [],
+      "说全成 phone numbers 的英文入门回复不得被判失败"
+    );
     // **提问预算没有被这次拆分放宽**：入门资料是唯一窄例外，别的问题照旧一次一个。
     assert(
       onboardingDoc.includes("一轮最多一个"),
@@ -5272,6 +5466,199 @@ async function main() {
       `没有依据的全屋结论必须仍判失败：${wholeHouseClaim.join(" | ") || "（一条都没报）"}`
     );
     assert.match(wholeHouseClaim[0], /^回复命中了不该出现的模式/);
+  });
+
+  /**
+   * **corpus-054 第四/五轮的「无凭据的全屋规矩 + 替自己许下动作」（2026-10-02 真实跑测）。**
+   *
+   * 真实两轮的入站没改、回复原文见场景 `source`：Chris 收到「I am setting 11 p.m. as the
+   * quiet point for the shared rooms and letting the others know too…so it is not just on you」，
+   * Maya 收到「Everyone here has the same…I am checking with the others too」——**这两轮一条
+   * 第三方出站都没有**。原有的三条禁词只认「已定成规则 / 大家都同意了」那几种固定说法，抓不到
+   * 「自己宣布一条全屋安静时段」和「我这就去通知别人」这两类，各补一条。
+   *
+   * **三条都按观察到的肯定说法收窄，不写成通用动词表**（2026-10-02 独立复审）：全屋时段那条要
+   * **第一人称 + set/make/put 的肯定声明**；通知别人那条要**第一人称 + am/are/will/'ll + 联系
+   * 动词**，中间夹了 not / never / n't 就整条不算——旧版按任意动词、任意时态匹配，会把**如实的
+   * 否认**（「I have not contacted the others and I am not checking with the others.」）也判失败。
+   * **拟议中、还没发出去的草稿**同样不许误伤：住户让你先拟一版、先说给他听、暂时别发给别人，
+   * 那是在谈一份安排，不是「替不存在的安排作保」。
+   *
+   * **间隔写成「不跨行」而不是「不跨句号」**（2026-10-02 免费闸自己踩到的坑）：真实原句是
+   * 「setting 11 p.m. as the quiet point…and letting the others」，用 `[^.!?\n]` 的有界间隔会被
+   * `p.m.` 里那个句点截断，两条禁词在**待抓的那句话上**根本不命中；改成 `[^\n]` 之后，就着下面 ①
+   * 里**已经捕获的原句**逐字验过会命中，同时如实否认与拟议草稿仍然通过（③b / ③c）。
+   *
+   * 用**真正跑断言的那个纯函数** `evaluateTurnExpectation` 把这四类逐句跑一遍：两句真实原文各被
+   * 判失败（且失败确实来自新禁词），朴素的收到、如实转述做过的事、如实否认、拟议草稿零失败
+   * （`DEVELOPMENT_JUDGMENT`：先问这条规则会不会拒绝一个正常的好行为）。
+   */
+  check("corpus-054：无凭据的全屋规矩与「正在通知别人」被判失败，否认真话与拟议草稿不误伤", () => {
+    const file = "corpus-054-english-onboarding-then-night-noise-2026-10-02.json";
+    const scenario = validateScenario(
+      JSON.parse(readFileSync(`lib/chat/coliving/evals/scenarios/${file}`, "utf8")),
+      file
+    );
+    // 三条新禁词第四、五、六轮都得在——漏一轮就等于那一轮不设防。
+    // 四条新禁词的**唯一片段**。第一人称声明那条不能再用 `set(?:ting)?`：新加的
+    // 「我们正在给全屋定…」也含 set，片段撞车会让断言悄悄挂到另一条模式上
+    // （`needle` 的唯一性断言就是为这一类准备的）。
+    const FIRST_PERSON_DECL = "[Ii](?:['’]m| am| will be| shall be)";
+    const SAME_FOR_ALL = "[Tt]he same";
+    const NOTIFY_OTHERS = "lett?ing";
+    const WE_ARE_SETTING = "[Ee]ntire";
+    const needle = (turn: number, part: string) => {
+      const hits = (scenario.turns[turn].expect?.replyMustNotMatch ?? []).filter((p) =>
+        p.includes(part)
+      );
+      assert(
+        hits.length === 1,
+        `${file} 第${turn + 1}轮里「${part}」应只对应一条禁词，实际 ${hits.length} 条`
+      );
+      return hits[0]!;
+    };
+    for (const turn of [3, 4, 5]) {
+      for (const part of [FIRST_PERSON_DECL, SAME_FOR_ALL, NOTIFY_OTHERS, WE_ARE_SETTING]) {
+        needle(turn, part);
+      }
+    }
+    const expect = scenario.turns[3].expect ?? {};
+    const judge = (reply: string) =>
+      evaluateTurnExpectation(expect, {
+        toolsUsed: [],
+        reply,
+        outbound: [],
+        introduced: false,
+      });
+    // ① Chris 的真实回复：自己宣布全屋安静时段 + 说要去通知别人，两条新禁词各命中一条。
+    const chris = judge(
+      "Got it, Chris — headphones after 11, no speakerphone in the living room that late. " +
+        "I am setting 11 p.m. as the quiet point for the shared rooms and letting the " +
+        "others know too, so it is not just on you. If 11 feels too early, tell me and I " +
+        "will move it."
+    );
+    assert(
+      chris.some((f) => f.includes(needle(3, FIRST_PERSON_DECL))),
+      `自己宣布一条全屋安静时段必须被判失败：${chris.join(" | ") || "（一条都没报）"}`
+    );
+    assert(
+      chris.some((f) => f.includes(needle(3, "lett?ing"))),
+      `说要去通知别人（本轮并没有发出去）必须被判失败：${chris.join(" | ") || "（一条都没报）"}`
+    );
+    // ② Maya 的真实回复：没凭据的「这里每个人都一样」+ 正在问别人，两条新禁词各命中一条。
+    const maya = judge(
+      "Got it, Maya. Living room quiet after 11, and any late call from your room with " +
+        "headphones — that is your part. Everyone here has the same, so it is not just " +
+        "you. Nothing is final: if it does not work for you, tell me and I will change " +
+        "it. I am checking with the others too."
+    );
+    assert(
+      maya.some((f) => f.includes(needle(3, SAME_FOR_ALL))),
+      `没有凭据的「这里每个人都一样」必须被判失败：${maya.join(" | ") || "（一条都没报）"}`
+    );
+    // ②b 同一轮第二次跑测（2026-10-02）换了个说法：「Same deal for everyone in the house.」
+    //     ——本轮同样零出站、桌上没有任何全屋共识，必须照旧命中（词序反过来也要认）。
+    const mayaLatest = judge(
+      "Thanks, Maya. Got it down: shared living room quiet after 11 p.m., and if you take a " +
+        "late call you do it in your room on headphones. Same deal for everyone in the " +
+        "house. Nothing's locked in yet — if this doesn't work for you, tell me and I'll " +
+        "change it."
+    );
+    assert(
+      mayaLatest.some((f) => f.includes(needle(3, SAME_FOR_ALL))),
+      `把同一个安排说成「大家都一样」必须被判失败：${mayaLatest.join(" | ") || "（一条都没报）"}`
+    );
+    // ②c Leo 那一轮：没有任何人要求立规矩、本轮零出站，回复却写「we're setting for the
+    //     shared living room」——**我们正在给全屋定**一件安排，必须命中（换了主语也要认）。
+    const leo = judge(
+      "Thanks, Leo. Noted: late calls in your room, and no speakerphone in the living room " +
+        "after 11. That's the same quiet stretch we're setting for the shared living room, " +
+        "so it's not on you alone. If keeping to it ever gets hard, tell me and we'll adjust."
+    );
+    assert(
+      leo.some((f) => f.includes(needle(3, WE_ARE_SETTING))),
+      `「我们正在给全屋定…」必须被判失败：${leo.join(" | ") || "（一条都没报）"}`
+    );
+    assert(
+      maya.some((f) => f.includes(needle(3, "lett?ing"))),
+      `说正在问其他住户（本轮并没有发出去）必须被判失败：${maya.join(" | ") || "（一条都没报）"}`
+    );
+    // ③ 反方向一：朴素的收到、如实报告真的做过的动作（哪怕提到别人）——正常回复，不得被判失败。
+    for (const good of [
+      "Got it, Chris — thanks for keeping late calls in your room, and sorry the walls are thin.",
+      "Thanks, Maya — noted.",
+      "Chris — I passed this on to you yesterday, that's all I've done.",
+    ]) {
+      assert.deepEqual(judge(good), [], `「${good}」是正常回复，不得被判失败`);
+    }
+    // ③b 反方向二：**如实的否认**。他真没联系过别人、也真没这个打算，说清楚它不是罪——
+    //     独立复审举的就是「没做却说自己没做」这一类（旧版按通用动词表会把它判失败）。
+    for (const truthful of [
+      "I have not contacted the others and I am not checking with the others.",
+      "I'm not messaging the others about this, and I haven't told them either.",
+    ]) {
+      assert.deepEqual(judge(truthful), [], `如实否认不是禁词，不得误伤：「${truthful}」`);
+    }
+    // ③c 反方向三：**拟议中、还没发出去的草稿**。住户让你先拟一版、暂时别发给别人时，
+    //     「安静时段」这种词正是在谈一份安排（只是还没定、也还没发）。它在本轮不是答案，
+    //     但禁词不许把它当成「自己宣布了全屋规矩」。
+    assert.deepEqual(
+      judge(
+        "Sure — here's a first pass: quiet in the shared rooms after 11, late calls from " +
+          "your own room. Nothing's been sent to anyone yet; tell me what to change."
+      ),
+      [],
+      "拟议中、还没发出去的草稿不得被当成既成规矩"
+    );
+    // ③d 反方向四：**明确的全屋规矩请求**与**拟议中的措辞**。住户真要求「定一条全屋的规矩」
+    //     时，协调流程照旧要能用——回复可以说"要不要我拿去问全屋"、"我们先按这个试"；
+    //     新禁词只拦"已经/正在定"和"大家都一样"的既成说法，不许连这两类一起拦。
+    for (const proposed of [
+      "If you want it to be a house rule, say the word and I'll put it to everyone — " +
+        "nothing's decided yet.",
+      "We're trying 11 p.m. for the shared rooms for now — nothing's final, tell me what " +
+        "to change.",
+    ]) {
+      assert.deepEqual(
+        judge(proposed),
+        [],
+        `明确的全屋规矩请求与拟议中的说法不得被判失败：「${proposed}」`
+      );
+    }
+    // ④ 准则侧的不变量：确实在谈一件对全屋的安排时「你会跟大家讲」仍然允许，别把它一起删掉；
+    //    同时 craft.md 必须写明「拟议中的也算」与「私下交办提醒某一个人不是这一件」。
+    const craft = readFileSync("lib/ai/brains/coliving/doctrine/always/craft.md", "utf8");
+    assert(
+      craft.includes("我跟大家讲"),
+      "确实在谈一件对全屋的安排时，「我会跟大家讲」仍然要说——这一条不许被一起删掉"
+    );
+    assert(
+      craft.includes("拟议中的也算"),
+      "「安排」必须包含**拟议中**的（先拟一版、暂时别发也算在谈安排），不许收窄成「只有真发出去的才算」"
+    );
+    assert(
+      craft.includes("不是这一件"),
+      "craft.md 必须写明「住户私下交办你去提醒某一个具体的人」不是这一件，没有全屋的那一份"
+    );
+    // 范围判断的另一半在 `domain/conflict.md` 的入口（§〇，情境层，不是常驻层）：
+    // 住户只是在回一件已办过的事、或只说他自己打算怎么做，**不是**一件新的「大家的事」，
+    // 这一轮没有方案要算、也没有受影响的人要通知。
+    const conflictDoc = readFileSync(
+      "lib/ai/brains/coliving/doctrine/domain/conflict.md",
+      "utf8"
+    );
+    assert(
+      conflictDoc.includes("他只是在回一件你已经办过的事") &&
+        conflictDoc.includes("他自己的一句话") &&
+        conflictDoc.includes("一个人的应声不能凭空变成"),
+      "conflict.md 入口必须写明：回一件已办过的事 / 只说他自己的做法不是「大家的事」，一个人的应声不能凭空变成大家都已同意"
+    );
+    assert(
+      conflictDoc.includes("确实在谈对全屋的安排时照旧走下面") &&
+        conflictDoc.includes("主动表达意见") &&
+        conflictDoc.includes("不必等他下某个口令才准协调"),
+      "确实在谈对全屋的安排时仍要走协调流程（明确提议是，多人围绕同一件共同安排主动表达意见也是，不要求特定口令）——不许收窄成「只有住户明确下令才准协调」"
+    );
   });
 
   check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {
@@ -9056,6 +9443,40 @@ async function main() {
     assert(
       !/responseCache|response_cache|cache:\s*true/.test(turnSrc),
       "只开 prompt-prefix 缓存，不得引入应用级回复缓存"
+    );
+  });
+  /**
+   * **评测元数据：成员名单每轮刷新——入门场景里新室友的出站才不会被记成「未知」。**
+   *
+   * `members` 是进屋那一刻的快照，入门场景开局这栋屋子是空的；这一轮模型刚
+   * `addResident` 加进来的室友不在这份快照里，`nameOf` / `roleOf` / `fromName` 就会把
+   * 那条**真的发出去**的出站收件人翻成「（未知）」，`mustContactNames` 于是误判失败
+   * （Codex 独立复审 2026-10-02 在真实评测里发现）。修法是**每跑完一轮
+   * `runColivingTurn`、在记这一轮文字稿之前**重新查一次成员；只刷新给复核人看的
+   * 元数据，不改运行时、不调模型、不猜身份。
+   *
+   * 这条哨兵是**纯静态**的：钉住那个刷新真的在 turn 循环里、且在 `transcript.push`
+   * 之前，别处写一遍不算。它证明的是**机制在位**，运行时的实际效果由真实评测观察
+   * （本检查不连库）。
+   */
+  check("评测元数据：成员名单每轮刷新（新室友的出站不会记成「未知」）", () => {
+    const src = readFileSync("scripts/coliving-eval.ts", "utf8").replace(
+      /\r\n/g,
+      "\n"
+    );
+    assert(
+      src.includes("let members = await repo.getMembers(householdId);"),
+      "members 必须是可重新赋值的 let；写成 const，下面的刷新就会失效"
+    );
+    const turnCallAt = src.indexOf("turn.runColivingTurn({");
+    assert(turnCallAt > 0, "找不到 runColivingTurn 的调用");
+    const pushAt = src.indexOf("transcript.push({", turnCallAt);
+    assert(pushAt > turnCallAt, "找不到这一轮的文字稿记录");
+    assert(
+      src
+        .slice(turnCallAt, pushAt)
+        .includes("members = await repo.getMembers(householdId);"),
+      "每轮 runColivingTurn 之后、记文字稿之前必须刷新成员，否则新室友的出站被记成「未知」"
     );
   });
   check("输出上限：coliving-eval 启动即校验变量、非法退出，并把生效值写进报告", () => {

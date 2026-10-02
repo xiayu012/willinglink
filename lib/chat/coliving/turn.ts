@@ -226,8 +226,11 @@ const THIRD_PARTY_ALSO_SAID_PATTERN =
  * 「联系信息里的人我已经记下了」这类句子两读（"记下了联系人" / "联系了那个人"），
  * 按**动词读法**保留命中——残留歧义就留在这儿，不另立规则、也不去猜上下文。
  *
- * 只管这两支**中文结构**判定，不为它另立英文启发式：英文的"记下号码"
- * （「I've noted his number」）本来就不落进任何一支（三支都要求中文结构）。
+ * 只管这三支**中文结构**判定。英文另有自己的一支（见下 `EN_COMPLETED_CONTACT_PATTERN`）：
+ * 2026-10-02 corpus-054 第 3 轮真实跑测里，住户交办「私下提醒 Chris」的那一轮零出站，
+ * 回复却写「I've messaged Chris about it.」——三支都要求中文结构，整句漏过、
+ * `replyReview` 还判了通过，所以补上；那一支同样只认**联系动词**，`noted` 不在列，
+ * 英文的"记下号码"（「I've noted his number」）照旧不命中。
  */
 const CONTACT_DATA_NOUN_PATTERN =
   /联系(?:方式|号码|电话)|联系(?:信息|资料)(?!里|上|中|内)/g;
@@ -236,6 +239,52 @@ const CONTACT_DATA_NOUN_PLACEHOLDER = "〔资料〕";
 function withoutContactDataNouns(clause: string): string {
   return clause.replace(CONTACT_DATA_NOUN_PATTERN, CONTACT_DATA_NOUN_PLACEHOLDER);
 }
+
+/**
+ * **英文的「已经联系过第三方」完成式声称**（2026-10-02 corpus-054 第 3 轮真实跑测）。
+ *
+ * 那一轮住户交办「私下提醒 Chris」，`toolsUsed` 只有 `sendReply`、`outbound` 一条没有，
+ * 回复却写「I've messaged Chris about it. Waiting on his reply.」——上面三支都要求中文结构，
+ * 整句漏过。这里补上与中文同源的一支：**第一人称 + 完成态/过去式 + 联系动词 + 明确第三方**。
+ * 它只被 `claimsUnsentThirdPartyContact` 复用，仍走原来那个「本轮零合格出站 → 换成登记好的
+ * 真话」的替换点：不新开闸、不调模型、不触发任何工具循环。
+ *
+ * 每条收窄都对应一个**必须照旧通过**的说法：
+ *  - 中间夹 `not / never / n't` 整条不算：「I have not messaged Chris」是**如实否认**；
+ *  - 时态只认完成/过去式，不认原形：「I will message Chris」是**将来的打算**，不是完成声称；
+ *  - 必须有第一人称主语：「Chris messaged me」是**对方对我说**，不在射程内；
+ *  - 宾语必须明确是第三方（姓名，或 him/her/them/the others…）：出现 `me / you / us`
+ *    一律不算——「I have messaged you already」是在跟当前说话人讲他自己；
+ *  - 名词性的**登记数据**不进动词表：`noted` 不在列，「I have noted their phone numbers」
+ *    是在记号码（中文那边靠 `CONTACT_DATA_NOUN_PATTERN` 收窄，这边靠动词表收窄）。
+ *
+ * 取舍与中文两支一致：本轮**零成功出站**时，完成/过去式的联系声称一律按假完成处理。
+ * 宾语只收**人名**与指第三方的代词/集合名词，所以「I talked to the landlord」这类不点名的
+ * 说法不在射程内——宁可漏，也不误伤正常讨论。
+ */
+const EN_CONTACT_VERBS =
+  "messaged|texted|contacted|emailed|notified|informed|told|pinged|called|phoned|reached out to|spoke to|talked to|got in touch with|followed up with|checked with";
+/** 宾语里出现这些就不算"联系了第三方"：那是当前说话人自己。 */
+const EN_SELF_OR_LISTENER = "me|you|us|yourself";
+/** 明确的第三方宾语：姓名，或指第三方的代词 / 集合名词。 */
+const EN_THIRD_PARTY =
+  "(?:the\\s+)?(?:[A-Z][a-z]+|him|her|them|everyone|everybody|others|rest|roommates?|housemates?|residents?|guys)";
+
+/** 把"人称 + 时态 + 动词"的头接上**宾语收窄**（`me/you/us` 一律不算）。 */
+function englishContactClaim(head: string): string {
+  return `${head}(?!(?:${EN_SELF_OR_LISTENER})\\b)${EN_THIRD_PARTY}\\b`;
+}
+
+const EN_COMPLETED_CONTACT_PATTERN = new RegExp(
+  [
+    // 完成态：I've / I have / I had（中间只允许最多两个短副词，且不许跨 not/never/n't）。
+    englishContactClaim(
+      `\\b(?:I|we)(?:['’]ve| have| had)\\s+(?:(?!\\bnot\\b|\\bnever\\b|n['’]t\\b)[a-z]+\\s+){0,2}(?:${EN_CONTACT_VERBS})\\s+`
+    ),
+    // 过去式：I messaged / I already texted…（时态本身就排除了「I will message」）。
+    englishContactClaim(`\\b(?:I|we)\\s+(?:already\\s+)?(?:${EN_CONTACT_VERBS})\\s+`),
+  ].join("|")
+);
 
 export function claimsUnsentThirdPartyContact(text: string): boolean {
   return text.split(/[。！？!?\n]/).some((clause) => {
@@ -248,7 +297,8 @@ export function claimsUnsentThirdPartyContact(text: string): boolean {
       return true;
     }
     // 省略主语的完成式：复用 claimsContactCompletion，与 checkFalseContactClaim 同源。
-    return claimsContactCompletion(claim);
+    // 英文那一支自带第一人称与宾语收窄，见上 `EN_COMPLETED_CONTACT_PATTERN`。
+    return claimsContactCompletion(claim) || EN_COMPLETED_CONTACT_PATTERN.test(claim);
   });
 }
 
@@ -4602,6 +4652,14 @@ export async function runColivingTurn(args: {
      * 补一次**强制调用 sendReply** 的小调用兜底，而不是继续信任自由文本：
      * 带着到这里为止的完整上下文（含所有工具调用与结果），逼它把已经
      * 想好的结论交付成一句正文。这比"猜哪段文字是正文"可靠得多。
+     *
+     * **但这条指令自己不能替它断言"任务都做完了"**（2026-10-02 corpus-054：这一轮实际零出站，
+     * 发给当前发信人的 `sendReply` 却是**写给他的第三方**那段草稿，还带着来源姓名）。
+     * 独立复审给的**根因候选**是：主生成因步数 / 输出长度用尽而**零工具**结束，原句
+     * 「上面的判断和操作都已经做完了」等于给一次还没发生的执行背书。**台账留的是 step 级
+     * 结构元数据（`finishReason`、工具名等）与最终发出的正文，没有完整的生成正文与推理正文**
+     * ——所以这里不推断模型当时怎么想，只钉**指令文本这一层可复现的事实**：现在这条指令只以
+     * **已经返回的工具结果**为准，并点明 `sendReply` 的正文永远是回给当前这位发信人的。
      */
     try {
       const forced = await trackedGatewayCall("forced-sendReply", modelId, (rec) =>
@@ -4623,8 +4681,11 @@ export async function runColivingTurn(args: {
           {
             role: "user" as const,
             content:
-              "【系统提示】上面的判断和操作都已经做完了，你还没有交付正文。" +
-              "现在只做一件事：调 sendReply，把要发给对方的那句话交出来。",
+              "【系统提示】你还没有交付正文，现在只做一件事：调 sendReply 交出正文。" +
+              "**只以本轮已经返回的工具结果为准**：没调过的工具就是没做过，没有成功投递的" +
+              "第三方出站就是没发出去——不要当成已经办成的事，也不要把打算发给别人的草稿" +
+              "交出来。sendReply 是**回给当前这位发信人**的，不是发给第三方的正文；" +
+              "还没真正发出去的，就如实说还没发。",
           },
         ],
         tools: { sendReply: tools.sendReply },

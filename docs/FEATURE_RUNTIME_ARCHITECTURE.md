@@ -399,10 +399,38 @@
 
 主生成若在**本轮没有任何通过确定性出站闸**（generation-only 下保留的那道代码闸）的第三方
 出站的情况下，回复却声称已经 / 正在联系某人（含**省略主语**的「已经跟阿杰说了」——029
-真实事故），命中 `claimsUnsentThirdPartyContact` 时那句话会被替换成一句说真话的未发送
-说明（只说「没发出去」，不列内部能力清单）；替换后**重新过一次确定性事实核对**。反过来，
-本轮**确实有**已接受的第三方出站时，**不得**把正常回执误替换。判定只看结构事实
-（有没有真的发出去），不看模型口气。
+真实事故；也含**英文**的第一人称完成 / 过去式，见下），命中 `claimsUnsentThirdPartyContact`
+时那句话会被替换成一句说真话的未发送说明（只说「没发出去」，不列内部能力清单）；替换后
+**重新过一次确定性事实核对**。反过来，本轮**确实有**已接受的第三方出站时，**不得**把正常
+回执误替换。判定只看结构事实（有没有真的发出去），不看模型口气。
+
+主生成因步数 / 输出长度用尽而**没调 `sendReply`** 时，有一次**强制补交付**的小调用兜底
+（`forced-sendReply`，只摆 `sendReply` 一个工具）。这条指令**不再宣称"上面的判断和操作都已经
+做完了"**：零工具结束时那句话等于给一次还没发生的执行背书——模型可能把**本来要发给第三方**的
+草稿（含来源姓名）当成本轮已经办成的事，交给 `sendReply` 发给了当前发信人（2026-10-02
+corpus-054）。现在它只按**本轮已经返回的工具结果**说话（没调过的工具就是没做过、没有成功投递
+的第三方出站就是没发出去），并点明 `sendReply` 的正文**永远是回给当前这位发信人的**、还没真正
+发出去就如实说还没发。形状没变：仍是同一次小调用、只摆 `sendReply`，没有新增工具或工具循环。
+
+**英文侧是同一个函数里的另一支**（2026-10-02 corpus-054 第三轮真实跑测：`toolsUsed` 只有
+`sendReply`、零出站，回复却写「I've messaged Chris about it. Waiting on his reply.」）：
+**第一人称 + 完成态 / 过去式 + 联系动词 + 明确第三方**。它只在**同一个替换点**被复用——不新开
+闸、不调模型、不触发工具循环；如实否认（`I have not messaged Chris`）、将来的打算
+（`I will message Chris`）、对方对我说（`Chris messaged me`）、对象是当前说话人
+（`I have messaged you already`）、登记资料（`I have noted their phone numbers`）都不在射程内。
+替换文案按本轮语言取（`TRUTHFUL_UNSENT_REPLY` / `TRUTHFUL_UNSENT_REPLY_EN`，见
+`selectUnsentContactFallback`）。
+
+**「一个人的应声」不是「全屋的安排」**（同一次 2026-10-02 跑测的第四到六轮）：他只是回一句
+「知道了」、或说说**他自己**打算怎么做（`I'll use headphones after 11 p.m.`），那一轮**没有方案
+要算、也没有受影响的人要通知**，回复不得替他讲成一条已经定下的全屋规矩（`we're setting … for
+the shared living room` / `Same deal for everyone in the house.`）。**这一条在主生成路径上没有
+代码闸**——代码只拦结构事实（有没有真的发出去、有没有真的联系过谁）；措辞层由
+`domain/conflict.md` 入口（§〇）的范围判断收窄——那是**范围**判断，不是「只有住户明确下令
+才准协调」：确实在谈对全屋的安排时照旧走协调流程（明确提议是，多人围绕同一件共同安排主动
+表达意见也是），被收窄的只是「一个人的应声 ≠ 大家已达成共识」，回归由隔离场景 `corpus-054-…-2026-10-02.json`
+第四到六轮的禁词断言看着，自然度与分寸仍只能逐轮人工阅读。这些断言只说明**哪些说法会被判
+失败**，不说明某一轮的措辞已经过关（generation-only 没有语义复审，见下节）。
 
 ## 第一次接触：两条固定动作、四个互不相同的信号（2026-10-01）
 
@@ -419,7 +447,9 @@
 - **要不要装配入门准则**（`firstEnrollment` 结构信号 → brain 里 `force: true` 的
   **`onboarding`** 规则）：第一次开口**且登记缺项**。一句 "hi" 里没有任何话题词，话题路由
   永远命不中，真实英文评测里那一轮只装到兜底的 `complaint-risk`、第二条因此没问房号与室友。
-  缺项文本本身也说到具体（**姓名 + 手机号**），不是笼统的"还住着谁"。
+  缺项文本本身也说到具体（**姓名 + 手机号**），不是笼统的"还住着谁"；**英文要把话说全**——
+  `their phone numbers` / `phone number(s)`，不要只说 "numbers"（bare "numbers" 跟他刚报的
+  unit number 混在一起，他分不清你要的是电话号还是房号）。
   **这一轮只装入门那一份**（`domain/onboarding.md`），不再强制 `tenancy + complaint-risk`：
   一句问候没有任何风险，把整份入住准则压进去，模型会对着刚开口的人问作息/夜班（真实
   第二次英文评测第二轮就是这么被带偏的）；真正的风险/紧急照旧由那两条无条件 `force`
@@ -533,8 +563,9 @@ schema 与工具选择仪式），又让「能不能发」变成事后把关。�
   - 接线开关：`lib/chat/coliving/turn.ts` 的 `COLIVING_COORDINATION_SHARED_RULE`（**默认关闭**）
   - 隔离场景：`lib/chat/coliving/evals/scenarios/corpus-043-shower-drain-hair-shared-rule-2026-09-13.json`
     （纯虚构、三位住户、多轮：提出 → 两人分别同意 → 定案并向全员宣布；不写死机器 `expect`）
-- 真话保护：`claimsUnsentThirdPartyContact` / `TRUTHFUL_UNSENT_REPLY`（同文件）；
-  共同规则另有 `claimsSharedRuleSettled`（未定案不得声称已生效）
+- 真话保护：`claimsUnsentThirdPartyContact` / `TRUTHFUL_UNSENT_REPLY`（同文件；判定中英各一
+  支，英文那一支见 `EN_COMPLETED_CONTACT_PATTERN`，替换文案按语言取
+  `selectUnsentContactFallback`）；共同规则另有 `claimsSharedRuleSettled`（未定案不得声称已生效）
 - 已停用的自由文本出站：`lib/chat/coliving/outreach.ts`（入口返回空，不调模型、不入队）
 - 运行时上下文对模型的表述：`lib/chat/coliving/context.ts`
 - 免费结构闸：`scripts/coliving-quality-inspect.ts`
