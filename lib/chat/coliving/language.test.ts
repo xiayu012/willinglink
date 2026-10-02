@@ -21,6 +21,10 @@
  * - **中文一字不动**：同一入口的中文问句仍回 `identity.zh`；
  * - **歧义 / 中英混写的回退**：原话定不了时按**会话里最近判得出来的那一条**定，
  *   都读不出来才落默认中文；`direct` 为 null 表示"这一轮的依据不是原话"；
+ * - **全新招呼语的默认值**（2026-10-01）：原话判不出、会话也没有依据时，孤立的
+ *   `hi` / `hello` / `hey` 默认**英文**（仍是 `default`、`direct` 为 null），其余单词
+ *   （`ok` / `yes` / 人名 / 号码）照旧默认中文；会话里读得出语言时招呼语照样听会话的
+ *   （中文对话里回一个 `hi` 仍是中文轮次）；
  * - **贯通**：正文上限、模型硬指令、代码兜底都读**轮次判定**（含回退），
  *   不是各自拿这一句文本再推一遍——`"ok"` 单看是定不了的，但回退能定；
  * - **判定差遣**：`direct` 与回退给模型的措辞不同（不谎称原话就是那种语言），正文一字不差；
@@ -181,6 +185,7 @@ const LANGUAGE_MATRIX: readonly {
   },
 
   // —— 负例：这些**不许**被当成英文（空历史 → 默认中文，不是 direct）——
+  // （孤立招呼语 `hi` / `hello` / `hey` 不在这里，它们走下面那条更窄的默认值。）
   { text: "Mary", language: "zh", source: "default", note: "一个词的人名" },
   { text: "Ah Chuan", language: "zh", source: "default", note: "两个词的人名" },
   { text: "13800138000", language: "zh", source: "default", note: "电话号码" },
@@ -189,7 +194,6 @@ const LANGUAGE_MATRIX: readonly {
   { text: "ok", language: "zh", source: "default", note: "孤零零一个 ok：中文住户也这么回，交给会话回退" },
   { text: "OK!", language: "zh", source: "default", note: "大写 + 叹号的 ok 同样不算英文" },
   { text: "yes", language: "zh", source: "default", note: "单词确认不收（单词原话一律留给会话回退）" },
-  { text: "hi", language: "zh", source: "default", note: "单词招呼不收（中文住户也会打 hi）" },
   { text: "Wi-Fi", language: "zh", source: "default", note: "短拉丁标签，不是一句话" },
   { text: "Room 3B", language: "zh", source: "default", note: "短拉丁标签，不是一句话" },
   {
@@ -210,6 +214,13 @@ const LANGUAGE_MATRIX: readonly {
     source: "default",
     note: "中英各半，同样落歧义——合成比例判据不得把它翻成英文",
   },
+
+  // —— 孤立的英文招呼语：原话判不出、会话里也没有依据时**默认英文**（2026-10-01）——
+  // 这一档不是 `direct`（依据不是原话的构成，`direct` 仍是 null）。它因此**只在
+  // 「原话歧义 **且** 历史里也读不出语言」时才生效**：中文对话里回一个 `hi` 仍是中文
+  // 轮次，既有语料一条判定都不变（见下面那条"听会话的"检查）。
+  { text: "hi", language: "en", source: "default", note: "全新 Hi：英文住户第一句不该收到中文介绍" },
+  { text: "Hello!", language: "en", source: "default", note: "两端标点归一化后同一条（本文件新增的窄回归）" },
 
   // —— 中文：同一入口中文口径一字不动 ——
   { text: "你是谁？", language: "zh", source: "direct", note: "中文自称问句" },
@@ -292,6 +303,38 @@ async function main(): Promise<void> {
         LANGUAGE_MATRIX.some((r) => r.source === "default"),
       "矩阵必须同时覆盖 direct 与 default"
     );
+  });
+
+  /**
+   * ── 全新招呼语的默认值（2026-10-01）────────────────────────────────────────
+   *
+   * 陌生号码第一句常常就是 `Hi`：原话判不出语言（一个词），会话里又什么都没有，老口径
+   * 走到默认中文——英文住户第一次接触就收到一段中文介绍。现在 `hi` / `hello` / `hey`
+   * 在**这一档**默认英文。两个不变量一起钉住，缺一条这个默认值就会变成新的语言事故：
+   *
+   * 1. **依据仍是默认**（`source: "default"`、`direct: null`）——不谎称是原话判出来的；
+   * 2. **只在原话歧义且历史也读不出时才生效**：会话里读得出语言，招呼语照样听会话的。
+   *    这正是它与短英文清单的区别（清单命中即 `direct`，会压过历史），所以既有语料
+   *    一条判定都不变——中文对话里回一个 `hi` 仍是中文轮次。
+   */
+  await check("全新招呼语默认英文；会话里读得出语言时仍旧听会话的（中文会话里的 hi 是中文）", () => {
+    for (const greeting of ["Hi", "Hello!", "hey ", " hello. "]) {
+      const fresh = decideLanguage(greeting);
+      assert.equal(fresh.language, "en", `全新「${greeting}」必须默认英文`);
+      assert.equal(fresh.source, "default", `「${greeting}」的依据是默认值，不是原话构成`);
+      assert.equal(fresh.direct, null, `「${greeting}」不得谎称原话判得出语言`);
+    }
+    // ② 招呼语**不压过**会话：中文历史在前 → 仍是中文轮次，依据是回退不是默认。
+    const inChinese = decideLanguage("hi", ZH_HISTORY);
+    assert.equal(inChinese.language, "zh", "中文对话里回一个 hi 仍是中文轮次");
+    assert.equal(inChinese.source, "conversation-fallback", "听会话的，不是默认值");
+    assert.equal(decideLanguage("Hello", EN_HISTORY).language, "en", "英文会话里同样是英文");
+    // 其它单词原话一点没变：`ok` / `yes` 之类空历史仍默认中文（它们不是招呼语）。
+    for (const word of ["ok", "OK!", "yes", "thanks"]) {
+      const d = decideLanguage(word);
+      assert.equal(d.language, "zh", `「${word}」仍默认中文`);
+      assert.equal(d.source, "default", `「${word}」仍是默认档`);
+    }
   });
 
   /**

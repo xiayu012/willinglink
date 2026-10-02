@@ -1,0 +1,35 @@
+{
+  "id": "corpus-050-open-onboarding-english-hi-2026-10-01",
+  "source": "老板 2026-10-01 口径：任何号码、任何一句话（这里就是一句「hi」）都正常进入对话，不做模板化拒绝。第一轮：他这条消息进来之后、模型那条回复之前，系统先发固定自我介绍（英文，因为他第一句是英文），第二条才是模型的正常回复，并问出还缺的两件——这套房的 Unit、以及室友的姓名和手机号。第二轮他把 Unit 和两位室友报齐：直接记（recordUnit / addResident），已经说过的（房号）不许再问一遍，也不再自我介绍一次。这一条场景不预置任何人（onboarding），跑的就是陌生号码那条路。第二轮另加反例断言：他这句里出现 \"roommates\"，但这一轮仍是**收入门资料**，不许把它当成冲突/作息访谈（真实第二轮曾在记下房号室友之后顺带问「what are your usual hours」）。第一轮的 name 与 phone 分成两条断言——写成一条 `phone|name` 时，只问到其中一件也算通过，不够。",
+  "onboarding": true,
+  "household": { "label": "评测-陌生号码英文首触" },
+  "turns": [
+    {
+      "from": "+15550500001",
+      "text": "hi",
+      "expect": {
+        "mustIntroduce": true,
+        "replyMustMatch": [
+          "[Uu]nit|[Aa]partment (?:number|no)",
+          "[Nn]ames?|叫(?:什么|啥)|姓名",
+          "[Pp]hone|numbers?|手机|号码",
+          "[Rr]oommate|who else|live with|other (?:people|residents|tenants)"
+        ],
+        "replyMustNotMatch": ["[Rr]esident [Cc]oordinator"]
+      }
+    },
+    {
+      "from": "+15550500001",
+      "text": "I'm Alex, Unit A208. My roommates are Jordan 15550500002 and Sam 15550500003.",
+      "expect": {
+        "mustNotIntroduce": true,
+        "mustUseTools": ["recordUnit", "addResident"],
+        "replyMustNotMatch": [
+          "[Rr]esident [Cc]oordinator",
+          "[Ww]hich unit|[Ww]hat(?:'s| is) your unit|[Ww]hat unit",
+          "[Uu]sual hours|generally home|作息|几点(?:睡|起)|夜班|night shift|sleep schedule"
+        ]
+      }
+    }
+  ]
+}

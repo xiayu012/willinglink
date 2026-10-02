@@ -30,7 +30,9 @@ export const preferredRegion = "sfo1";
  *
  * - `coliving`（默认）合租房管理。走 `lib/ai/brains` 的 coliving 大脑，
  *   事实落在 `coliving` schema 的世界模型里（人、房子、成员关系、事件、
- *   Case、Decision、Communication）。认不出的号码不落任何记录，只回一句。
+ *   Case、Decision、Communication）。**陌生的合法号码不再被模板拒绝**：先给他
+ *   建好上下文（role other / resides unknown），第一条发固定的自我介绍，第二条
+ *   正常回复（2026-10-01 老板口径）。只有连号码都解析不出来才回那一句兜底文案。
  * - `rental` 租房搜索。走 `handleInboundMessage` → Chat Engine，
  *   跨渠道共用同一条 conversation，**需要 channel-identity 表**。
  *
@@ -99,9 +101,13 @@ export async function POST(request: Request) {
 
   after(async () => {
     try {
-      const outcome = await runColivingTurn({ channel: "sms", from, text: body });
-
-      // communication 先落库成 queued，发完再回写——发送结果本身也是事实账本的一部分
+      /**
+       * communication 先落库成 queued，发完再回写——发送结果本身也是事实账本的一部分。
+       *
+       * **返回 `sent` 本身**（`ok` 真不真）：投递结果得让调用方拿得到。首次介绍那条
+       * 尤其要紧——`ok: false` 却当成发出去，住户会永远收不到那句介绍，账上却写着
+       * 已经介绍过了（见下面 `onIntroduction` 的回话）。
+       */
       const deliver = async (
         to: string,
         text: string,
@@ -119,12 +125,41 @@ export async function POST(request: Request) {
         if (!sent.ok) {
           console.log("[twilio] 发送失败：", sent.error);
         }
+        return sent;
       };
+
+      const outcome = await runColivingTurn({
+        channel: "sms",
+        from,
+        text: body,
+        /**
+         * **第一条（首次接触那条固定自我介绍）在这里就发出去了——早于模型。**
+         *
+         * `runColivingTurn` 一准备好这条 communication（那时主生成还没开始）就
+         * `await` 这个回调，所以对住户来说顺序是**确定**的：先自我介绍，后正常回复。
+         * 以前把两条都塞进下面那个 `Promise.all` 并发发，谁先到是网络运气，可能
+         * 回复先到、自我介绍后到——那种顺序读起来像是两个人。
+         *
+         * 这里只投递、只记账，**不掺任何文案**：正文逐字来自单点文案
+         * `coordinator-self-description.md`。
+         *
+         * **必须如实回话**：`sendSms` 返回 `ok: false` 时这条介绍就没送到，
+         * 本轮不能把它当已发出（`turn.ts` 会据此撤销它、记 failed、下一轮重试），
+         * 更不能在上下文里告诉模型"你已经介绍过了"。
+         */
+        onIntroduction: async (intro) => {
+          const sent = await deliver(from, intro.body, intro.communicationId);
+          return { delivered: sent.ok, error: sent.ok ? null : (sent.error ?? "unknown") };
+        },
+      });
 
       // 给本人的回复 + 主动发给房子里其他人的（杠杆二），互不依赖，并发发出去。
       // 以前是 for 循环挨个 await，三个人就是三倍的短信网络延迟串在一起；
       // Twilio 的 sendSms 调用之间没有先后关系，改并发是纯 I/O 层面的提速，
       // 不影响任何一条短信的内容或落库顺序（markCommunication 各写各的行）。
+      //
+      // **注意上面那条自我介绍不在这里**：它在上面已经单独、顺序地发完了。
+      // 唯一还进这个并发组的是"回给本人"的第二条（`outcome.reply`）与发给别人的。
       await Promise.all([
         outcome.reply
           ? deliver(from, outcome.reply, outcome.replyCommunicationId)
@@ -159,6 +194,8 @@ export async function POST(request: Request) {
         JSON.stringify({
           messageSid,
           unknownSender: outcome.unknownSender,
+          // 首次接触那一轮是 1（第一条固定介绍已单独发完），其余轮是 0
+          introduction: outcome.introduction ? 1 : 0,
           decisionId: outcome.decisionId,
           modules: outcome.modules,
           tools: outcome.toolsUsed,

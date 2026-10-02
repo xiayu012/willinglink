@@ -16,8 +16,11 @@
  *
  * 只属于某一条路径的格式约束（正文长度、内部术语黑名单）留在各自模块里，不进这里。
  *
- * 本文件**不 import 任何东西**：`reply-only.ts` 与 `feature-qa.ts` 都能直接用，不会成环。
+ * 唯一的依赖是单点文案 `coordinator-copy.ts`（它只读一份 `.md`）：那两段固定的自我介绍
+ * 是**老板批准的原文**，不是模型生成的，不能拿它当越界（见 `stripApprovedCopy`）。
  */
+
+import { coordinatorCopyText } from "./coordinator-copy";
 
 /**
  * 第一人称假承诺：本路径没有工具，任何「我去联系 / 我去跟他说 / 有了结果回你」都是没做
@@ -69,12 +72,41 @@ const DEFER_TO_LATER = new RegExp(
 );
 
 /**
+ * **把老板批准的固定自我介绍原文整段摘掉，再判别的生成文字。**
+ *
+ * `identity.zh/en` 里那句「你也可以让我向物业发起换房申请」/「ask me to start a
+ * room-transfer request with property management」描述的是**我们已有的能力**，
+ * 可 `OFFLOAD_CONTACT` 只看得见「你 + 情态 + 向 + 物业」——于是这句**获批原文**
+ * 会被判成「把事推回给住户」，把一次正常的身份问答打成兜底。错的不是文案、也不是
+ * 这条检查，是把批准过的原文也拿来判了。
+ *
+ * 摘的是**逐字原文**（整段相等才算，见 `coordinatorCopyText`），所以模型自己另写一句
+ * 「你可以自己去跟物业说」照样会被抓住。读不到那份 `.md` 就**不豁免**（按原文判）：
+ * 宁可判严、退到只含代码事实的兜底，也不因为读文件失败而放行。
+ */
+function stripApprovedCopy(text: string): string {
+  let out = text;
+  for (const language of ["zh", "en"] as const) {
+    try {
+      const approved = coordinatorCopyText("identity", language);
+      if (approved) out = out.split(approved).join(" ");
+    } catch {
+      // 读不到单点文案：这一轮不豁免，照原样判。
+    }
+  }
+  return out;
+}
+
+/**
  * 找出正文里**可证的越界**，返回可诊断短语（空数组 = 通过）。调用方据此换成只含代码
  * 事实的兜底。
  */
 export function findGroundingViolations(reply: string): string[] {
-  const text = (reply ?? "").trim();
-  if (!text) return ["空正文"];
+  const text = stripApprovedCopy((reply ?? "").trim()).trim();
+  if (!text) {
+    // 整段就是那条批准原文：没有生成内容，也就不存在生成出来的越界。
+    return (reply ?? "").trim() ? [] : ["空正文"];
+  }
   const out: string[] = [];
   if (FALSE_PROMISE.test(text)) {
     out.push("承诺自己去联系 / 协调 / 跟进（本路径没有这种能力）");

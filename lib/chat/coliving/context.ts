@@ -39,7 +39,20 @@ function describeMember(m: Member, isSelf: boolean): string {
   // 从前只有房东/租客两档，别的角色原样印出 `manager` 这种内部词，
   // 模型读到的是一串它不该看见的枚举。
   const role = roleLabel(m.role);
-  const tag = isSelf ? "（就是现在跟你说话的人）" : "";
+  /**
+   * **说话人自己那一行带出他自己的号码。**
+   *
+   * 起因（2026-10-01 真实评测）：陌生号码第一句就自报「我是不住这里的宿管」，
+   * 运行时上下文里从来没有他自己的手机号，于是这条自述身份 / 居住的事实只能
+   * 被他塞进 `addResident` 的 `note`，`role` / `residence` 两个字段一个都没填。
+   * 号码摆出来，他才能用**同一个号码**调 `addResident` 把这两项补到**他自己那条**
+   * 名册上（同号码是幂等合并、只补不减），不会又建出一个人。
+   *
+   * 只给事实（谁、什么号码），怎么用是准则的事（`domain/onboarding.md`）。
+   */
+  const tag = isSelf
+    ? `（就是现在跟你说话的人${m.address ? `，号码 ${m.address}` : ""}）`
+    : "";
   // 占位名逐个标出来。**不要靠在别处写一句「名字带 X 字样的是占位符」**——
   // 占位名格式一改那句话就静默失效（真踩过：AI 把「2号、3号」念进了短信）。
   const placeholder = m.nameConfirmed ? "" : "〔占位名，不是真名，不可念出口〕";
@@ -78,6 +91,12 @@ export async function buildContext(
   channel = "sms",
   opts: {
     justJoined?: boolean;
+    /**
+     * 本轮开头**已经先把那条固定自我介绍发出去了**（见 `onboarding.ts` 与
+     * `turn.ts` 的 `onIntroduction`）。用来陈述"你已经介绍过自己了"这个事实，
+     * 避免模型再介绍一遍。
+     */
+    introductionSent?: boolean;
     answering?: { purpose: string | null; body: string; sentAt: Date; act?: string | null } | null;
     /**
      * 本轮的**住户语言判定**（`language.ts` 的 `decideLanguage`）。由 `turn.ts`
@@ -231,22 +250,82 @@ export async function buildContext(
   }
 
   if (opts.justJoined) {
-    // 只陈述事实。**怎么说是准则的事**（见 tenancy.md〈第一次接触〉），
+    // 只陈述事实。**怎么说是准则的事**（见 `domain/onboarding.md`），
     // 这里不写"你应该说……"——那样等于用一句随手写的提示压过整份准则。
-    lines.push("## 这是你第一次跟这个人说话");
+    // 抬头说的是**他第一次跟你说话**（入站事实），不是"你还没开过口"：这一轮开头那条
+    // 固定自我介绍可能**已经发出去了**（见下面的 `introduction` 分节），写成"第一次跟
+    // 这个人说话"会让模型以为自己还没打过招呼。两件事分开说：这里只管**这是他的第一条**。
+    lines.push("## 这是这个人第一次跟你说话");
     lines.push(
-      "「第一次跟他说话」不等于「他刚搬进来」——我们只是刚拿到号码，他可能已住" +
+      "「他第一次跟你说话」不等于「他刚搬进来」——我们只是刚拿到号码，他可能已住" +
         "三年。**在他自己说之前，你不知道他住了多久**；关于他目前只知道一个手机号。"
     );
+    /**
+     * **开局缺的两件事实**（只陈述"不知道什么"，不写怎么问——问法在
+     * `domain/onboarding.md`）。为什么放在运行时：这两件该在第一轮问出来，
+     * 而第一轮的话题是什么都有可能（一句 "hi" 也一样），**靠话题路由不一定命中
+     * 入门准则**，漏掉就等于这一轮白过。资料齐全的人这一节根本不进
+     * （`roster.complete` 且房号已知）——所以**不构成对普通对话的额外要求**。
+     *
+     * 缺项要说**具体到"姓名 + 手机号"**：只说"还住着谁"，模型会满足于一句
+     * 「还有别人吗」——真实评测里第二条就是这么漏掉室友的。
+     */
+    const missing: string[] = [];
+    if (!sender.unit) {
+      missing.push("这套房是哪个 Unit（房号）");
+    }
+    if (!roster.complete) {
+      missing.push(
+        roster.declaredSize === null
+          ? "这屋还住着谁——每位室友的姓名和手机号（名册上目前只有我们已经拿到号码的人）"
+          : `还差 ${roster.declaredSize - roster.knownCount} 位室友，需要姓名和手机号`
+      );
+    }
+    if (missing.length) {
+      lines.push(
+        `**这个人的第一轮里还没有的两件事实**：${missing.join("、")}。` +
+          "他刚开口，这是问出来的自然时机（**他这一句里已经给了的就不要再问**；" +
+          "他给多少就记多少）。"
+      );
+    }
     lines.push("");
     endSection("first-contact");
+  }
+
+  /**
+   * **这一轮开头那条固定自我介绍：已经发出去了，这一句必须说出来。**
+   *
+   * 为什么不能只靠"下一轮的历史"：那条介绍是**本轮之后**才写进会话的
+   * （`turn.ts` 在模型开始跑之前就把它发出去了），`getRecentTurns` 这一轮读不到它，
+   * 模型会以为还没打过招呼、在第二条里再自我介绍一遍——住户连着收到两段
+   * 「我是这套房的 AI 协调员」。所以本轮上下文必须显式说这一件事，**不依赖下一轮**。
+   *
+   * 只陈述已送达的那一种（事实由 `turn.ts` 按投递回调的真实回答给出）：**没送到的
+   * 那轮根本不会走到这里**（它已经终止，见 `IntroductionNotDelivered`），所以这里
+   * 不会、也不许把没发出去的说成发过了。
+   */
+  if (opts.introductionSent) {
+    lines.push("## 这一轮你先发出去的那条自我介绍");
+    lines.push(
+      "**你已经先发了一条固定的自我介绍**（那段「我是这套房的 AI resident " +
+        "coordinator…」），它已经在他手机上了——**在他这条消息之后、在你现在这条" +
+        "回复之前**发出去的。**这一轮不要再介绍你自己一遍**，直接回他说的这句话。"
+    );
+    lines.push("");
+    endSection("introduction");
   }
 
   const residents = members.filter((m) => m.resides === true);
   const unknown = members.filter((m) => m.resides === null);
   const others = members.filter((m) => m.resides === false);
 
-  lines.push(`## 名册上的人：${sender.householdLabel}`);
+  // 房号（Unit）知道就带上：它是这套房在住户嘴里的名字，后面每一轮都从这儿读，
+  // 不用再问第二遍。不知道就什么都不写——"该问房号"是准则的事
+  // （`domain/onboarding.md`），不在运行时上下文里替大脑开口。
+  lines.push(
+    `## 名册上的人：${sender.householdLabel}` +
+      (sender.unit ? `（Unit ${sender.unit}）` : "")
+  );
   lines.push(
     `**这是名册，不是这栋房子的全部住户。** 名册上现在有 ${members.length} 个人——` +
       "只代表我们手上有这几个人的联系方式，不代表房子里只住这几个。"

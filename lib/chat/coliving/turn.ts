@@ -24,6 +24,13 @@ import {
 import { assertCanWrite } from "./guard";
 import { colivingModelId } from "./model";
 import { embedOne } from "./embedding";
+import {
+  INTRODUCTION_INTENT,
+  INTRODUCTION_PURPOSE,
+  introductionIn,
+  IntroductionNotDelivered,
+  needsIntroduction,
+} from "./onboarding";
 import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
 import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
@@ -192,16 +199,56 @@ function firstPersonUnsentContact(clause: string): boolean {
 const THIRD_PARTY_ALSO_SAID_PATTERN =
   /[一-鿿A-Za-z]{2,4}(?:那边|那头)[^。！？!?\n]{0,3}我也(?:说|讲|提|问|联系|通知|告诉|沟通|确认|催|提醒|发)(?:了|过)/;
 
+/**
+ * **「联系方式」是名词，不是「联系」这个动作。**
+ *
+ * 假完成闸按 `联系` 两个**字**命中动词表时，`联系` 藏在「联系**方式**」里也算——一句
+ * **登记联系数据**的话于是被当成"声称联系过第三方"，整句换成「我没有替你把话转给对方」，
+ * 住户收到一句答非所问的否认。**这是纯函数一层就能复现的一类误伤**：
+ * `claimsUnsentThirdPartyContact("赵敏的联系方式我已经记下了。")` 必须是 false。
+ * 2026-10-02 的报告只留下**最终那句替换后的否认**，模型原句没有留存——所以这里不引用、
+ * 也不推断当时的原话，只按这一类可复现的例子收窄。
+ *
+ * 收窄做的是**语法上的名词语境**，不是无条件抹掉子串（否则真的动词会被连着抹掉）：
+ *
+ *  - `联系方式 / 联系号码 / 联系电话`：`联系` 只可能是定语（"联系的方式 / 号码 / 电话"），
+ *    整块无条件当名词。
+ *  - `联系信息 / 联系资料`：这两个**本身另有动词读法**——后面接处所词（`里 / 上 / 中 /
+ *    内`）时，`联系` 是谓语、`信息里的赵敏` 是它的宾语，是**真的联系动作**
+ *    （「我已经联系信息里的赵敏了」「我已经联系资料上的人了」）。所以只有**不接处所词**
+ *    时才当名词抹掉。
+ *
+ * 于是：登记数据的说法（「赵敏的联系方式我已经记下了」「我已经把赵敏的联系方式记下来了」
+ * 「他给的联系电话我也存下了」）不再命中；**真的联系动作照旧命中**（上面两句，以及
+ * 「我已经联系赵敏了」「已经跟赵敏说了」）。同一句里**又记数据又声称联系过**
+ * （「联系方式我记下了，也已经跟赵敏说了」）仍然命中：只有名词那一处没了，动词那处还在。
+ *
+ * 「联系信息里的人我已经记下了」这类句子两读（"记下了联系人" / "联系了那个人"），
+ * 按**动词读法**保留命中——残留歧义就留在这儿，不另立规则、也不去猜上下文。
+ *
+ * 只管这两支**中文结构**判定，不为它另立英文启发式：英文的"记下号码"
+ * （「I've noted his number」）本来就不落进任何一支（三支都要求中文结构）。
+ */
+const CONTACT_DATA_NOUN_PATTERN =
+  /联系(?:方式|号码|电话)|联系(?:信息|资料)(?!里|上|中|内)/g;
+const CONTACT_DATA_NOUN_PLACEHOLDER = "〔资料〕";
+
+function withoutContactDataNouns(clause: string): string {
+  return clause.replace(CONTACT_DATA_NOUN_PATTERN, CONTACT_DATA_NOUN_PLACEHOLDER);
+}
+
 export function claimsUnsentThirdPartyContact(text: string): boolean {
   return text.split(/[。！？!?\n]/).some((clause) => {
     if (/[你您]|请|建议|记得|最好|应该|能不能|要不要/.test(clause)) {
       return false;
     }
-    if (firstPersonUnsentContact(clause)) {
+    // 先把联系数据名词抹掉（只抹名词语境，见上）：**记下联系方式**不是声称联系过谁。
+    const claim = withoutContactDataNouns(clause);
+    if (firstPersonUnsentContact(claim)) {
       return true;
     }
     // 省略主语的完成式：复用 claimsContactCompletion，与 checkFalseContactClaim 同源。
-    return claimsContactCompletion(clause);
+    return claimsContactCompletion(claim);
   });
 }
 
@@ -1138,8 +1185,38 @@ export type PromptComposition = {
   toolCount: number;
 };
 
+/**
+ * **第一条：首次接触那条固定的自我介绍。** 它是一条**独立的**外呼——不是拼进
+ * `reply` 的前缀，也不是跟 `reply` 同时并发发出去的（见 `route.ts` 的顺序投递）。
+ * 只有「这个人还没被介绍过」的那一轮才有值。
+ */
+export type IntroductionDelivery = {
+  /** 逐字来自单点文案 `coordinator-self-description.md` 的 `identity.<语言>` */
+  body: string;
+  /** 已落库成 queued 的 communication，投递结果由既有 `markCommunication` 记账 */
+  communicationId: string;
+};
+
+/**
+ * **投递回调的回答：这一条到底发出去没有。** 回调必须给这个回答：说 `delivered: false`
+ * 或直接抛错，本轮就**终止**（记 `failed`、不写历史、由下一条入站重试，见
+ * `IntroductionNotDelivered`）。**没有回答不算送达**——那会让那条 communication 永远
+ * 挂在 `queued`（离线路径的契约是压根不占位，见 `runColivingTurn`）。
+ */
+export type IntroductionDeliveryResult = {
+  delivered: boolean;
+  /** 失败原因：记进 `communication.error`，方便回头看是网络还是配置 */
+  error?: string | null;
+};
+
 export type TurnOutcome = {
   reply: string;
+  /**
+   * 本轮先发出去的那条固定自我介绍（首次接触才有）。**调用方不要拿它去投递**
+   * ——投递在 `onIntroduction` 回调里已经做完了（那正是"第一条在模型之前发出"
+   * 的实现方式）；这里留着是为了评测/复核能把两条分开看。
+   */
+  introduction: IntroductionDelivery | null;
   /** 送到住户手里那句话最后一次核对的结论，见 `ReplyReview` */
   replyReview: ReplyReview;
   /** 本轮排班工具算出并选定的事实，供离线判定器理解依据，不用于投递。 */
@@ -1176,7 +1253,13 @@ export type TurnOutcome = {
    */
   contextReceipt: ContextReceipt | null;
   toolsUsed: string[];
-  /** 认不出这个号码时为 true，调用方应当只回一句而不做任何记录 */
+  /**
+   * **连号码都解析不出来**时为 true——那种情况建不了上下文，调用方只回一句、
+   * 不做任何记录。
+   *
+   * 注意它**不再是「陌生的号码」的意思**（2026-10-01 起）：陌生号码会先建好自己的
+   * 上下文，然后照常走普通轮次，`reply` 是模型写的、`unknownSender` 是 false。
+   */
   unknownSender: boolean;
   /**
    * 这一轮真花了多少。`steps` 是模型往返次数——**带工具时一轮不止一次调用**，
@@ -1193,9 +1276,13 @@ export type TurnOutcome = {
 };
 
 /**
- * 认不出来时说什么。**这是唯一一处硬编码文案**——因为模型根本没被调用
+ * **号码无法解析**时说什么。**这是唯一一处硬编码文案**——因为模型根本没被调用
  * （见 CLAUDE.md「不要替大脑写话术」：硬编码只留给不过大脑的路径）。
  * 短、中性、不透露任何住户信息。
+ *
+ * **它不再是"陌生号码"的回复**（2026-10-01 老板口径：任何号码正常进入对话）：
+ * 陌生的**合法**号码现在会被建好上下文、正常走模型，第一句是固定自我介绍。
+ * 只有连号码都解析不出来（建不出任何上下文）才会读到这一句。
  */
 export const UNKNOWN_REPLY = "这个号码我这边没有记录，先确认一下你是哪一位。";
 
@@ -1331,6 +1418,7 @@ async function maybeCoordinationReply(args: {
       promptComposition: null,
       contextReceipt: null,
       toolsUsed: [],
+      introduction: null,
       unknownSender: false,
       usage: {
         steps: 0,
@@ -1679,6 +1767,7 @@ async function maybeSharedRuleReply(args: {
       promptComposition: null,
       contextReceipt: null,
       toolsUsed: [],
+      introduction: null,
       unknownSender: false,
       usage: noticesUsage,
       turnStartedAt,
@@ -1700,6 +1789,7 @@ async function maybeSharedRuleReply(args: {
       promptComposition: null,
       contextReceipt: null,
       toolsUsed: [],
+      introduction: null,
       unknownSender: false,
       usage: noticesUsage,
       turnStartedAt,
@@ -1818,6 +1908,11 @@ export async function finalizeFeatureTurn(
     conversationId: string;
     modelId: string;
     turnStartedAt: Date;
+    /**
+     * 本轮开头已经先发出去的那条固定自我介绍（首次接触才有）。**可选**：
+     * 离线的功能轮收尾测试直接构造参数时不必填；不填就是"这一轮没发介绍"。
+     */
+    introduction?: IntroductionDelivery | null;
   },
   deps: FeatureFinalizeDeps = featureFinalizeDeps
 ): Promise<TurnOutcome> {
@@ -1899,6 +1994,7 @@ export async function finalizeFeatureTurn(
     promptComposition: null,
     contextReceipt: null,
     toolsUsed: [],
+    introduction: args.introduction ?? null,
     unknownSender: false,
     usage: args.usage,
     turnStartedAt: args.turnStartedAt,
@@ -1928,6 +2024,29 @@ export async function runColivingTurn(args: {
    * 批判器的 rubric 不注入它，也不走这个构造器。
    */
   guidance?: string;
+  /**
+   * **第一条固定自我介绍落库成 queued 之后立刻回调并 `await`——这就是"在模型之前
+   * 发出去"。** 生产路由在这里调 Twilio、把结果写回那条 communication；评测在这里
+   * 把它记成已送达（零真实短信）。所以顺序由这一句 `await` 保证，不靠运气，模型
+   * 失败/超时也不影响第一条。
+   *
+   * **回调必须如实回答**（`IntroductionDeliveryResult`，没有回答按未送达算）。
+   * **不传 = 离线准备**：不占位、不落库、不写历史（见 `runColivingTurn` 里那段说明），
+   * 不是"假装送达"。
+   */
+  onIntroduction?: (
+    intro: IntroductionDelivery
+  ) => Promise<IntroductionDeliveryResult>;
+  /**
+   * **仅本地测试/评测**：陌生号码并进这栋已有的测试屋（不传就是生产行为——
+   * 给这个号码**新开一栋他自己的房子**）。
+   *
+   * **`app/api/twilio/messages/route.ts` 永远不传这个参数**，也不从 HTTP 请求里
+   * 读任何同类字段——它只是给评测一个"在隔离测试屋里真的跑一遍陌生号码"的入口。
+   * 目标 household 自己还要过一次 `is_test` 复核（见 `repo.enrollUnknownSender`），
+   * 所以就算有人误传一栋真人的房子，也会直接抛错而不是写进去。
+   */
+  onboardingTestHouseholdId?: string | null;
 }): Promise<TurnOutcome> {
   const channel = args.channel ?? "sms";
   /**
@@ -1939,13 +2058,39 @@ export async function runColivingTurn(args: {
    * 差约 2.1s——把前一轮刚说过话的人误判成「本轮刚发来新消息」。
    */
   const turnStartedAt = await repo.dbNow();
-  const sender = await repo.resolveSender(channel, args.from);
+  let sender = await repo.resolveSender(channel, args.from);
+
+  /**
+   * **认不出的号码不再被模板拒绝，而是正常进入对话**（老板 2026-10-01）。
+   *
+   * 以前这里直接回一句「这个号码我这边没有记录」，既不建档也不调模型。现在先给他
+   * 把上下文建出来（role other / resides unknown，同号码幂等），**然后照常往下走
+   * 普通轮次那条路**——已录入的号码与新号码从这一刻起走的是同一段代码，不存在
+   * 「陌生号码专用流程」这第二条分叉。
+   *
+   * 号码本身解析不出来（不是合法号码）时 `enrollUnknownSender` 返回 null：
+   * 那种情况连上下文都建不出来，仍然回那句中性兜底文案（**唯一一处硬编码文案**，
+   * 见下面 `UNKNOWN_REPLY` 的说明）。
+   */
+  if (!sender) {
+    sender = await repo.enrollUnknownSender({
+      phone: args.from,
+      channel,
+      intoTestHouseholdId: args.onboardingTestHouseholdId ?? null,
+    });
+  }
 
   /**
    * **本地脚本不许把伪造的消息写进真人住的房子。**
    * 我干过：伪造「我上周被裁了」测试，结果它成了用户的真实对话历史，
    * AI 之后带着这段编造的前情跟他说话。详见 guard.ts。
    * 放在这里是因为这是伪造入站消息的唯一入口。
+   *
+   * **陌生号码这条路也过同一道闸**，没有"陌生号码所以放行"的例外：生产
+   * （服务器运行时）照写；本地进程想写就必须同时满足 `COLIVING_LOCAL_WRITE=1`
+   * **且**目标是测试屋。陌生号码在生产里新开的那栋房子 `is_test` 是默认的
+   * false，所以本地脚本想拿生产路径去建房子，会在这里被拦下——要本地跑就得
+   * 显式带上 `onboardingTestHouseholdId` 指一栋测试屋。
    */
   if (sender) {
     assertCanWrite({
@@ -1970,6 +2115,7 @@ export async function runColivingTurn(args: {
       promptComposition: null,
       contextReceipt: null,
       toolsUsed: [],
+      introduction: null,
       unknownSender: true,
       usage: {
         steps: 0,
@@ -2003,6 +2149,118 @@ export async function runColivingTurn(args: {
    * 就是这条纪律的反例），否则同一轮里两处判定会各说各话。
    */
   const language = decideLanguage(args.text, history);
+
+  /**
+   * **他第一次开口、而且登记还缺项——「入门那一轮」。** 判定只认结构（`rosterStatus`
+   * 只在第一轮查这一次，`&&` 短路）。它管两件事，都**跟"要不要介绍"无关**（那是下面的
+   * 介绍资格）：给路由一个**结构信号** `firstEnrollment`（一句 "hi" 没有话题词，话题路由
+   * 永远命不中「第一次接触」那段准则）；让两条**不收集任何登记信息**的短路让位。
+   */
+  const firstEnrollmentTurn =
+    history.length === 0 &&
+    (!sender.unit || !(await repo.rosterStatus(sender.householdId)).complete);
+
+  /**
+   * **第一条：首次接触那条固定的自我介绍——现在就发，早于下面所有分支和模型调用。**
+   *
+   * 位置就是它的全部意义：这一轮后面无论走哪条路（功能前门、短路、coordination、
+   * 主生成、甚至主生成整个挂掉），介绍都已经先出去了，而且一定在第二条（`reply`）之前。
+   * 两条是两次独立外呼，各自落在自己的 communication 上。
+   *
+   * **资格只看"没对话过、没发过"，跟登记缺不缺项无关**：预置名册里的室友、房东给了号码
+   * 的人，第一次跟 AI 说话时资料是齐的，照样得先收到自我介绍。`needsIntroduction` 只是
+   * 便宜的预筛，真正的裁决是库里原子占位的 `repo.claimFirstIntroduction`。文案逐字来自
+   * 单点 `coordinator-self-description.md`（按本轮那个唯一的语言判定选）。
+   *
+   * **没送到就终止本轮**（`IntroductionNotDelivered`）：首条没到，第二条不许发。
+   */
+  let introduction: IntroductionDelivery | null = null;
+  if (needsIntroduction(history)) {
+    if (!args.onIntroduction) {
+      // **没有投递器 = 离线准备**：不占位、不落库、不写历史。占位会留下一条永远没人
+      // 记账的 `queued`，那行会把之后每一次 `claimFirstIntroduction` 都挡掉。
+      console.log("[coliving] 这一轮没有投递器（离线准备）：不发首次介绍");
+    } else {
+      const deliverer = args.onIntroduction;
+      const body = introductionIn(language.language);
+      const claimed = await repo.claimFirstIntroduction({
+        householdId: sender.householdId,
+        personId: sender.personId,
+        channel,
+        body,
+        purpose: INTRODUCTION_PURPOSE,
+        intent: INTRODUCTION_INTENT,
+        modelId: colivingModelId(),
+      });
+      if (!claimed) {
+        // 并发的那一轮拿着这条介绍在发：等它**真的**发出去（投递状态才是顺序依据）。
+        const state = await repo.awaitFirstIntroductionDelivered({
+          personId: sender.personId,
+          channel,
+          purpose: INTRODUCTION_PURPOSE,
+        });
+        if (state !== "sent") {
+          throw new IntroductionNotDelivered(`另一轮正在发这条介绍，等到的是 ${state}`);
+        }
+      } else {
+        const intro: IntroductionDelivery = {
+          body,
+          communicationId: claimed.communicationId,
+        };
+        let result: IntroductionDeliveryResult | null = null;
+        try {
+          result = (await deliverer(intro)) ?? null;
+        } catch (error) {
+          console.log(
+            "[coliving] 首次介绍投递抛错：",
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+        // **只有明确回了"已送达"才算送达**：没回答、抛错、说没发出去，一律按未送达。
+        if (result?.delivered !== true) {
+          // 内部诊断串（进 communication.error 与异常信息），不是住户文案——
+          // 写英文/非汉字是为了不和「住户可见中文字面量」那条静态闸撞车。
+          const reason = result?.error ?? "introduction delivery not confirmed by callback";
+          // 记 failed 之后不算占位：下一轮 `claimFirstIntroduction` 会再给一次机会。
+          // **不回写历史**，也不在上下文里说"已经介绍过"——那句话没到他手机上。
+          await repo.markCommunication({
+            communicationId: claimed.communicationId,
+            status: "failed",
+            error: reason,
+          });
+          throw new IntroductionNotDelivered(reason);
+        }
+        introduction = intro;
+        // 出站消息进会话历史：下一轮 `getRecentTurns` 读得到，模型因此知道
+        // 「我第一句已经说过了」，不会在第二条里再自我介绍一遍。
+        await repo.appendMessage({
+          conversationId,
+          personId: sender.personId,
+          direction: "outbound",
+          channel,
+          body,
+          communicationId: claimed.communicationId,
+        });
+      }
+    }
+  } else if (!history.some((h) => h.role === "user")) {
+    /**
+     * **历史里只有 AI 说过话**（并发那一轮刚把首条写进去、或我们主动先发的那条），
+     * 住户这一句还没进历史。顺序仍按**实际投递状态**判，不拿历史当回执：那条介绍要是
+     * 还在 `queued`，这里补等一次，别让回复抢到它前面。已经有东西 `sent` 就没有顺序
+     * 问题，照常往下走——只有 `timeout` 表示有一条介绍正在途中。
+     *
+     * 老用户的历史窗口里总有住户自己的话，走不到这一支，不会变成每轮轮询。
+     */
+    const state = await repo.awaitFirstIntroductionDelivered({
+      personId: sender.personId,
+      channel,
+      purpose: INTRODUCTION_PURPOSE,
+    });
+    if (state === "timeout") {
+      throw new IntroductionNotDelivered("历史里已有首条，但它仍在途中");
+    }
+  }
 
   /**
    * coordination 实时旁路（shadow，默认关闭）：真实短信照常由下面现有 AI 流程
@@ -2070,7 +2328,9 @@ export async function runColivingTurn(args: {
       turnStartedAt,
       language: language.language,
     });
-    if (replaced) return replaced;
+    // 提前收工的路径也要把已经发出去的介绍带出去（它在本轮开头就发了），
+    // 否则台账上少了第一条，复核时会以为"这一轮没介绍过"
+    if (replaced) return { ...replaced, introduction };
   }
 
   /**
@@ -2101,7 +2361,7 @@ export async function runColivingTurn(args: {
       turnStartedAt,
       language,
     });
-    if (sharedRule) return sharedRule;
+    if (sharedRule) return { ...sharedRule, introduction };
   }
 
   /**
@@ -2123,7 +2383,11 @@ export async function runColivingTurn(args: {
    * 直接短路：生成短确认正文、做齐簿记、立刻返回。不调模型、不排班、
    * 不联系其他人。
    */
-  if (isSimpleAffirmation(args.text) && isScheduleSlotInquiry(answering)) {
+  if (
+    !firstEnrollmentTurn &&
+    isSimpleAffirmation(args.text) &&
+    isScheduleSlotInquiry(answering)
+  ) {
     const slot = answering ? extractSlotFromInquiry(answering.body) : null;
     // **这一句是代码写的，所以它必须自己跟语言闸**：模型在这条路径上根本没被
     // 调用（准则管不到一句不会被生成的正文），住户通篇英文、回一个 "ok" 时就
@@ -2186,6 +2450,7 @@ export async function runColivingTurn(args: {
       promptComposition: null,
       contextReceipt: null,
       toolsUsed: [],
+      introduction,
       unknownSender: false,
       usage: {
         steps: 0,
@@ -2203,6 +2468,10 @@ export async function runColivingTurn(args: {
   // 不管他是自己发来的第一条，还是回复我们主动发的第一条，都算。
   const ctx = await buildContext(sender, channel, {
     justJoined: history.length === 0,
+    // 本轮开头刚把那条固定介绍发出去（不是"历史上有过"）——`context.ts` 据此
+    // 告诉模型"你已经介绍过自己了"，免得它在第二条里再自我介绍一遍。
+    // 介绍**没发出去**的轮次走不到这里（已经 throw 终止）。
+    introductionSent: introduction !== null,
     answering,
     language,
   });
@@ -2323,6 +2592,7 @@ export async function runColivingTurn(args: {
         conversationId,
         modelId,
         turnStartedAt,
+        introduction,
       });
     }
   }
@@ -2348,7 +2618,7 @@ export async function runColivingTurn(args: {
    * （`repo.latestBlacklistReference`），问题本身对不上条目时才补上那一条。不读自由文本、
    * 不按关键词猜「刚才」，别的住户 / 本人后来换的话题都不会错误继承。
    */
-  if (isFeatureQaQuestion(args.text)) {
+  if (!firstEnrollmentTurn && isFeatureQaQuestion(args.text)) {
     // 「刚才为什么」的窄引用：只读**本人**、且是本人上一条入站话题的黑名单拒绝
     // （按 personId 收窄 + 72h 新鲜度 + 本人之后没有更新的入站消息）。别的住户发了
     // 什么都不会顶掉、也不会拿别人的引用；本人后来发过别的就不再是「刚才」，本轮照常
@@ -2390,6 +2660,7 @@ export async function runColivingTurn(args: {
         conversationId,
         modelId,
         turnStartedAt,
+        introduction,
       });
     }
   }
@@ -2404,18 +2675,41 @@ export async function runColivingTurn(args: {
   );
   const hasOpenConflictCase = ctx.openCases.some(isOpenConflictCase);
 
-  // 结构信号交给路由引擎（router.ts 的 when 条件）判断要不要加载 conflict，
+  // 结构信号交给路由引擎（router.ts 的 when 条件）判断要不要加载对应模块，
   // 不再手动构造 forcedModules——路由规则与装载理由只留在 brain 一处。
   const signals = {
     mentionsOther,
     hasOpenConflictCase,
+    /**
+     * **入门轮：他第一次开口、登记还缺项。** 一句 "hi" 里没有任何话题词，
+     * 话题路由永远命不中「第一次接触」那段准则（`domain/onboarding.md`）——真实评测里
+     * 那一轮只装到了兜底的 complaint-risk，第二条因此没问房号和室友。
+     * 这一轮必须由**结构**决定装什么，不能指望他说出关键词。
+     */
+    firstEnrollment: firstEnrollmentTurn,
+    /**
+     * **入门资料还没收齐的补充轮**（首轮问过、他还没报齐）。
+     *
+     * 两个条件都是**结构**的，不看关键词、不数轮数、不加分类调用：
+     * ① 名册上还只有他自己（`members.length <= 1`——一栋已经有室友的真房子里
+     * 这一条立刻不成立）；② 房号或名册仍旧缺项。
+     *
+     * 他这一句常常就是「我是 Alex，Unit A208，室友是 Jordan 和 Sam」——里面那个
+     * "roommate" 会把冲突准则按**关键词**装进来，第二轮于是变成"顺带问作息"的
+     * 访谈（真实英文评测第二轮）。这一轮该按**收集资料**办，所以由这个信号改装
+     * 入门准则（`index.ts` 里独占那一条），把关键词那一支压掉。
+     */
+    enrollmentOpen:
+      !firstEnrollmentTurn &&
+      ctx.members.length <= 1 &&
+      (!sender.unit || !ctx.roster.complete),
   };
 
   const { doctrine, runtime, loadedModuleIds, chars } = assembleSystemPrompt({
     brainId: "coliving",
     routeOn: args.text,
     runtimeContext: ctx.text,
-    // 结构信号：名册提到其他住户，或存在未结冲突——比本轮关键词更可靠的路由依据。
+    // 结构信号：名册提到其他住户、存在未结冲突、或这是他第一次开口——比本轮关键词更可靠。
     signals,
   });
   const conflictContextActive =
@@ -3600,12 +3894,42 @@ export async function runColivingTurn(args: {
       },
     }),
 
+    recordUnit: tool({
+      description:
+        "住户说出**这套房是哪个 Unit（房号）**时，立刻记下来——记完以后每一轮上下文里" +
+        "都带着它，不用再问第二遍。**只在对方真的说了房号时才填**（他自己说的、" +
+        "或别人报的号码里带出来的都算）；没听到就留空，不要猜、不要从别处推。" +
+        "这是这栋房子的标识，不是某个人的房间号。",
+      inputSchema: z.object({
+        unit: z
+          .string()
+          .describe("房号，照对方说的原样填，比如「A208」「208」「Unit 208」"),
+      }),
+      execute: async ({ unit }) => {
+        try {
+          const saved = await repo.setHouseholdUnit({
+            householdId: sender.householdId,
+            unit,
+          });
+          return { ok: true, unit: saved };
+        } catch (e) {
+          return {
+            ok: false,
+            reason: e instanceof Error ? e.message : "记不下这个房号",
+          };
+        }
+      },
+    }),
+
     confirmRoster: tool({
       description:
-        "有人告诉你这屋一共住几人时，立刻记下那个数字，记完就不会再问第二遍。" +
-        "只管数字对，齐不齐由系统自己比，不用你算。",
+        "有人说出这屋**现在一共住着几个人**时，立刻记下那个数字，记完就不会再问第二遍。" +
+        "只管数字对，齐不齐由系统自己比，不用你算。" +
+        "**房型不是人数**：「四人间」「两居室」「双人间」说的是这套房**能**住多少，" +
+        "不是此刻住了几个——不要拿它当总人数填（填错了系统会以为名册已经齐了，" +
+        "之后一直按错的人数说话）。他没说过当前住户数就别调这个工具。",
       inputSchema: z.object({
-        total: z.number().describe("对方说的总人数，就这一个数字"),
+        total: z.number().describe("对方说的**当前**住户总人数，就这一个数字"),
       }),
       execute: async ({ total }) => {
         await repo.setDeclaredSize(sender.householdId, total);
@@ -4108,6 +4432,14 @@ export async function runColivingTurn(args: {
   }
   if (!ctx.roster.complete) {
     activeTools.confirmRoster = tools.confirmRoster;
+  }
+  /**
+   * **房号还不知道时才摆 `recordUnit`。** 知道以后这东西每一轮都白占一个工具位，
+   * 而它只在"刚认识这套房"的那几轮有用（陌生号码第一次进来、或导入的名册里
+   * 还没写过房号）——所以按**结构信号**摘取，不常驻。
+   */
+  if (!sender.unit) {
+    activeTools.recordUnit = tools.recordUnit;
   }
   if (hasUnconfirmedName) {
     activeTools.renamePerson = tools.renamePerson;
@@ -4695,6 +5027,7 @@ export async function runColivingTurn(args: {
       },
     },
     toolsUsed,
+    introduction,
     unknownSender: false,
     // 主生成用量 + 前门里已经花掉的功能调用用量（路由 none / 失败也不丢）。
     usage: addFeatureUsage(frontDoorUsage, sumUsage(result.steps)),

@@ -16,8 +16,12 @@
  * 3. **原话定不了（中英混写、只有数字/名字/一个 "ok"）才回退**，回退读**同一条
  *    会话线上最近的、判得出来的**那一条（`source: "conversation-fallback"`）：
  *    保守、只看最近、读不出来就不猜；
- * 4. **连会话里也读不出来才用默认中文**（`source: "default"`）——与加这个闸之前
- *    的行为逐字一致，不会因为引入回退而改变任何既有语料的判定。
+ * 4. **连会话里也读不出来才用默认**（`source: "default"`）：默认值是中文，**唯一
+ *    的例外是一句孤立的英文招呼语**（`hi` / `hello` / `hey`，见
+ *    `UNAMBIGUOUS_ENGLISH_GREETINGS`）——没有任何可用历史时它默认英文，其余一律
+ *    照旧默认中文。**会话里读得出来时招呼语照样听会话的**（中文对话里回一个
+ *    `hi` 仍是中文轮次），所以这条只在「原话歧义 **且** 历史也没有依据」时才生效，
+ *    不会改变任何既有语料的判定。
  *
  * **判据本身不做主题分类，也不看关键词表**：只数汉字与拉丁词，外加一条**构成比例**
  * （汉字只是零头时，这句话其实是英文，见 `isEnglishWithEmbeddedHan`），外加一小份
@@ -39,7 +43,11 @@ export type LanguageSource =
   | "direct"
   /** 原话定不了（中英混写、或只有数字 / 名字 / 一个 "ok"），读了会话里最近判得出来的那条 */
   | "conversation-fallback"
-  /** 原话和会话都定不了，用默认（中文） */
+  /**
+   * 原话和会话都定不了，用默认值。**默认值是中文**，唯一例外是一句孤立的英文
+   * 招呼语（`hi` / `hello` / `hey`）在没有任何可用历史时默认英文——所以
+   * `source: "default"` 时 `language` **可能是 `en`**，排查时别把它当成常量。
+   */
   | "default";
 
 /** 轮次语言判定。**一轮一个，从轮次边界往下传，中途不重算。** */
@@ -136,10 +144,13 @@ function isEnglishWithEmbeddedHan(han: number, latinWords: number): boolean {
  * （`/yourself|introduce/`）都会把「Introduce Yourself」这种活动名或住户随手打的标签
  * 吞进来，所以不做。
  *
- * **单词原话（`ok` / `yes` / `hi` / `thanks`）一律留在清单外**：孤零零一个词定不了
+ * **单词原话（`ok` / `yes` / `thanks`）一律留在清单外**：孤零零一个词定不了
  * 这轮在说哪种语言（中文住户也常回一个 `ok`），而那种原话**会话回退本来就答对了**
  * （中文会话里回 `ok` → 中文）。只有**两个词以上、整句就是一句英文**的招呼 / 确认
  * 才收进来——这是「能安全收窄才收」的边界，不是白名单式的能力限制。
+ * （`hi` / `hello` / `hey` 这三个**孤立招呼语**走另一条更窄的路，见
+ * `UNAMBIGUOUS_ENGLISH_GREETINGS`：它们不进这份清单，因为清单里的条目一旦命中
+ * 就是 `direct`，会**压过**会话历史；招呼语必须听会话的。）
  */
 const EXPLICIT_ENGLISH_SHORT_UTTERANCES: ReadonlySet<string> = new Set([
   // —— 自称 / 元问题：住户在问「你是谁 / 你是干什么的 / 你怎么工作」——
@@ -196,6 +207,40 @@ export function isExplicitEnglishShortUtterance(text: string): boolean {
 }
 
 /**
+ * **孤零零一个词、却足够明确是英语的招呼语**——只认 `hi` / `hello` / `hey` 三个。
+ *
+ * 为什么需要它：陌生号码第一次发进来的短信常常就一句 `Hi`。这句原话本身**判不出**
+ * 语言（中文住户也这么开头），会话里又**什么都没有**——于是走到默认值，默认是中文，
+ * **英文住户收到一段中文自我介绍**。2026-10-01 老板要求「全新的 `Hi` / `Hello` 开头
+ * 必须回英文介绍」，修的是语言闸的默认值这一侧，不是给 onboarding 开局部特例。
+ *
+ * **为什么只收三个词，而不是「凡是拉丁单词都算英文」**：一个词定不了语言，
+ * `ok` / `yes` / `thanks` / `sure` 中文住户天天在打，一个号码（`13800138000`）、
+ * 一个名字（`Ah Chuan`）更是完全无语义。**认的是一句完整的英文招呼**这个事实，
+ * 所以是**整句相等**（走 `normalizeShortUtterance`：`Hello!!` / ` hi ` 同一条），
+ * 不做包含匹配，也不看关键词表——`hi` 只是恰好是这个词本身。
+ *
+ * **它比 `EXPLICIT_ENGLISH_SHORT_UTTERANCES` 弱一档，这是刻意的**：那份清单命中即
+ * `direct`，会压过会话历史；招呼语只在**原话歧义**（`classifyDirectLanguage` 返回
+ * `null`）**且会话里也读不出依据**时才用来定默认值——中文对话里回一个 `hi`，
+ * 仍然是中文轮次。判词见 `decideLanguage`。
+ *
+ * 有汉字直接 false：那是中文或中英混写，与这里无关。
+ */
+const UNAMBIGUOUS_ENGLISH_GREETINGS: ReadonlySet<string> = new Set([
+  "hi",
+  "hello",
+  "hey",
+]);
+
+/** 这一整句是不是一句孤立的英文招呼语（整句相等，不做包含匹配）。 */
+export function isUnambiguousEnglishGreeting(text: string): boolean {
+  const t = text ?? "";
+  if (HAS_HAN.test(t)) return false;
+  return UNAMBIGUOUS_ENGLISH_GREETINGS.has(normalizeShortUtterance(t));
+}
+
+/**
  * **这段文本里有没有汉字**——只回答这一个问题，**不做语言判定**。
  *
  * 用途是让「英文那一侧的正文里一个汉字都没有」成为一条**确定性**断言（离线检查直接调
@@ -249,7 +294,12 @@ export function residentLanguage(text: string): ResidentLanguage {
  *
  * `history` 是**同一条会话线**上最近的往来（`repo.getRecentTurns`，旧→新）。
  * 回退时**从新往旧**找第一条判得出来的：越近越能代表他现在在说哪种语言。
- * 一条都读不出来就用默认中文。
+ *
+ * 一条都读不出来才用默认值（`source: "default"`），默认值是中文——**唯一的例外**
+ * 是一句孤立的英文招呼语（`hi` / `hello` / `hey`）：全新的、没有任何可用历史的
+ * `Hi` / `Hello` 默认英文，住户才不会在第一次接触时收到一段中文介绍。
+ * 注意这个例外**排在会话回退之后**：只要会话里读得出语言（中文对话），招呼语
+ * 就跟会话走，不回英文。顺序本身就是这条规则的一部分，别把两层调换。
  */
 export function decideLanguage(
   text: string,
@@ -263,7 +313,14 @@ export function decideLanguage(
       return { language: fromHistory, source: "conversation-fallback", direct: null };
     }
   }
-  return { language: "zh", source: "default", direct: null };
+  // 原话歧义、会话也没有可用依据 —— 这才轮到默认值。孤立的英文招呼语在这里作为
+  // 一个**更窄**的信号决定默认成哪种语言；其余一切照旧默认中文。
+  // `direct` 仍是 `null`：这一轮的依据不是原话的构成，而是「一句招呼 + 空历史」。
+  return {
+    language: isUnambiguousEnglishGreeting(text) ? "en" : "zh",
+    source: "default",
+    direct: null,
+  };
 }
 
 /**
@@ -285,6 +342,10 @@ export function observeLanguage(decision: LanguageDecision): LanguageObservation
  * `source: "direct"` 时说的是「住户这一轮写的就是这种语言」；回退 / 默认时说的是
  * 「这段对话是这种语言」——**不谎称原话就是那种语言**，否则模型会拿一句
  * "ok" 当英文原文去猜语气。两种说法的正文一字不差，只有那句归属不同。
+ *
+ * 会走到「默认 + 英文」的**只有一种情况**：全新的 `Hi` / `Hello`（招呼语、
+ * 没有任何可用历史，见 `decideLanguage`）。那时「这段对话是英文」就是对的——
+ * 对话确实从他的英文招呼开始，之后也按英文走。
  */
 export function languageInstruction(decision: LanguageDecision): string {
   const fromText = decision.source === "direct";

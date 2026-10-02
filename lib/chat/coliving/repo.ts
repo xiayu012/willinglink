@@ -1,6 +1,7 @@
 import "server-only";
 
 import postgres from "postgres";
+import { assertCanWrite } from "./guard";
 import { normalizePhone } from "./phone";
 
 /**
@@ -99,6 +100,11 @@ export type Sender = {
   householdId: string;
   householdLabel: string;
   dwellingId: string;
+  /**
+   * 这套房是哪个 Unit（`dwelling.unit`）。**听到才填，没听到就是 null**——
+   * 陌生号码第一次进来时它一定是 null，这正是「第二条要问房号」的依据。
+   */
+  unit: string | null;
   /** 测试屋。本地进程只能写这种（见 guard.ts 里那次事故） */
   isTest: boolean;
 };
@@ -160,13 +166,15 @@ export async function resolveSender(
       h.id            as "householdId",
       h.label         as "householdLabel",
       h.dwelling_id   as "dwellingId",
-      h.is_test       as "isTest"
+      h.is_test       as "isTest",
+      d.unit          as unit
     from coliving.person_contact pc
     join coliving.person p on p.id = pc.person_id
     join coliving.membership m
       on m.person_id = p.id and m.valid_to is null
     join coliving.household h
       on h.id = m.household_id and h.status = 'active'
+    left join coliving.dwelling d on d.id = h.dwelling_id
     where pc.kind = ${channel} and pc.value = ${target}
     limit 1
   `;
@@ -732,11 +740,8 @@ export async function recordOutcome(args: {
   `;
 }
 
-/**
- * AI 的治理判断。**先于任何实际沟通落库**，与说出口的话分开存，
- * 这样以后能分别评估「判断对不对」和「表达合不合适」（设计稿第六点）。
- */
-export async function recordDecision(args: {
+/** `recordDecision` 的参数（抽出来是为了让 `claimFirstIntroduction` 在同一个事务里落同一条记录）。 */
+export type DecisionInput = {
   householdId: string;
   caseId?: string | null;
   eventId?: string | null;
@@ -754,31 +759,47 @@ export async function recordDecision(args: {
    * 写死的 id，**不放模型自由文本**。
    */
   payload?: Record<string, string> | null;
-}): Promise<string> {
-  /**
-   * `payload` 必须走 postgres.js 的 `json()`（显式 jsonb 参数）。
-   *
-   * **不要**写 `${JSON.stringify(...)}::jsonb`：首次执行时驱动的参数类型还是 unknown
-   * （按文本发送），但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802)
-   * 写回该参数并缓存预处理语句；**第二次及以后**驱动就按 jsonb 序列化器把已经
-   * stringify 过的参数**再序列化一次**，落库变成 JSONB 顶层字符串，读取端
-   * `payload->>'<字段>'` 随即读成 null（真实事故的根因）。`shadow.ts` 用的是同一正确先例。
-   */
-  const rows = await db()<{ id: string }[]>`
+};
+
+/**
+ * 落一条 decision。**接受调用方的事务**（`postgres.TransactionSql` 与 `Sql` 同形），
+ * 让需要「判断 + 沟通」原子成立的路径（首次介绍）不必把这段 SQL 抄第二遍。
+ *
+ * `payload` 必须走 postgres.js 的 `json()`（显式 jsonb 参数）。
+ *
+ * **不要**写 `${JSON.stringify(...)}::jsonb`：首次执行时驱动的参数类型还是 unknown
+ * （按文本发送），但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802)
+ * 写回该参数并缓存预处理语句；**第二次及以后**驱动就按 jsonb 序列化器把已经
+ * stringify 过的参数**再序列化一次**，落库变成 JSONB 顶层字符串，读取端
+ * `payload->>'<字段>'` 随即读成 null（真实事故的根因）。`shadow.ts` 用的是同一正确先例。
+ */
+async function insertDecision(
+  sql: postgres.Sql | postgres.TransactionSql,
+  args: DecisionInput
+): Promise<string> {
+  const rows = await sql<{ id: string }[]>`
     insert into coliving.decision
       (household_id, case_id, event_id, kind, target_person_ids, intent,
        rationale, model_id, doctrine_modules, context_chars,
        context_snapshot, payload)
     values (${args.householdId}, ${args.caseId ?? null}, ${args.eventId ?? null},
-            ${args.kind}, ${db().array(args.targetPersonIds ?? [])}::uuid[],
+            ${args.kind}, ${sql.array(args.targetPersonIds ?? [])}::uuid[],
             ${args.intent ?? null}, ${args.rationale ?? null},
             ${args.modelId ?? null},
-            ${db().array(args.doctrineModules ?? [])}::text[],
+            ${sql.array(args.doctrineModules ?? [])}::text[],
             ${args.contextChars ?? null}, ${args.contextSnapshot ?? null},
-            ${db().json(args.payload ?? {})})
+            ${sql.json(args.payload ?? {})})
     returning id
   `;
   return rows[0].id;
+}
+
+/**
+ * AI 的治理判断。**先于任何实际沟通落库**，与说出口的话分开存，
+ * 这样以后能分别评估「判断对不对」和「表达合不合适」（设计稿第六点）。
+ */
+export async function recordDecision(args: DecisionInput): Promise<string> {
+  return await insertDecision(db(), args);
 }
 
 /**
@@ -988,6 +1009,192 @@ export async function markCommunication(args: {
         error = ${args.error ?? null}
     where id = ${args.communicationId}
   `;
+}
+
+/**
+ * **「这个人还没被介绍过」——原子地判定并占位。** 首次接触那条固定介绍走这里。
+ *
+ * 为什么不是「读一下再写」：同一个人并发发来两条首消息时（他连发两条，两个
+ * webhook 同时在跑），两个进程都会读到「没介绍过」，于是住户收到**两条一模一
+ * 样的自我介绍**。这里把判断和写入放进同一个事务、按人加咨询锁，第二个事务
+ * 一定看到第一个写下的那一行，直接返回 `null`。
+ *
+ * 判定条件（两条 `not exists`，都在 `communication` 上看，**不看正文**）：
+ *
+ *   · 这个人这条渠道上**已经有一条发成功的沟通** → 早就聊过了，不再介绍
+ *     （历史上已完成首轮的老用户、以及功能介绍之前就存在的会话，都命中这条）；
+ *   · 已经有一条**首次自我介绍**（`queued` 也算）→ 正在发或发过了，不重复。
+ *
+ * **`failed` 的两条都不算数**：模型/网络失败时第一条没送到，下一轮该再试一次
+ * ——这正是老板说的「模型失败时第一条仍可到达」的那条重试路径。
+ *
+ * decision 与 communication 在同一个事务里落：判定与沟通要么一起成立，要么
+ * 一起不成立，不会留下「记了一条自我介绍的决定、但一个字都没发」的假账。
+ */
+export async function claimFirstIntroduction(args: {
+  householdId: string;
+  personId: string;
+  channel: string;
+  /** 介绍正文（逐字来自单点文案，调用方已经选好语言） */
+  body: string;
+  purpose: string;
+  intent: string;
+  modelId?: string | null;
+  /**
+   * **仅免费自检用**：把下面的"陈旧"窗口改短，好在不真等 10 分钟的前提下造一条
+   * "发送方中断留下的死行"。生产调用方**一律不传**（默认 10 分钟）。
+   *
+   * **传了就必须是测试屋**（见下）：不给任何生产调用方留一个"超时可调"的口子。
+   */
+  staleAfterMinutesForTest?: number;
+}): Promise<{ decisionId: string; communicationId: string } | null> {
+  const staleMinutes = args.staleAfterMinutesForTest ?? 10;
+  /**
+   * **覆盖陈旧窗口 = 测试专用，目标房子必须自己过一次 `is_test`。**
+   *
+   * 这个参数能改的是"在途介绍多久算死行"——它是生产行为的一部分。调用方自觉不够
+   * （`enrollUnknownSender` 的 `intoTestHouseholdId` 就是这么防的），所以在**开事务
+   * 之前**先查一次：真人的房子拿到这个参数直接抛错，不写任何东西、也不动 guard 的
+   * 服务器写例外（那是另一道闸，两件事不互相放宽）。
+   */
+  if (args.staleAfterMinutesForTest !== undefined) {
+    if (!(await isTestHousehold(args.householdId))) {
+      throw new Error(
+        "[coliving] staleAfterMinutesForTest 只许用在测试屋上：不给真人的房子覆盖介绍的超时窗口"
+      );
+    }
+  }
+  return await db().begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${`intro:${args.personId}`}))`;
+    /**
+     * **陈旧的在途介绍**：投递方如果在"插入 queued、还没记账"之间中断（进程死掉），
+     * 那行会永远挂在 `queued`；下面那条 `not exists` 会永远判「见过了」，这个人
+     * 往后每一条消息都被挡住、再也收不到回复。所以在一个**不可能属于真实投递**的
+     * 窗口（10 分钟，正常投递是秒级）之后还在 `queued` 的介绍，就在这里、同一把锁内
+     * 作废掉，由本次重新 claim。
+     *
+     * 窗口必须宽：等 5 秒就作废会把**正在发送**的那条判死，让第三轮再发一遍（双发）。
+     */
+    await tx`
+      update coliving.communication
+      set status = 'failed',
+          error = '首次介绍在途状态陈旧（投递方可能中断），作废并由下一轮重试'
+      where to_person_id = ${args.personId}
+        and channel = ${args.channel}
+        and purpose = ${args.purpose}
+        and status = 'queued'
+        and created_at < now() - make_interval(mins => ${staleMinutes})
+    `;
+    const [seen] = await tx<{ seen: boolean }[]>`
+      select exists (
+        select 1 from coliving.communication c
+        where c.to_person_id = ${args.personId}
+          and c.channel = ${args.channel}
+          and (
+            c.status = 'sent'
+            or (c.purpose = ${args.purpose} and c.status <> 'failed')
+          )
+      ) as seen
+    `;
+    if (seen?.seen) {
+      return null;
+    }
+
+    const decisionId = await insertDecision(tx, {
+      householdId: args.householdId,
+      kind: "reply_only",
+      intent: args.intent,
+      modelId: args.modelId ?? null,
+      doctrineModules: [],
+    });
+    const [comm] = await tx<{ id: string }[]>`
+      insert into coliving.communication
+        (household_id, decision_id, case_id, to_person_id, channel, purpose, body,
+         act, expects_reply)
+      values (${args.householdId}, ${decisionId}, null, ${args.personId},
+              ${args.channel}, ${args.purpose}, ${args.body}, null, false)
+      returning id
+    `;
+    return { decisionId, communicationId: comm.id };
+  });
+}
+
+/** 首次介绍那条消息到住户手里了没有。`timeout` = 等到点了还没落地。 */
+export type FirstIntroductionState = "sent" | "failed" | "timeout";
+
+/**
+ * **等这个人被真正介绍过——按实际投递状态，不按历史、也不按谁先创建。**
+ *
+ * 同一个人的两条首消息前后脚到达时（两个 webhook 同时在跑），只有一条占到介绍
+ * （见 `claimFirstIntroduction`）。抢不到的那一轮**不能径直往下发**：住户会先收到回复、
+ * 后收到自我介绍，读起来像两个人。它也不能拿"历史里已经有那条 assistant 消息"当回执
+ * ——历史是**先写进去**的，短信还在路上（`queued`），这中间有个真实的缝。
+ *
+ * **这条函数只读。** 等到点仍是 `queued` 就返回 `timeout`（调用方终止本轮），
+ * 绝不去改别轮**正在投递**的那条：把它判死会放第三轮重新 claim，正在发的介绍被双发。
+ * 投递方自己会记账；真中断了由 `claimFirstIntroduction` 的陈旧窗口兜底。
+ */
+export async function awaitFirstIntroductionDelivered(args: {
+  personId: string;
+  channel: string;
+  /** 介绍那条 communication 的 purpose（`onboarding.INTRODUCTION_PURPOSE`） */
+  purpose: string;
+  timeoutMs?: number;
+}): Promise<FirstIntroductionState> {
+  const deadline = Date.now() + (args.timeoutMs ?? 5000);
+  for (;;) {
+    const [row] = await db()<
+      { sent: boolean; introStatus: string | null }[]
+    >`
+      select
+        exists (
+          select 1 from coliving.communication c
+          where c.to_person_id = ${args.personId}
+            and c.channel = ${args.channel}
+            and c.status = 'sent'
+        ) as sent,
+        (
+          select c.status from coliving.communication c
+          where c.to_person_id = ${args.personId}
+            and c.channel = ${args.channel}
+            and c.purpose = ${args.purpose}
+          order by c.created_at desc limit 1
+        ) as "introStatus"
+    `;
+    // 有东西已经真的发到他手机上了：顺序不再是问题（介绍本身在不在里面由预筛管）。
+    if (row?.sent) return "sent";
+    // 没有待投递的介绍可等，也没有任何发出过的东西——当没送到处理，不冒险先回。
+    if (row?.introStatus === null || row?.introStatus === undefined) return "failed";
+    if (row.introStatus === "failed") return "failed";
+    if (Date.now() >= deadline) return "timeout";
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+/**
+ * **记下这套房是哪个 Unit**（住户说出来的房号）。
+ *
+ * 写 `dwelling.unit` **一个地方**（不同时改 `household.label`：label 是别人给
+ * 这栋房子起的名字，导入的名单里可能是「Maple Court A 座 101」，拿房号覆盖它
+ * 是把真名字弄丢）。上下文里读的就是这一列（见 `context.ts` 的名册抬头）。
+ *
+ * **只动这一栋**：不按 unit 查房子、不按 unit 合并 household——同一个房号在
+ * 两个陌生号码那儿会是两栋各说各话的房子，这是**有意**的（我们没有任何证据
+ * 说明他们是同一套）。
+ */
+export async function setHouseholdUnit(args: {
+  householdId: string;
+  unit: string;
+}): Promise<string> {
+  const unit = args.unit.trim();
+  if (!unit) {
+    throw new Error("房号是空的");
+  }
+  await db()`
+    update coliving.dwelling set unit = ${unit}
+    where id = (select dwelling_id from coliving.household where id = ${args.householdId})
+  `;
+  return unit;
 }
 
 /**
@@ -1363,6 +1570,13 @@ export async function enrollFirstContact(args: {
     throw new Error("[coliving] 手机号无法解析");
   }
   return await db().begin(async (tx) => {
+    /**
+     * **同一个号码并发进来两次**（他连发两条，两条 webhook 同时在跑）时，
+     * 没有这把锁两个事务都会查不到、都去 insert，撞上
+     * `person_contact_kind_value_uniq` 直接报错——用户第一条消息什么都收不到。
+     * 按号码串行化，后来那个走 `existing` 分支，幂等。
+     */
+    await tx`select pg_advisory_xact_lock(hashtext(${`enroll:${phone}`}))`;
     const [existing] = await tx<{ person_id: string; household_id: string }[]>`
       select pc.person_id, m.household_id
       from coliving.person_contact pc
@@ -1392,20 +1606,116 @@ export async function enrollFirstContact(args: {
       insert into coliving.household_epoch (household_id, seq, label, started_at)
       values (${h.id}, 1, '开张', now())`;
 
-    const [p] = await tx<{ id: string }[]>`
-      insert into coliving.person (display_name, onboarded_at)
-      values (${placeholderName("other", 1)}, now()) returning id`;
-    await tx`
-      insert into coliving.person_contact (person_id, kind, value, is_primary)
-      values (${p.id}, 'sms', ${phone}, true)`;
-    // 角色 other / 居住 null —— **两件都不知道**，不是「不确定所以按住着算」。
-    // 见 membership-facts.ts：号码不说明任何一件事，猜错就是算错。
-    await tx`
-      insert into coliving.membership (household_id, person_id, role, resides)
-      values (${h.id}, ${p.id}, 'other', null)`;
+    const personId = await insertInitialContact(tx, h.id, phone);
 
-    return { personId: p.id, householdId: h.id, created: true };
+    return { personId, householdId: h.id, created: true };
   });
+}
+
+/**
+ * 建一个「还不知道是谁」的联系人，挂到指定房子上。
+ *
+ * 角色 other / 居住 null —— **两件都不知道**，不是「不确定所以按住着算」。
+ * 见 membership-facts.ts：号码不说明任何一件事，猜错就是算错。
+ * 只给 `enrollFirstContact`（新开一栋）和 `enrollUnknownSender`（并进测试屋）共用。
+ */
+async function insertInitialContact(
+  tx: postgres.TransactionSql,
+  householdId: string,
+  phone: string
+): Promise<string> {
+  const [p] = await tx<{ id: string }[]>`
+    insert into coliving.person (display_name, onboarded_at)
+    values (${placeholderName("other", 1)}, now()) returning id`;
+  await tx`
+    insert into coliving.person_contact (person_id, kind, value, is_primary)
+    values (${p.id}, 'sms', ${phone}, true)`;
+  await tx`
+    insert into coliving.membership (household_id, person_id, role, resides)
+    values (${householdId}, ${p.id}, 'other', null)`;
+  return p.id;
+}
+
+/**
+ * **陌生号码第一次发消息进来：给他建/接上他自己的那套联系上下文。**
+ *
+ * 老板 2026-10-01 的口径：任何号码正常进入对话，不再彻底模板拒绝。这条就是
+ * 「正常进入」那一半——**先把上下文建出来**（role other / resides unknown，
+ * 同号码幂等），后面的第一句固定介绍、第二条正常回复都跑在普通轮次那条路上，
+ * 跟早就录入过的号码**走同一个入口**（`runColivingTurn` 里不再有第二条分叉）。
+ *
+ * **生产：这个号码自己的房子。** 走 `enrollFirstContact`——每次都是新的
+ * place → dwelling → household，**从不按 Unit / label 去找已有的房子**。
+ * 所以两个陌生号码都自称「Unit 208」也各是各的 household：谁的记录谁都看不到，
+ * 不存在「自动并屋」这件事（这里没有那个判断，也就不会写错那个判断）。
+ *
+ * **测试：显式并进一栋已有的测试屋**（`intoTestHouseholdId`，只有本地脚本 /
+ * 评测传，生产路由**永远不传**）。本地进程不许碰真人的房子，所以这里对目标
+ * household 自己再查一次 `is_test`——**不靠调用方自觉**，也不是「本地就放行」：
+ * 并进非测试屋直接抛错。号码解析不出来（不是合法号码）返回 `null`，调用方
+ * 仍走那句中性的兜底回复。
+ */
+export async function enrollUnknownSender(args: {
+  phone: string;
+  channel: string;
+  /** **仅本地测试/评测**：并进这栋已有的测试屋。生产调用方一律不传 */
+  intoTestHouseholdId?: string | null;
+}): Promise<Sender | null> {
+  const phone = normalizePhone(args.phone);
+  if (!phone) {
+    return null;
+  }
+
+  if (args.intoTestHouseholdId) {
+    const target = args.intoTestHouseholdId;
+    if (!(await isTestHousehold(target))) {
+      throw new Error(
+        "[coliving] 陌生号码只能并进测试屋；目标是真人的房子，拒绝入库"
+      );
+    }
+    /**
+     * **过闸必须在第一次写入之前**（2026-10-01 预审第一条）。
+     *
+     * 以前这条路径只靠 `runColivingTurn` 里**建完档之后**的那次 `assertCanWrite`
+     * 兜底——可 `enrollUnknownSender` 一旦跑完，人和 household 已经落库了，
+     * 事后拦截**撤销不了已经写进去的真实数据**。所以闸放在这里：目标已经查实
+     * 是测试屋，按它的真实身份过闸。
+     */
+    assertCanWrite({
+      isTestHousehold: true,
+      what: `把陌生号码并入测试屋（${target}）`,
+    });
+    await db().begin(async (tx) => {
+      // 同一个号码并发两条首消息：跟 enrollFirstContact 同一把锁、同一个理由
+      await tx`select pg_advisory_xact_lock(hashtext(${`enroll:${phone}`}))`;
+      const [existing] = await tx<{ id: string }[]>`
+        select person_id as id from coliving.person_contact
+        where kind = 'sms' and value = ${phone} limit 1`;
+      if (existing) {
+        return;
+      }
+      await insertInitialContact(tx, target, phone);
+    });
+  } else {
+    /**
+     * **生产路径：给这个号码新开一栋他自己的房子。**
+     *
+     * `isTestHousehold: false` 是**事实**，不是保守估计——`enrollFirstContact`
+     * 新建的 household `is_test` 就是默认的 false。所以本地进程走这条路会在这里
+     * 被拦下（`COLIVING_LOCAL_WRITE=1` 也救不了它，因为目标不是测试屋），
+     * **一栋真房子都不会被建出来**；服务器运行时（Vercel / next dev）照常放行。
+     *
+     * 本地想跑陌生号码，只有一条路：显式传 `intoTestHouseholdId` 指一栋测试屋
+     * （见上面那一支，那里对目标再查一次 `is_test`）。
+     */
+    assertCanWrite({
+      isTestHousehold: false,
+      what: `给陌生号码新建联系上下文（${phone}）`,
+    });
+    await enrollFirstContact({ phone });
+  }
+
+  return await resolveSender(args.channel, phone);
 }
 
 /**

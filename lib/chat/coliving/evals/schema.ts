@@ -278,6 +278,17 @@ export type ScenarioExpectation = {
   mustUseAnyOfTools?: string[];
   /** toolsUsed 不能出现任何一个，出现即判失败 */
   mustNotUseTools?: string[];
+  /**
+   * **这一轮必须先发那条固定自我介绍**（`runColivingTurn` 开头的
+   * `introduction`，见 `onboarding.ts`）。
+   *
+   * 为什么要判它：那条介绍**不走 reply**（它是独立的一条消息，先发出去），
+   * 所以任何正则都碰不到它——坏了只是报告里少一个气泡，场景照样"通过"。
+   * 新号码第一轮必须发，用这一条把它钉死。
+   */
+  mustIntroduce?: boolean;
+  /** **这一轮不许再发那条固定自我介绍**：已经聊过一轮的人不该被重新介绍一遍。 */
+  mustNotIntroduce?: boolean;
   /** reply 文本，命中任意一条即判失败（正则，用于抓"编号泄漏"这类明确、低歧义的模式） */
   replyMustNotMatch?: string[];
   /** reply 文本，必须命中全部这些（正则），用于确认关键信息真的传达了 */
@@ -303,11 +314,33 @@ export type ScenarioExpectation = {
   minBlockedComms?: number;
 };
 
+/**
+ * `ScenarioExpectation` 里**当正则用**的字段（`evaluateTurnExpectation` 逐条
+ * `new RegExp(...)` 编译）。列在这里是为了让 `validateScenario` 能在**载入阶段**
+ * 就把编不过的正则拦下来——不用等到付费跑批时才炸。
+ */
+export const SCENARIO_REGEX_FIELDS = [
+  "replyMustNotMatch",
+  "replyMustMatch",
+  "outboundMustNotMatch",
+  "outboundMustMatch",
+] as const;
+
 /** 一轮跑完后的确定性事实，够 `evaluateTurnExpectation` 判完所有非查库断言。 */
 export type TurnOutcome = {
   toolsUsed: string[];
   reply: string;
   outbound: Array<{ toName: string; text: string; blocked?: boolean }>;
+  /**
+   * 本轮开头有没有**先发那条固定自我介绍**（`introduction !== null`）。
+   * 那条消息不是 `reply`，抓不到它就只能靠人眼看报告——所以把"发没发"
+   * 变成一个确定性事实交给断言（`mustIntroduce` / `mustNotIntroduce`）。
+   *
+   * **可选**：这是后来加的观测字段，早先的离线夹具（`coliving-quality-inspect`
+   * 里手工构造的那些）没有它。缺席按"这一轮没发介绍"算——比强迫每个旧夹具都补
+   * 一个字更不容易出错（它们本来就不测这条）。
+   */
+  introduced?: boolean;
 };
 
 /**
@@ -348,6 +381,14 @@ export function evaluateTurnExpectation(
     if (outcome.toolsUsed.includes(t)) {
       failures.push(`不该调用 ${t}，但调用了`);
     }
+  }
+  // 那条固定自我介绍不是 reply（它是先发出去的独立一条），正则查不到它，
+  // 只能拿"发没发"这个事实判（见 `TurnOutcome.introduced`）。
+  if (expect.mustIntroduce && !outcome.introduced) {
+    failures.push("这一轮应该先发那条固定自我介绍（第一条），但没有发");
+  }
+  if (expect.mustNotIntroduce && outcome.introduced) {
+    failures.push("这一轮不该再发那条固定自我介绍（已经聊过一轮了），但又发了一遍");
   }
   for (const pattern of expect.replyMustNotMatch ?? []) {
     if (new RegExp(pattern).test(outcome.reply)) {
@@ -424,6 +465,18 @@ export type EvalScenario = {
    * `pnpm coliving-snapshot` 时会打印出来）。
    */
   snapshot?: string;
+  /**
+   * **陌生号码入门场景**：建一栋**空的**测试屋，什么人都**不预置**（姓名、角色、
+   * 居住、室友一律没有），`turns[].from` 写槽位号——那个号码**第一次出现时就是
+   * 一个陌生号码**，跑的是生产里"任何号码正常进入对话"那条路（先建上下文 →
+   * 第一条固定自我介绍 → 第二条正常回复）。
+   *
+   * 跟普通场景的差别只有建屋那一步：普通场景先把 `people` 挨个 `addResident`
+   * 进去，所以第一轮开始就已经是"认识的人"；这里**不预置**，测的正是
+   * 「刚进来的号码」。号码照样走 `makeLivePhones` 自动重写、照样只写测试屋
+   * （见 `coliving-eval.ts` 给 `runColivingTurn` 传的 `onboardingTestHouseholdId`）。
+   */
+  onboarding?: boolean;
   household?: { label: string };
   people?: ScenarioPerson[];
   /**
@@ -469,13 +522,22 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
   // 快照场景的人和屋子都来自快照文件，不在这里重复声明；
   // 从零演的场景两样都必须齐（否则建不出屋子）
   const isSnapshot = typeof obj?.snapshot === "string" && obj.snapshot;
+  /** 陌生号码入门场景：不预置任何人（见 `EvalScenario.onboarding`）。 */
+  const isOnboarding = obj?.onboarding === true;
+  if (obj?.onboarding !== undefined && typeof obj.onboarding !== "boolean") {
+    errors.push("onboarding 只能是 true（不填就是不预置）");
+  }
   if (!isSnapshot) {
     if (!obj?.household || typeof (obj.household as { label?: unknown })?.label !== "string") {
       errors.push("缺 household.label（不是快照场景就必须填）");
     }
-    if (!Array.isArray(obj?.people) || obj.people.length === 0) {
-      errors.push("people 必须是非空数组（不是快照场景就必须填）");
-    } else {
+    if (isOnboarding && Array.isArray(obj?.people) && obj.people.length > 0) {
+      // 预置了人就测不到"陌生号码"那条路了——静默变成普通场景，比报错更糟
+      errors.push("onboarding 场景不能预置 people（测的就是没有预置的陌生号码）");
+    }
+    if (!isOnboarding && (!Array.isArray(obj?.people) || obj.people.length === 0)) {
+      errors.push("people 必须是非空数组（不是快照 / 入门场景就必须填）");
+    } else if (Array.isArray(obj?.people)) {
       // 角色写错会一路走到入库，撞 DB 的 role check 才报错；写错的
       // resides 则会更坏——静默当成「住在这里」。在载入阶段就拦下。
       for (const [i, p] of (obj.people as ScenarioPerson[]).entries()) {
@@ -493,9 +555,11 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
 
   if (!Array.isArray(obj?.turns) || obj.turns.length === 0) {
     errors.push("turns 必须是非空数组");
-  } else if (!isSnapshot) {
+  } else if (!isSnapshot && !isOnboarding) {
     // 快照场景的号码要对着快照的 phoneMap 校验，那要读文件，
-    // 放在 runner 里恢复完再查（见 coliving-eval.ts），这里只查从零演的
+    // 放在 runner 里恢复完再查（见 coliving-eval.ts），这里只查从零演的。
+    // 入门场景的号码是槽位号（还没有"名册"可对），重写与"是不是槽位"由
+    // `evals/phones.ts` 的 `collectSlotPhones` 在 runner 里管。
     const phones = new Set(
       (obj.people as ScenarioPerson[] | undefined)?.map((p) => p.phone) ?? []
     );
@@ -510,8 +574,9 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
     errors.push("setup.openCases 必须是数组");
   }
   // 收件人姓名断言写错会静默失效（mustContact 永远失败 / mustNot 永远通过），
-  // 所以非快照场景在载入阶段就查名字在不在名册里（快照名册来自 phoneMap，跳过）。
-  if (!isSnapshot) {
+  // 所以非快照场景在载入阶段就查名字在不在名册里（快照名册来自 phoneMap，跳过；
+  // 入门场景开局没有名册——名字是住户自己在对话里报出来的，也跳过）。
+  if (!isSnapshot && !isOnboarding) {
     const roster = new Set(((obj?.people as ScenarioPerson[]) ?? []).map((p) => p.name));
     const blocks: Array<[unknown, string]> = [
       [obj?.expect, "expect"],
@@ -536,6 +601,49 @@ export function validateScenario(s: unknown, filename: string): EvalScenario {
           if (!roster.has(name)) {
             errors.push(`${where}.${field} 里的「${name}」不在 people 名册里`);
           }
+        }
+      }
+    }
+  }
+  /**
+   * **每一条正则断言都必须真的能编译。**
+   *
+   * 评测 runner 逐条 `new RegExp(pattern)` 编译，而 **JS 不支持 `(?i)` 这类内联
+   * 标志**——一条编不过的正则会把整场场景在**付费跑批**时才炸掉，那时模型调用
+   * 已经花出去了（2026-10-01 预审第五条：新增的 050/051 就这么写过）。
+   * 所以在**载入阶段**先编一遍：写错了当场报错，而且这条检查不要钱
+   * （场景载入是纯字符串处理；`pnpm coliving:quality` 也会逐份走这里）。
+   *
+   * 大小写不敏感只能写成 `[Uu]nit` 这类字符类，见 corpus-047 的既有做法。
+   */
+  const expectBlocks: Array<[unknown, string]> = [
+    [obj?.expect, "expect"],
+    ...(Array.isArray(obj?.turns) ? (obj.turns as ScenarioTurn[]) : []).map(
+      (t, i) => [t?.expect, `turns[${i}].expect`] as [unknown, string]
+    ),
+  ];
+  for (const [block, where] of expectBlocks) {
+    if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+    for (const field of SCENARIO_REGEX_FIELDS) {
+      const value = (block as Record<string, unknown>)[field];
+      if (value === undefined) continue;
+      if (!Array.isArray(value)) {
+        errors.push(`${where}.${field} 必须是字符串数组`);
+        continue;
+      }
+      for (const [i, pattern] of value.entries()) {
+        if (typeof pattern !== "string") {
+          errors.push(`${where}.${field}[${i}] 必须是字符串`);
+          continue;
+        }
+        try {
+          new RegExp(pattern);
+        } catch (error) {
+          errors.push(
+            `${where}.${field}[${i}] 不是合法正则（runner 用 new RegExp 编译，` +
+              `不支持 (?i) 这类内联标志）：${pattern}｜` +
+              (error instanceof Error ? error.message : String(error))
+          );
         }
       }
     }

@@ -48,6 +48,13 @@ type TurnRecord = {
   said: string;
   reply: string;
   /**
+   * **第一条：首次接触那条固定自我介绍**（跟 `reply` 是两次独立外呼）。
+   * **可选**：旧报告没有这个字段 → 不展示；`null` / 坏值 → 不展示
+   * （"这一轮没发介绍"和"发了一条空介绍"是两回事）。渲染前走
+   * `normalizeIntroduction` 防御。
+   */
+  introduction?: unknown;
+  /**
    * 这一轮**整轮**的真实耗时（毫秒；单调时钟测的，含数据库与模型往返），
    * 由 coliving-eval 写入。**可选**：旧报告没有这个字段 → 不展示；
    * 值不是有限非负数（`NaN` / 负数 / 字符串）→ 当没有，**不显示假的 0ms**
@@ -194,6 +201,8 @@ function loadReport(file: string): ScenarioResult[] {
         fromRole: t?.fromRole ?? "",
         said: t?.said ?? "",
         reply: t?.reply ?? "",
+        // 三态原样透传（缺席=旧报告 / null=这一轮没发 / 对象=归一化后展示）
+        introduction: t?.introduction,
         // 逐轮耗时原样透传，三态（缺席 / 坏值 / 数字）由 normalizeTurnMs 判。
         turnMs: t?.turnMs,
         toolsUsed: Array.isArray(t?.toolsUsed) ? t.toolsUsed : [],
@@ -274,10 +283,37 @@ function normalizeTurnMs(value: unknown): number | null {
     : null;
 }
 
+/**
+ * 角色徽章的中文名。**表是开放的**（`Record<string, string>`，下面还有
+ * `?? t.fromRole` 兜底）——这里只把已经认识的取值翻译得好看点，**不设白名单、
+ * 不拒绝任何角色**。查不到的照原样显示 id，不猜。
+ *
+ * `other` 是「查不到关系的陌生号码」（旧报告里被错标成「住客」的那批，
+ * 见 `coliving-eval.ts` 的 `roleOf`）——中性写作「联系人」，**不写「住户」**。
+ * `manager` 是管理类头衔，是否住在这里由独立居住事实决定，不从此标签推断。
+ */
 const ROLE_LABEL: Record<string, string> = {
   landlord: "房东",
   tenant: "住客",
+  manager: "管理员",
+  other: "联系人",
 };
+
+/**
+ * 首次介绍**三态归一化**：缺席（旧报告）/ `null` / 正文是空串 / `ms` 坏值 —— 一律
+ * `null` 不展示；只有真有一条带正文的介绍才渲染。
+ *
+ * `ms` 单独归一化：正文在但时刻坏了，就只显示正文（时刻那枚数字是**顺序证据**，
+ * 测不到就不写，**不填 0**）。
+ */
+function normalizeIntroduction(
+  value: unknown
+): { body: string; ms: number | null } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = (value as { body?: unknown }).body;
+  if (typeof body !== "string" || !body.trim()) return null;
+  return { body, ms: normalizeTurnMs((value as { ms?: unknown }).ms) };
+}
 
 const SEVERITY_LABEL: Record<JudgeFinding["severity"], string> = {
   high: "严重",
@@ -328,6 +364,23 @@ function renderTurn(t: TurnRecord, index: number, findings: JudgeFinding[]): str
        </div>`
     : "";
 
+  /**
+   * **第一条（首次接触的固定自我介绍）单独成块，排在回复前面。**
+   *
+   * 它是**另一次外呼**，不是回复的前缀——两条发出去的短信在报告里必须一眼看得出是
+   * 两条。抬头里的时刻是它在模型之前被交付的量化证据（数字明显小于本轮总耗时）。
+   */
+  const intro = normalizeIntroduction(t.introduction);
+  const introAt = intro && intro.ms !== null ? ` · 本轮第 ${fmtMs(intro.ms)}` : "";
+  const introduction = intro
+    ? `<div class="row right">
+         <div class="bubble intro">
+           <div class="bubble-tag">AI 自我介绍（第一条，先发）${escapeHtml(introAt)}</div>
+           <div class="text">${escapeHtml(intro.body)}</div>
+         </div>
+       </div>`
+    : "";
+
   const reply = t.reply
     ? `<div class="row right">
          <div class="bubble reply">
@@ -369,6 +422,7 @@ function renderTurn(t: TurnRecord, index: number, findings: JudgeFinding[]): str
         ${renderTools(t.toolsUsed)}
       </div>
       ${said}
+      ${introduction}
       ${reply}
       ${outbound}
       ${renderContextEngineeringPanelHtml({
@@ -670,6 +724,10 @@ h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
 .said { background: var(--said-bg); border-color: var(--said-bd); border-top-left-radius: 3px; }
 .reply { background: var(--reply-bg); border-color: var(--reply-bd); border-top-right-radius: 3px; }
 .reply.empty { color: var(--muted); font-size: 13px; }
+/* 首次介绍：跟 reply 同样是"我们说出去的话"，但**是另一条短信**——
+   实线 + 略淡，紧挨在 reply 上方，靠抬头里的「第一条，先发」区分 */
+.bubble.intro { background: var(--reply-bg); border-color: var(--reply-bd); border-top-right-radius: 3px; opacity: .92; }
+.bubble.intro .bubble-tag { font-style: italic; }
 
 /* outbound：虚线 + 另一种底色，跟 reply 一眼分得开 */
 .ob {

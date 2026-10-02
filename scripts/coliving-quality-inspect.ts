@@ -49,6 +49,7 @@ import {
   evaluateReplyReview,
   evaluateTurnExpectation,
   evaluateTurnReplyReviews,
+  SCENARIO_REGEX_FIELDS,
   validateScenario,
   type TurnOutcome,
 } from "../lib/chat/coliving/evals/schema";
@@ -985,6 +986,62 @@ async function main() {
       false,
       "无第三方指向的「我也说了」不得误伤"
     );
+
+    // 2026-10-02 corpus-051 第 2 轮的一类误伤（**报告只留下最终那句替换后的否认，
+    // 模型原句没有留存**，所以这里只钉可复现的纯函数例子，不引用当时的原话）：
+    // `联系` 两个**字**藏在「联系**方式**」里也会命中动词表，于是一句**登记联系数据**
+    // 的话被当成"声称联系过第三方"、整句换成「我没有替你把话转给对方」。
+    // **记数据不是联系过谁**——按名词语境抹掉之后，这几种说法都不得再命中。
+    assert.equal(
+      claimsUnsentThirdPartyContact("赵敏的联系方式我已经记下了。"),
+      false,
+      "记下联系方式是登记数据，不是假称联系过第三方"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("我已经把赵敏的联系方式记下来了，回头要用就能找到。"),
+      false,
+      "「我已经把……联系方式记下来了」不得误伤（名词在前也一样）"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("他给的联系电话我也存下了。"),
+      false,
+      "联系电话这类数据名词不得误伤"
+    );
+    // 反过来，**真的联系动作**一个字都不能松：收窄只做名词语境，不许退化成无条件抹子串
+    // ——`联系信息 / 联系资料` 后面接处所词时，`联系` 是谓语、后面那串是它的宾语，
+    // 就是**真的联系动作**，必须仍然命中。
+    assert.equal(
+      claimsUnsentThirdPartyContact("我已经联系信息里的赵敏了。"),
+      true,
+      "「联系信息里的赵敏」是动词+宾语（不是「联系方式」那种名词），不得被抹掉"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("我已经联系资料上的人了。"),
+      true,
+      "「联系资料上的人」同上，必须仍然命中"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("我已经联系赵敏了。"),
+      true,
+      "真联系动作必须照旧命中（别把闸放宽成「提到联系方式就放行」）"
+    );
+    assert.equal(
+      claimsUnsentThirdPartyContact("已经跟赵敏说了，等她回我。"),
+      true,
+      "无主语完成式必须照旧命中"
+    );
+    // **又记数据又声称联系过**：只有名词那一处被抹掉，动词那处还在，整句仍要命中。
+    assert.equal(
+      claimsUnsentThirdPartyContact("联系方式我记下了，也已经跟赵敏说了。"),
+      true,
+      "记数据 + 真联系混在一句里必须仍然命中"
+    );
+    // 英文的"记下号码"不落进这三支中文结构，本来就不命中——不为它另立英文启发式。
+    assert.equal(
+      claimsUnsentThirdPartyContact("I've noted Zhao Min's contact details."),
+      false,
+      "英文记数据不在这三条中文判定的射程内（也不新加英文规则）"
+    );
   });
   check("resident-facing language follows the current message without translating facts", () => {
     const english = "Could you remind Alex not to run the dryer after 10 tonight?";
@@ -1574,9 +1631,12 @@ async function main() {
     );
     // 029：无主语完成式（「已经跟阿杰说了」）也必须被替换，不能只把 replyReview 标红。
     // 判定复用 checkFalseContactClaim 同源的 claimsContactCompletion，不另造大正则。
+    // 2026-10-02 起这一支跑在**抹掉联系数据名词之后**的那一句上（`claim`）——
+    // 「联系方式」是名词不是动作，记数据不许被当成假称联系过谁（正反例见上面那条 check）。
     assert(
-      turnSrc.includes("return claimsContactCompletion(clause)"),
-      "无主语完成式必须复用 claimsContactCompletion（不另造一套大正则）"
+      turnSrc.includes("return claimsContactCompletion(claim)") &&
+        turnSrc.includes("withoutContactDataNouns(clause)"),
+      "无主语完成式必须复用 claimsContactCompletion（不另造一套大正则），且跑在抹掉联系数据名词之后"
     );
     // 恢复的通用联系工具仍必须带发送前竞态门禁（目标人本轮开始后有新入站则跳过）。
     assert(
@@ -2841,7 +2901,12 @@ async function main() {
       "每一轮都必须带机器断言（不接受空 expect 假通过）"
     );
 
-    const empty = (): TurnOutcome => ({ toolsUsed: [], reply: "", outbound: [] });
+    const empty = (): TurnOutcome => ({
+      toolsUsed: [],
+      reply: "",
+      outbound: [],
+      introduced: false,
+    });
     const outTo = (toName: string, text: string): TurnOutcome["outbound"][number] => ({
       toName,
       text,
@@ -4322,6 +4387,21 @@ async function main() {
       "问身份不顺带讲办不到的事，也不背完整流程那段"
     );
     assert.deepEqual(findGroundingViolations(fb), [], "自称兜底必须过 grounding 闸");
+    // 豁免的只是**那段批准原文**（「你也可以让我向物业发起换房申请」里"你 + 情态 +
+    // 向 + 物业"看着像把事推回住户，其实是已有能力）：改写成让住户自己去，照样要抓。
+    assert(
+      findGroundingViolations(
+        IDENTITY_ZH.replace(
+          "你也可以让我向物业发起换房申请。",
+          "换房这件事你可以自己去跟物业管理处说。"
+        )
+      ).length > 0,
+      "批准原文之外、把事推回住户的说法仍然要判越界"
+    );
+    assert(
+      findGroundingViolations(`${IDENTITY_ZH} 这件事你最好自己去找房东。`).length > 0,
+      "同一段里夹带的越界句子不能被身份段的豁免一起放过去"
+    );
     // 漏说身份（少了「AI」）要被 grounding 抓出来。
     assert.deepEqual(findUngroundedFeatureQaFacts(fb, selfBundle), []);
     const noRole = "我是这套房子的协调员，帮住在这里的人沟通日常合住的事。";
@@ -4706,8 +4786,13 @@ async function main() {
   // 发），但 PostgreSQL 的 ParameterDescription 会把解析出的 jsonb(3802) 写回该参数并缓存
   // 预处理语句，**第二次及以后**驱动就按 jsonb 序列化器把已 stringify 的参数再
   // stringify 一次。修法：用 postgres.js 的 `json()`（同 `shadow.ts` 先例）。
-  // 边界：只守 `recordDecision`；`finishOutreachRun` 的 `skipped_reason` 是同一驱动根因，
-  // 但属另一条路径、且没有既有行为测试，按任务边界不顺手改。
+  // 边界：仓库重构后 SQL 收进了 helper `insertDecision(sql, args)`，`recordDecision` 变成
+  // **委托**（`insertDecision(db(), args)`）；首次介绍 `claimFirstIntroduction` 也在自己的
+  // 事务里复用同一个 helper（`insertDecision(tx, …)`）。所以静态检查要跟着**编码落点 + 两条
+  // 调用路径**走：payload 的 json() 只认 helper 那一处，两条路径都必须走 helper、不得把 SQL
+  // 抄回来（否则闸只看得到一处、另一处重新长出旧写法也查不出来）。
+  // `finishOutreachRun` 的 `skipped_reason` 是同一驱动根因，但属另一条路径、且没有既有行为
+  // 测试，按任务边界不顺手改。
   check("decision payload 用 postgres.js json() 写对象，不再 JSON.stringify(...)::jsonb", () => {
     const repo = readFileSync("lib/chat/coliving/repo.ts", "utf8");
     const sliceFn = (sig: string) => {
@@ -4716,17 +4801,42 @@ async function main() {
       const j = repo.indexOf("\nexport ", i + sig.length);
       return repo.slice(i, j > 0 ? j : undefined);
     };
+    // 去掉块注释再查旧写法，避免把注释里解释根因的示例当成真代码。
+    const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "");
+    const assertNoJsonbStringify = (body: string, who: string) => {
+      assert(
+        !/JSON\.stringify\([^)]*\)\s*::jsonb/.test(stripComments(body)),
+        `${who} 不得再用 JSON.stringify(...)::jsonb——缓存预处理语句上会被驱动双重编码`
+      );
+    };
+
+    // ① 编码的唯一落点：helper 把 payload 直接交给 postgres.js 的 json()。
+    const helperBody = sliceFn("async function insertDecision(");
+    assert(
+      /\.json\(\s*args\.payload\b/.test(helperBody),
+      "insertDecision 的 payload 必须走 postgres.js 的 json()（显式 jsonb 参数）"
+    );
+    assertNoJsonbStringify(helperBody, "insertDecision");
+
+    // ② `recordDecision` 只是委托：SQL 留在 helper，wrapper 里不得再内联一份。
     const recordBody = sliceFn("export async function recordDecision(");
     assert(
-      /\.json\(\s*args\.payload\b/.test(recordBody),
-      "recordDecision 的 payload 必须走 postgres.js 的 json()（显式 jsonb 参数）"
+      /return await insertDecision\(\s*db\(\)\s*,\s*args\s*\)/.test(recordBody),
+      "recordDecision 必须委托 insertDecision(db(), args)，不要自己写 SQL"
     );
-    // 去掉块注释再查旧写法，避免把注释里解释根因的示例当成真代码。
-    const codeOnly = recordBody.replace(/\/\*[\s\S]*?\*\//g, "");
     assert(
-      !/JSON\.stringify\([^)]*\)\s*::jsonb/.test(codeOnly),
-      "recordDecision 不得再用 JSON.stringify(...)::jsonb——缓存预处理语句上会被驱动双重编码"
+      !/insert into coliving\.decision\b/.test(recordBody),
+      "recordDecision 不得内联 decision 的 insert——编码闸必须只有一个落点"
     );
+    assertNoJsonbStringify(recordBody, "recordDecision");
+
+    // ③ 首次介绍在**调用方事务**里走同一个 helper，编码同样只有那一处。
+    const introBody = sliceFn("export async function claimFirstIntroduction(");
+    assert(
+      /insertDecision\(\s*tx\s*,/.test(introBody),
+      "claimFirstIntroduction 必须在事务里走同一个 insertDecision(tx, …)"
+    );
+    assertNoJsonbStringify(introBody, "claimFirstIntroduction");
   });
 
   check("decision payload 双重编码会读回 null（纯函数复现根因，不连库）", () => {
@@ -4787,6 +4897,381 @@ async function main() {
         turnStr.includes("personId: sender.personId"),
       "黑名单收口必须把 { blacklistedCapabilityId, personId } 写进这一轮 decision payload"
     );
+  });
+
+  /**
+   * ── 场景文件：全部载入得进来，每一条正则都编得过 ─────────────────────────
+   *
+   * 这是**付费跑批之前**的免费地板（2026-10-01 预审第五条）。评测 runner 逐条
+   * `new RegExp(pattern)` 编译，而 **JS 不支持 `(?i)` 这类内联标志**——写错了
+   * 会在跑批中途把整场炸掉，那时模型调用已经花出去了。所以在这里（不连库、
+   * 不调模型、不发送）把**每一个**场景文件的每一条正则断言都编一遍。
+   *
+   * 这里刻意**只编正则**、不跑整套 `validateScenario`：那些旧场景的其它结构问题
+   * （名册、角色枚举……）不归这条门禁管，混在一起红了会看不出是哪儿的问题。
+   * `validateScenario` 自己也会编正则（见 `evals/schema.ts`），那是给 runner
+   * 载入时兜底的第二道；这条负例就是钉住那道兜底真的在跑。
+   *
+   * 大小写不敏感要写成 `[Uu]nit` 这类字符类（见 corpus-047 的既有做法）。
+   */
+  check("场景文件：每一条正则断言都编得过（付费跑批之前免费拦下）", () => {
+    const dir = "lib/chat/coliving/evals/scenarios";
+    const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+    assert(files.length > 0, "场景目录里必须有场景文件");
+    assert(SCENARIO_REGEX_FIELDS.length > 0, "正则字段清单不能是空的，否则这条检查等于没查");
+    let checked = 0;
+    for (const file of files) {
+      const raw = JSON.parse(readFileSync(`${dir}/${file}`, "utf8")) as {
+        expect?: Record<string, unknown>;
+        turns?: Array<{ expect?: Record<string, unknown> }>;
+      };
+      const blocks = [raw.expect, ...(raw.turns ?? []).map((t) => t.expect)];
+      for (const block of blocks) {
+        if (!block || typeof block !== "object") continue;
+        for (const field of SCENARIO_REGEX_FIELDS) {
+          const patterns = block[field];
+          if (!Array.isArray(patterns)) continue;
+          for (const pattern of patterns) {
+            if (typeof pattern !== "string") continue;
+            checked += 1;
+            assert.doesNotThrow(
+              () => new RegExp(pattern),
+              `${file} 的 ${field} 里「${pattern}」编不过（JS 不支持 (?i) 这类内联标志，` +
+                "大小写不敏感请写 [Uu] 这类字符类）"
+            );
+          }
+        }
+      }
+    }
+    assert(checked > 0, "一条正则都没查到，说明字段名写错了（检查本身失效）");
+    // 负例：钉住 runner 载入时的兜底也真的会拦（不是写了段没人走的代码）。
+    assert.throws(
+      () =>
+        validateScenario(
+          {
+            id: "regex-compile-fixture",
+            source: "离线夹具：证明载入阶段会拦下编不过的正则，不是住户历史",
+            household: { label: "夹具" },
+            people: [{ name: "甲", phone: "+15550000001", role: "tenant" }],
+            turns: [
+              {
+                from: "+15550000001",
+                text: "hi",
+                expect: { replyMustNotMatch: ["(?i)resident coordinator"] },
+              },
+            ],
+          },
+          "regex-compile-fixture.json"
+        ),
+      /不是合法正则/,
+      "内联 (?i) 这类 JS 不支持的写法必须在载入阶段就被拦下"
+    );
+  });
+
+  /**
+   * **入门轮要让位给登记——免费哨兵（2026-10-01 预审第 8 条）。**
+   *
+   * 老板 2026-10-01：任何号码第一次说话，第一条固定自我介绍，**第二条要自然把还缺的
+   * Unit 与室友问出来**。可有两条**一个字都不收集登记信息**的短路会先一步接走这句话
+   * ——「你好，介绍一下你自己」正好命中功能问答（身份句式 + 招呼），住户于是再没被问过
+   * 房号和室友，老板说的两步等于一步都没做。修法是**只在"第一次开口、且登记还缺项"
+   * 那一轮**让它们让位（`firstEnrollmentTurn`），常规对话一个字不变（不全局取消 FAQ、
+   * 也不在上下文里硬拼问句）。
+   *
+   * 这条检查是**纯静态**的：既证明那两句真的会触发短路（不是假想的坑），也用源码哨兵
+   * 钉住"闸还在、且没有顺手把功能前门/黑名单一起关掉"（那两条理由见 turn.ts 该处注释）。
+   * 真实语料见 corpus-052（首句就是那个相邻反例）。
+   */
+  check("首次入门轮让位给登记：那两条短路真的会被触发，且闸只打在它们身上", () => {
+    // ① 这两句真的会命中短路——否则"让位"修的是个不存在的问题。
+    assert.equal(
+      isFeatureQaQuestion("你好，介绍一下你自己"),
+      true,
+      "「你好，介绍一下你自己」必须真的是一句功能问答，否则这道闸没有意义"
+    );
+    assert.equal(isSimpleAffirmation("ok"), true, "「ok」必须是简单肯定");
+    assert.equal(
+      isScheduleSlotInquiry({ act: "ask", body: "你用 07:15-07:25，愿意吗？" }),
+      true,
+      "排班征询要认得出来，简单肯定短路才会真的触发"
+    );
+
+    // ② 源码哨兵：闸在两条短路各自的条件里，且定义在前、用法在后。
+    const turnSrc = readFileSync("lib/chat/coliving/turn.ts", "utf8");
+    const gateAt = turnSrc.indexOf("const firstEnrollmentTurn =");
+    assert(gateAt > 0, "turn.ts 必须有 firstEnrollmentTurn 这道闸");
+    for (const shortcut of [
+      "isSimpleAffirmation(args.text)",
+      "isFeatureQaQuestion(args.text)",
+    ]) {
+      const at = turnSrc.indexOf(shortcut);
+      assert(at > gateAt, `${shortcut} 必须在那道闸之后，否则闸管不到它`);
+      assert(
+        turnSrc.slice(Math.max(0, at - 120), at).includes("!firstEnrollmentTurn"),
+        `${shortcut} 所在的条件必须带 !firstEnrollmentTurn，否则入门轮又被它接走了`
+      );
+    }
+
+    // ③ 闸**不**打在功能前门上：黑名单就住在那一整块里（共用同一个前置条件），
+    //    闸打在门上等于连安全闸一起关掉。这条哨兵防止"顺手把它也关掉"的回弹。
+    const frontDoorLine = turnSrc
+      .split("\n")
+      .find((line) => line.includes("resolveNamedRecipient(args.text"));
+    assert(frontDoorLine !== undefined, "找不到功能前门那句前置条件");
+    assert(
+      !frontDoorLine.includes("firstEnrollmentTurn"),
+      "功能前门（黑名单在里面）不得被入门闸一起关掉——三条理由见 turn.ts 该处注释"
+    );
+
+    // ④ 语料：那条相邻反例真的有一份场景在测，且第一句确实进功能问答
+    //    （否则这条场景测的不是那个反例）。
+    const scenarioFile =
+      "corpus-052-open-onboarding-self-intro-question-2026-10-01.json";
+    const scenario = validateScenario(
+      JSON.parse(
+        readFileSync(`lib/chat/coliving/evals/scenarios/${scenarioFile}`, "utf8")
+      ),
+      scenarioFile
+    );
+    assert.equal(scenario.onboarding, true, "这条场景必须走陌生号码那条路");
+    assert.equal(
+      isFeatureQaQuestion(scenario.turns[0].text),
+      true,
+      "corpus-052 的第一句必须真的会被功能问答接走，否则它测的不是那个反例"
+    );
+
+    // ⑤ 介绍资格**不是** firstEnrollmentTurn（二次复审新增阻塞）：资料齐全的新联系人
+    //    （预置名册里的室友、房东给了号码的人）第一次说话也得先收介绍——「要不要介绍」
+    //    与「要不要装配入门准则」是两件事，哨兵钉住那个条件本身。
+    const introDecl = turnSrc.indexOf(
+      "let introduction: IntroductionDelivery | null = null;"
+    );
+    assert(introDecl > 0, "找不到那条固定介绍的占位声明");
+    assert.equal(
+      turnSrc.slice(introDecl).split("\n")[1].trim(),
+      "if (needsIntroduction(history)) {",
+      "介绍只按「没对话过、没发过」判（needsIntroduction + 库里原子占位），不许挂在 firstEnrollmentTurn 上"
+    );
+
+    // ⑥ 结构信号真的接进了路由，且准则侧有一条**强制**加载入门准则的规则——
+    //    真实英文 hi 那次失败就是这一环缺了：一句话里没有话题词，普通规则命不中，
+    //    只装到了兜底的 complaint-risk，第一次开口该收的两件（房号 / 室友姓名 +
+    //    手机号）一件都没收到。
+    //
+    //    2026-10-01 入门准则**从整份 tenancy 里拆出来单列**（`domain/onboarding.md`）：
+    //    tenancy 开篇就是「入住要问作息 / 夜班」，一句 "hi" 不是搬入，混在一起模型
+    //    会对着刚开口的人问作息（真实英文评测第二轮就是这么被带偏的）。所以这里钉的
+    //    是**两件不同的事**：入门轮必须装上入门准则，且**不得**顺带装 tenancy。
+    assert(
+      turnSrc.includes("firstEnrollment: firstEnrollmentTurn"),
+      "firstEnrollment 结构信号必须交给 assembleSystemPrompt"
+    );
+    // 统一成 LF 再切：这几个文件在 Windows 工作副本里是 CRLF，用字面 `"\n…"`
+    // 切多行会切在**行尾**（读进来的那一段就错了），所以先归一化行尾。
+    const brainSrc = readFileSync("lib/ai/brains/coliving/index.ts", "utf8").replace(
+      /\r\n/g,
+      "\n"
+    );
+    // 模块登记：入门准则必须指向真的存在的那份短准则文件（拆出来才有意义）。
+    const moduleAt = brainSrc.indexOf('id: "onboarding"');
+    assert(moduleAt > 0, "coliving brain 必须把入门准则登记成一个独立模块");
+    const moduleBody = brainSrc.slice(moduleAt, moduleAt + 320);
+    assert(
+      moduleBody.includes('file: "domain/onboarding.md"'),
+      "onboarding 模块必须指向 domain/onboarding.md"
+    );
+    const onboardingDoc = readFileSync(
+      "lib/ai/brains/coliving/doctrine/domain/onboarding.md",
+      "utf8"
+    );
+    // **必收的两件事实**说到具体：房号 + 每位室友的姓名和手机号。只说"还住着谁"，
+    // 模型会满足于一句「还有别人吗」——真实评测里第二条就是这么漏掉室友的。
+    // 运行时那两句是模型每轮实际读到的缺项文本，逐字钉住；
+    const ctxSrc = readFileSync("lib/chat/coliving/context.ts", "utf8");
+    assert(
+      ctxSrc.includes("Unit（房号）") && ctxSrc.includes("姓名和手机号"),
+      "运行时上下文必须把第一轮缺的两件说到具体：房号 + 每位室友的姓名和手机号"
+    );
+    assert(
+      /Unit|房号/.test(onboardingDoc) &&
+        onboardingDoc.includes("手机号") &&
+        /名字|姓名/.test(onboardingDoc),
+      "入门准则必须点明必收的两件：房号 + 室友姓名与手机号"
+    );
+    // **提问预算没有被这次拆分放宽**：入门资料是唯一窄例外，别的问题照旧一次一个。
+    assert(
+      onboardingDoc.includes("一轮最多一个"),
+      "入门准则必须写明：资料之外的问题照旧一轮最多一个"
+    );
+    // 取一条规则**自己的**那一段（从条件标记到该规则对象的结尾），不限定字符数
+    // ——固定窗口会随着后面的注释长短漂移，读进来的就不是这条规则了。
+    const ruleBodyFrom = (marker: string): string => {
+      const at = brainSrc.indexOf(marker);
+      assert(at > 0, `找不到规则：${marker}`);
+      const end = brainSrc.indexOf("\n    },", at);
+      assert(end > at, `找不到规则的结尾：${marker}`);
+      return brainSrc.slice(at, end);
+    };
+    // 首轮那条规则：强制装入门准则，且**不**顺带装 tenancy。
+    const ruleBody = ruleBodyFrom('{ key: "firstEnrollment" }');
+    assert(
+      ruleBody.includes('modules: ["onboarding"]') && ruleBody.includes("force: true"),
+      "入门轮必须**强制**加载 onboarding，否则那句 hi 里没有话题词、准则装不进来"
+    );
+    assert(
+      !ruleBody.includes("tenancy"),
+      "入门轮不得顺带装 tenancy：那是入住登记（开篇问作息 / 夜班），一句 hi 不是搬入"
+    );
+    // 补充轮（首轮问过、还没报齐）：按结构**再强制装一次**同一条入门准则。
+    //
+    // **不是独占**（老板 2026-10-01 纠正，Codex 独立复审先拦下）：这里曾经用
+    // `exclusive` 把其余非 force 规则整支短路掉，结果连他这句里**真正的交办**
+    // （传话 / 报修 / 投诉 / 排程）也一起被压掉——「问候里夹着一件要办的事」变成
+    // 只剩"收资料"，他要办的事一个字没办。改成 `force`（无条件加载、不占额度）后，
+    // 入门准则与那件事的情境准则**同时在场**；"别把这一轮做成作息访谈"由
+    // `domain/onboarding.md` 自己收窄（它只限制登记类的追加提问）。
+    const followUpBody = ruleBodyFrom('{ key: "enrollmentOpen" }');
+    assert(
+      followUpBody.includes('modules: ["onboarding"]') &&
+        followUpBody.includes("force: true"),
+      "补充轮必须**强制**加载入门准则，否则他这句里的 roommate 会把入门资料挤掉"
+    );
+    assert(
+      !followUpBody.includes("exclusive"),
+      "补充轮不得独占：exclusive 会把他这一轮里真正的交办（传话/报修/投诉/排程）一起短路掉"
+    );
+    assert(
+      !followUpBody.includes("tenancy"),
+      "补充轮同样不得装 tenancy（那也是入住登记）"
+    );
+    // 那个信号本身只看**结构**（名册人数 + 房号/名册缺项），不看本轮关键词、不数轮数。
+    // 同样先归一化行尾再切（CRLF 工作副本上字面 `"\n"` 切不到）。
+    const openSignalSrc = turnSrc.replace(/\r\n/g, "\n");
+    const openSignalAt = openSignalSrc.indexOf("enrollmentOpen:");
+    assert(openSignalAt > 0, "turn.ts 必须把 enrollmentOpen 结构信号交给路由");
+    const openSignalEnd = openSignalSrc.indexOf("\n  };", openSignalAt);
+    assert(openSignalEnd > openSignalAt, "找不到 signals 那个对象的结尾");
+    const openSignal = openSignalSrc.slice(openSignalAt, openSignalEnd);
+    assert(
+      openSignal.includes("ctx.roster.complete") || openSignal.includes("sender.unit"),
+      "enrollmentOpen 的缺项判据必须真的读房号与名册完整性"
+    );
+    assert(
+      openSignal.includes("ctx.members.length <= 1") &&
+        openSignal.includes("!firstEnrollmentTurn") &&
+        !openSignal.includes("args.text"),
+      "enrollmentOpen 只能由结构判定（名册还只有他自己 + 房号/名册缺项），不得读本轮原话"
+    );
+
+    // ⑦ **真实路由器反例**（纯函数，不接模型、不读库）：入门期里他这一句常常就是
+    //    一件**真交办**——「You tell him to clean up the kitchen every time he
+    //    finishes using it」，2026-09-21 真实英文事故那句。用 `exclusive` 时
+    //    onboarding 会把非 force 那一半锁死，relay 被整支丢掉：这一轮只剩"收资料"，
+    //    他要办的事一个字都没办。改成 `force` 后强制装载、不占额度，入门准则与那件
+    //    事的情境准则**同时在场**。这里跑的是**真的路由引擎**（和运行时同一个入口），
+    //    不是照着源码再抄一遍判断。
+    const relayInEnrollment = assembleSystemPrompt({
+      brainId: "coliving",
+      routeOn: "You tell him to clean up the kitchen every time he finishes using it",
+      signals: { enrollmentOpen: true },
+    });
+    assert(
+      relayInEnrollment.loadedModuleIds.includes("onboarding"),
+      "前提失效：入门资料没收齐的这一轮必须还装着入门准则"
+    );
+    assert(
+      relayInEnrollment.loadedModuleIds.includes("relay"),
+      "入门轮里夹着的真实交办必须照旧命中 relay——被入门准则顶掉就是把事丢了"
+    );
+    // 钉住**机制**而不只是结果：入门准则必须在 trace 里标成 forced。靠 exclusive
+    // 拿到"onboarding 在场"是假通过——那正是会短路掉 relay 的那种写法。
+    assert.equal(
+      relayInEnrollment.routing.trace.find((t) => t.moduleId === "onboarding")
+        ?.forced,
+      true,
+      "入门准则必须是 force（无条件、不占额度）；exclusive 会在结果上假装通过、却压掉 relay"
+    );
+    assert.equal(
+      relayInEnrollment.routing.trace.find((t) => t.moduleId === "relay")?.forced,
+      false,
+      "relay 仍走普通路由（不是被强制塞进来的），否则这条反例证明不了准入不被独占"
+    );
+    // 安全强制装载同样不被入门准则挤掉：一句里既有风险词又有交办时，三份同时在场
+    // （force 之间互不吞噬，也都不占那 4 个常规额度）。
+    const riskInEnrollment = assembleSystemPrompt({
+      brainId: "coliving",
+      routeOn: "Tell him to stop threatening me",
+      signals: { enrollmentOpen: true },
+    });
+    for (const id of ["complaint-risk", "onboarding", "relay"]) {
+      assert(
+        riskInEnrollment.loadedModuleIds.includes(id),
+        `入门期内夹着风险的交办必须同时装载 ${id}，不得互相顶掉`
+      );
+    }
+  });
+
+  /**
+   * **corpus-051 的「齐了」只禁没有依据的那两种说法（2026-10-02 产品判断修正）。**
+   *
+   * 原始风险是：拿「四人间」的**容量**去 confirmRoster，名册自己判成 complete，于是替
+   * 住户下「四个人齐了」这种没人确认过的结论。当时把 `齐了|都齐|收齐|齐全` **整类**禁掉，
+   * 是矫枉过正——2026-10-02 真实报告 2026-10-02T06-20-28-463Z 第二条写
+   * 「收到，赵敏的号码也记下了。A208 三位室友的联系方式就齐了。」：宿管不住这儿、
+   * 不算住户，「四人间」只是容量，此刻名册上确实记着**三位**室友的联系方式，
+   * **这句话是真的**（`DEVELOPMENT_JUDGMENT`：不要把一句纠正直接翻成全局 must/never、
+   * 枚举或正则；先问这条规则会不会拒绝一个正常的好行为）。
+   *
+   * 收窄后用**真正跑断言的那个纯函数** `evaluateTurnExpectation` 把三种说法各跑一遍：
+   * 真实的「三位联系人」那句零失败（不误伤），把容量当人数的、以及没有依据的全屋结论
+   * 仍然各判一条失败（不放过）。
+   */
+  check("corpus-051：只禁无依据的容量人数与全屋结论，真实的三位联系人不误伤", () => {
+    const file = "corpus-051-open-onboarding-chinese-manager-2026-10-01.json";
+    const scenario = validateScenario(
+      JSON.parse(readFileSync(`lib/chat/coliving/evals/scenarios/${file}`, "utf8")),
+      file
+    );
+    const expect = scenario.turns[1].expect ?? {};
+    // 第 2 轮的事实：他补了赵敏 → addResident 调了、没有再发一遍介绍、没有出站。
+    const outcome = (reply: string) => ({
+      toolsUsed: ["addResident"],
+      reply,
+      outbound: [],
+      introduced: false,
+    });
+    // ① 真实报告里那句（名册上记到的三位联系人的联系方式）：其余字段照旧满足 → 零失败。
+    assert.deepEqual(
+      evaluateTurnExpectation(
+        expect,
+        outcome("收到，赵敏的号码也记下了。A208 三位室友的联系方式就齐了。")
+      ),
+      [],
+      "「已经记到的三位联系人」的收口是事实，不得再判失败"
+    );
+    // ② 旧的坏说法：把「四人间」的容量当成已确认人数。必须仍然失败——而且是**它**被判失败
+    //    （句子里没有别的可命中项，所以正好一条，且是回复模式那条）。
+    const capacityClaim = evaluateTurnExpectation(
+      expect,
+      outcome("收到，赵敏的号码也记下了。A208 四人间四个人的联系方式就齐了。")
+    );
+    assert.equal(
+      capacityClaim.length,
+      1,
+      `用容量当人数的「四个人…齐了」必须被判失败：${capacityClaim.join(" | ") || "（一条都没报）"}`
+    );
+    assert.match(capacityClaim[0], /^回复命中了不该出现的模式/);
+    // ③ 不限定范围的全屋结论：同样仍然失败（这是原来那条禁令真正要拦的另一半）。
+    const wholeHouseClaim = evaluateTurnExpectation(
+      expect,
+      outcome("收到，赵敏的号码也记下了。这屋的名册齐了。")
+    );
+    assert.equal(
+      wholeHouseClaim.length,
+      1,
+      `没有依据的全屋结论必须仍判失败：${wholeHouseClaim.join(" | ") || "（一条都没报）"}`
+    );
+    assert.match(wholeHouseClaim[0], /^回复命中了不该出现的模式/);
   });
 
   check("受约束提醒场景：结构自洽（谁收、零出站轮、旧工具名清干净）", () => {
@@ -5323,6 +5808,7 @@ async function main() {
           householdId: GATE_HOUSE,
           householdLabel: "评测功能轮收尾",
           dwellingId: "dwelling-gate",
+          unit: null,
           isTest: true,
         };
         const finalizeArgs = (handling: FeatureHandling) =>
@@ -8869,19 +9355,23 @@ async function main() {
       !ctxSrc.includes("export type ContextReceipt"),
       "收据类型只在纯模块 context-receipt.ts 定义，context.ts 不得另立一套"
     );
-    // 分节收据由 buildContext 逐节收尾产出：12 个稳定分节 id（条件分节没出现就
-    // 自然不进列表），字符数一律由 lines 切片算出来（不是把正文存起来）。
-    assert.equal(
-      ctxSrc.split("endSection(").length - 1,
-      12,
-      "12 个稳定分节各收尾一次（id 由代码写死）"
-    );
-    for (const id of [
+    // 分节收据由 buildContext 逐节收尾产出，字符数一律由 lines 切片算出来
+    // （不是把正文存起来）。**下面这份 id 清单是唯一事实源**：收尾总次数由它算
+    // 出来，所以「少收尾一节」「多收尾一节」「同一个 id 收尾两次」都会当场失败
+    // ——不是"数量对上就算过"。
+    //
+    // 清单按 `context.ts` 里 `endSection` 出现的**代码顺序**排。其中「回答轮 /
+    // 首次接触 / 自我介绍 / 房东 / 等回复 / 独立立场 / 近期外发」是**条件分节**
+    // （没这个情境就不收尾、自然不进收据），但 id 本身一律由代码写死。
+    // `introduction` 是 2026-10-01 首次接触那条固定自我介绍带进来的新分节：
+    // 介绍已经在模型之前发出去，本轮上下文必须显式说出来，免得模型再介绍一遍。
+    const STABLE_SECTION_IDS = [
       "unknowns",
       "now",
       "channel",
       "answering",
       "first-contact",
+      "introduction",
       "roster",
       "sender-landlord",
       "house-rules",
@@ -8889,10 +9379,17 @@ async function main() {
       "open-cases",
       "standalone-positions",
       "recent-outbound",
-    ]) {
-      assert(
-        ctxSrc.includes(`endSection("${id}")`),
-        `稳定分节 id 必须写死：${id}`
+    ];
+    assert.equal(
+      ctxSrc.split("endSection(").length - 1,
+      STABLE_SECTION_IDS.length,
+      `${STABLE_SECTION_IDS.length} 个稳定分节各收尾一次（id 由代码写死）`
+    );
+    for (const id of STABLE_SECTION_IDS) {
+      assert.equal(
+        ctxSrc.split(`endSection("${id}")`).length - 1,
+        1,
+        `稳定分节 id 必须写死、且只收尾一次：${id}`
       );
     }
     assert(

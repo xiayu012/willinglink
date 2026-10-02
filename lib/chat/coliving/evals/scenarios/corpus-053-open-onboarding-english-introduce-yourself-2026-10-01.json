@@ -1,0 +1,43 @@
+{
+  "id": "corpus-053-open-onboarding-english-introduce-yourself-2026-10-01",
+  "source": "二次独立复审第七条：极短 incoming-first 英文场景，不预置任何人。他第一句就是「introduce yourself」——这既是自我介绍请求（本该由功能问答路径答完），又是第一次接触，最容易只答了「我是谁」、把还缺的登记信息漏掉。断的是：第一条固定 identity.en 先发出去；第二条（正常回复）必须问出这套房的 Unit、以及室友的姓名和手机号，且不许把那段自我介绍再抄一遍（同一条固定文案连发两遍＝重复全文介绍）。2026-10-02 真实报告 2026-10-02T06-00-33-008Z 第一轮正是这样翻的：固定 identity.en 刚发出去，第二条又写「Hi — this is the AI resident coordinator. I'm an AI, not a person: I don't live there…」把身份与免责整段重念一遍——所以第一轮的 mustNotMatch 除角色名外还钉住身份/免责的原句（`not a person`、`I don't live there`、`What I do is`）。2026-10-02 报告 2026-10-02T06-06-03-*Z 这一轮过是过了，却又多出一句**讲那条介绍本身的话**（「I just sent over who I am, so I won't say it all again.」）——住户要的是接着往下聊，不是我们重复抑制机制的说明，这里把 `I just sent / already introduced / won't say it again / as I said` 一并钉住。第二句他把两件补齐，直接记下来——这句里有 \"live with\"，但它仍是**收入门资料**那一轮，不许变成冲突/作息访谈（反例断言与 050 第二轮同款）；同一份报告的第二轮回复是一段没必要的收尾「If anything comes up at home … just text me and I'll sort out who to talk to and follow it through」——只补资料的一轮不做能力介绍、不许诺以后，第二轮的 mustNotMatch 也钉住这一类。",
+  "onboarding": true,
+  "household": { "label": "评测-陌生号码英文自我介绍" },
+  "turns": [
+    {
+      "from": "+15550500101",
+      "text": "hi, introduce yourself",
+      "expect": {
+        "mustIntroduce": true,
+        "replyMustMatch": [
+          "[Uu]nit|[Aa]partment (?:number|no)",
+          "[Nn]ames?|叫(?:什么|啥)|姓名",
+          "[Pp]hone|numbers?|手机|号码",
+          "[Rr]oommate|who else|live with|other (?:people|residents)"
+        ],
+        "replyMustNotMatch": [
+          "[Rr]esident [Cc]oordinator",
+          "[Ii][’']?m an AI|not a person|I (?:don[’']?t|do not) live there",
+          "What I do is|keep the facts straight|pass messages between roommates",
+          "[Ii] just (?:sent|told)|already (?:introduced|told you)|won[’']?t (?:repeat|say it all again)|[Aa]s I (?:just )?(?:said|mentioned)"
+        ]
+      }
+    },
+    {
+      "from": "+15550500101",
+      "text": "I'm Dana, Unit B310. Hannah 15550500102 and Wei 15550500103 live with me.",
+      "expect": {
+        "mustNotIntroduce": true,
+        "mustUseTools": ["recordUnit", "addResident"],
+        "replyMustNotMatch": [
+          "[Rr]esident [Cc]oordinator",
+          "[Ww]hich unit|[Ww]hat(?:'s| is) your unit|[Ww]hat unit",
+          "[Uu]sual hours|generally home|作息|几点(?:睡|起)|夜班|night shift|sleep schedule",
+          "[Ii] can (?:message|help)|help everyone talk|house rules everyone",
+          "[Ii]f anything (?:comes up|happens)|[Jj]ust (?:text|message) me|[Ii][’']?ll (?:sort|follow|take care)",
+          "[Ii] just (?:sent|told)|already (?:introduced|told you)|won[’']?t (?:repeat|say it all again)|[Aa]s I (?:just )?(?:said|mentioned)"
+        ]
+      }
+    }
+  ]
+}

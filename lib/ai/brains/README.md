@@ -44,6 +44,8 @@ lib/ai/brains/
         arbitration.md     [domain]    三道闸、协调员定位、立场、禁区（常驻，见下）
         craft.md           [communication] 手法：格式、措辞
       domain/              domain 层：情境仲裁模块
+        onboarding.md      第一次接触：只收房号 + 室友姓名/手机号（不做入住登记）
+        relay.md           一对一传话（代为联系）
         conflict.md        室友冲突调解
         complaint-risk.md  主动询问 / 投诉受理 / 风险升级
         tenancy.md         入住 / 退租 / 违规与执行

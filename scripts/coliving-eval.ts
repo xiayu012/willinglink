@@ -296,6 +296,15 @@ type TurnRecord = {
   fromRole: string;
   said: string;
   reply: string;
+  /**
+   * **第一条：首次接触那条固定的自我介绍**（只有"这个号码第一次说话"那一轮才有）。
+   *
+   * 它跟 `reply` 是**两次独立的外呼**：`ms` 是它在 `onIntroduction` 回调里被交付
+   * 的时刻（相对本轮开始的毫秒）——`runColivingTurn` 在**主生成之前**就 await 这个
+   * 回调，所以这个数必然远小于 `turnMs`；报告把两条分两块显示，顺序一眼可见。
+   * `null` = 这一轮没发介绍（不是首次接触，或者已经介绍过了）。
+   */
+  introduction: { body: string; ms: number } | null;
   replyReview: ReplyReview;
   /**
    * 这一轮**整轮**的真实耗时（毫秒）。用单调时钟测的是 `runColivingTurn`
@@ -389,6 +398,11 @@ async function runScenario(
   const turn = await import("../lib/chat/coliving/turn");
 
   let householdId: string;
+  /**
+   * **陌生号码入门场景**：不预置任何人，跑的就是"刚进来的号码"那条路
+   * （先建上下文 → 第一条固定自我介绍 → 第二条正常回复）。
+   */
+  const isOnboarding = scenario.onboarding === true;
   /** 快照场景专用：槽位号 → 本次恢复实际可用的号 */
   let phoneRewrite: Record<string, string> = {};
   if (scenario.snapshot) {
@@ -443,7 +457,15 @@ async function runScenario(
         note: null,
       });
     }
-    await repo.setDeclaredSize(householdId, (scenario.people ?? []).length);
+    /**
+     * **入门场景（`onboarding: true`）到这里为止：不 addResident、不报人数。**
+     * 屋子是空的，`turns` 里那个号码第一次出现时就是个陌生号码——这正是要测的
+     * 那条路（先建上下文 → 第一条固定介绍 → 第二条正常回复）。预置一个人就
+     * 测不到了，所以 `validateScenario` 也不允许入门场景写 `people`。
+     */
+    if (!isOnboarding) {
+      await repo.setDeclaredSize(householdId, (scenario.people ?? []).length);
+    }
   }
 
   // 正文里的号码也要换：`addresident-greeting` 那条场景把号码写在消息里
@@ -456,8 +478,12 @@ async function runScenario(
   const members = await repo.getMembers(householdId);
   const nameOf = (personId: string) =>
     members.find((m) => m.personId === personId)?.name ?? "（未知）";
+  // 查不到就落 `other`，**不落 `tenant`**：`members` 是进屋那一刻的快照，
+  // 入门场景这里本来就是空的，陌生人（含不住这儿的物业/管家）查不到很正常。
+  // 猜成「住客」等于在报告抬头里给非住户安身份——那只是给复核人看的元数据，
+  // 宁可中性也不写错。**只影响这一处标签，不动库里的成员关系、不影响模型行为。**
   const roleOf = (phone: string) =>
-    members.find((m) => m.address === phone)?.role ?? "tenant";
+    members.find((m) => m.address === phone)?.role ?? "other";
 
   for (const name of scenario.setup?.confirmedNames ?? []) {
     const person = members.find((m) => m.name === name);
@@ -534,6 +560,18 @@ async function runScenario(
      * 主生成/重写/复核的模型往返全在里面，**不是**单看模型延迟。
      */
     const turnStartedAt = performance.now();
+    /**
+     * 本轮那条**最先发出去的固定自我介绍**（首次接触才有）。收集方式跟生产路由
+     * 完全一样——`runColivingTurn` 在模型开始跑之前就 `await` 这个回调，所以这里
+     * 记下的时刻**必然早于主生成**；`introductionMs` 就是这个"早"的量化证据
+     * （模型一轮动辄几秒，这个数会明显更小）。
+     *
+     * **评测不发短信，但要把"发成功"如实记账**：把那条 communication 记成 `sent`
+     * 再回 `delivered: true`——零真实短信，同时让库里的状态跟生产一致（否则它会
+     * 一直挂在 `queued`，`claimFirstIntroduction` 挡掉后续所有轮次，评测看到的
+     * 就不是生产的行为了）。
+     */
+    let introduction: { body: string; ms: number } | null = null;
     try {
       // 每轮单独打 turnIndex 标签：这一轮里所有 generation（主生成、
       // 强制发信、重写、事实复核、最终修正、工具里的 embedding）都继承
@@ -544,6 +582,20 @@ async function runScenario(
           from: livePhone,
           text: said,
           guidance: GUIDANCE_TEXT,
+          // **只有入门场景传**：陌生号码并进这栋测试屋（生产路由永远不传这个
+          // 参数，见 turn.ts 的说明与 repo.enrollUnknownSender 的 is_test 复核）。
+          onboardingTestHouseholdId: isOnboarding ? householdId : undefined,
+          onIntroduction: async (intro) => {
+            introduction = {
+              body: intro.body,
+              ms: Math.round(performance.now() - turnStartedAt),
+            };
+            await repo.markCommunication({
+              communicationId: intro.communicationId,
+              status: "sent",
+            });
+            return { delivered: true, error: null };
+          },
         })
       );
     } catch (error) {
@@ -562,6 +614,9 @@ async function runScenario(
       said,
       reply: last.reply,
       replyReview: last.replyReview,
+      // 第一条（首次接触的固定自我介绍），跟 reply 分开记：报告里也是两块，
+      // 一眼能看出"先介绍、后回复"这个顺序，以及介绍用的是哪段固定文案。
+      introduction,
       turnMs,
       promptComposition: last.promptComposition,
       contextReceipt: last.contextReceipt,
@@ -592,6 +647,17 @@ async function runScenario(
     if (last.replyCommunicationId) {
       await repo.markCommunication({
         communicationId: last.replyCommunicationId,
+        status: "sent",
+      });
+    }
+    /**
+     * **那条固定介绍也要记成 sent**（评测不发短信，但账要跟生产一致）：
+     * 下一轮 `claimFirstIntroduction` 读的就是这条记录，不记的话第二轮的
+     * 同一个人会**再收到一遍自我介绍**——那正是这条闸要防的重复介绍。
+     */
+    if (last.introduction) {
+      await repo.markCommunication({
+        communicationId: last.introduction.communicationId,
         status: "sent",
       });
     }
@@ -640,6 +706,8 @@ async function runScenario(
     toolsUsed: t.toolsUsed,
     reply: t.reply,
     outbound: t.outbound,
+    // 入门场景的两条断言（`mustIntroduce` / `mustNotIntroduce`）读的就是它
+    introduced: t.introduction !== null,
   }));
   failures.push(
     ...evaluateTurnExpectation(scenario.expect, outcomes[outcomes.length - 1])
