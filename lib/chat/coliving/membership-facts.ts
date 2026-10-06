@@ -87,18 +87,94 @@ export function roleLabel(role: Role): string {
  * 占位名是内部编号，任何情况下不许说进消息（渲染层逐人标 `nameConfirmed`，
  * 见 `context.ts`）。
  */
+export const PLACEHOLDER_NOUNS: Readonly<Record<Role, string>> = {
+  landlord: "房东",
+  manager: "管理人",
+  coordinator: "协调人",
+  tenant: "住客",
+  other: "联系人",
+};
+
 export function placeholderName(role: Role, index: number): string {
-  const noun =
-    role === "landlord"
-      ? "房东"
-      : role === "manager"
-        ? "管理人"
-        : role === "coordinator"
-          ? "协调人"
-          : role === "tenant"
-            ? "住客"
-            : "联系人";
-  return `${index}号${noun}`;
+  return `${index}号${PLACEHOLDER_NOUNS[role]}`;
+}
+
+/**
+ * 这个名字是不是`placeholderName`发的内部编号。
+ *
+ * **认占位名必须问生成它的那份表**，不许另抄一份格式。记过一次事故：
+ * 别处硬写了「`n号住客` = 占位名」的格式判断，后来占位名词表按角色分了家
+ * （宿管是`n号管理人`），那份硬写的判断从此静默失效——占位名被当成真名
+ * 念给住户听。所以生成与识别共用同一个`PLACEHOLDER_NOUNS`。
+ */
+export function isPlaceholderName(name: string | null | undefined): boolean {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) {
+    return false;
+  }
+  const nouns = Object.values(PLACEHOLDER_NOUNS).join("|");
+  return new RegExp(`^[0-9]+号(?:${nouns})$`).test(trimmed);
+}
+
+/**
+ * 「他本人叫什么，我们还不知道」——决定要不要在第一次接触里自然地问一句
+ * 「怎么称呼你」。
+ *
+ * **两件事同时成立才算不知道**，缺一不可：
+ *
+ *   · `!nameConfirmed` —— 没有人确认过这个名字。`addResident` 只在库里写了
+ *     `display_name`，**从没把 `name_confirmed` 置真**，所以房主导入的名册、
+ *     室友转述来的名字读出来都是 `false`。**只看这一位会把已经知道的名字
+ *     再问一遍。**
+ *   · `isPlaceholderName(name)` —— 名字本身就是内部编号（`3号住客`），
+ *     也就是「从没听见真名」。
+ *
+ * 合起来才是「我们手上这个名字不是真名，而且没有人替他确认过」。
+ */
+export function selfNameUnknown(
+  member: { name: string; nameConfirmed: boolean } | null | undefined
+): boolean {
+  if (!member) {
+    return true;
+  }
+  return !member.nameConfirmed && isPlaceholderName(member.name);
+}
+
+/** `nameProvenanceMark` 用的两种标注，出成常量供离线闸逐字比对。 */
+export const PLACEHOLDER_NAME_MARK = "〔占位名，不是真名，不可念出口〕";
+export const UNCONFIRMED_NAME_MARK = "〔还没经他本人确认，别当成定论〕";
+
+/**
+ * 名册里这个名字该**怎么标给模型看**（`context.ts` 逐人渲染时贴在名字后面）。
+ *
+ * 三态，跟 `selfNameUnknown` 是同一套判据的两种用法：
+ *
+ *   · 他本人确认过（`nameConfirmed`）→ **不标**，可以照常说。
+ *   · 名字是内部编号（`isPlaceholderName`）→ 标「占位名…不可念出口」，
+ *     **任何情况下不许说进消息**。
+ *   · **名字是真名、只是没人替他确认过**（室友转述来的、名册里导入的：
+ *     `addResident` 只写 `display_name`，从不把 `name_confirmed` 置真）→
+ *     标「还没经他本人确认」。
+ *
+ * **第三态是这次补的**（2026-10-06）。以前这里只有「确认过 / 没确认过」两态，
+ * 第二种和第三种标的是同一句话——于是名册里一个室友转述来的真名会被标成
+ * 「占位名，不可念出口」，与「这个名字我们已经知道了、不必再问」直接打架：
+ * 模型一边被告知不能念、一边被告知别问，最后两边都不做。
+ *
+ * **判据只放这一处**：不要靠在别处写一句「名字带 X 字样的是占位符」——
+ * 占位名格式一改那句话就静默失效（真踩过：AI 把「2号、3号」念进了短信）。
+ * `nameConfirmed` 那条安全线**一位没动**：没确认过的名字照样带标注。
+ */
+export function nameProvenanceMark(member: {
+  name: string;
+  nameConfirmed: boolean;
+}): string {
+  if (member.nameConfirmed) {
+    return "";
+  }
+  return isPlaceholderName(member.name)
+    ? PLACEHOLDER_NAME_MARK
+    : UNCONFIRMED_NAME_MARK;
 }
 
 export type MembershipFacts = {

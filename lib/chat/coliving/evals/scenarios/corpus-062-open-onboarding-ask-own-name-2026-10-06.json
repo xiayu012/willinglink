@@ -1,0 +1,38 @@
+{
+  "id": "corpus-062-open-onboarding-ask-own-name-2026-10-06",
+  "source": "老板 2026-10-06：「也要问对方的名字。现在的情况是只问其他室友的名字。」在此之前第一次接触只收房号和室友，说话的人自己一直顶着内部占位名（「1号联系人」这种），名字永远没人问。这一场钉住两件事：① 第一轮是一句没有任何话题词的 \"hi\"（靠关键词永远命不中入门准则，只能靠结构信号），除房号和室友外还必须**问他自己怎么称呼**；② 第二句他把名字、房号、室友一起报出来，当场用 renamePerson 记下（他自己说的 → confirmed），并**不许再问一遍**他的称呼。内部占位名（`N号联系人` 这类编号）一个字都不许出现在回复里。",
+  "onboarding": true,
+  "household": { "label": "评测-第一次接触问他本人怎么称呼" },
+  "turns": [
+    {
+      "from": "+15550500401",
+      "text": "hi",
+      "expect": {
+        "mustIntroduce": true,
+        "replyMustMatch": [
+          "[Ww]hat should I call you|[Hh]ow should I (?:call|address) you|[Ww]hat(?:'s| is) your name|your name|call you|怎么称呼|叫什么|贵姓",
+          "[Uu]nit|[Aa]partment (?:number|no)",
+          "[Rr]oommate|who else|live with|other (?:people|residents)"
+        ],
+        "replyMustNotMatch": [
+          "[Rr]esident [Cc]oordinator",
+          "[Ii]'?m an AI|not a person|I (?:don'?t|do not) live there",
+          "[0-9]+号(?:住客|联系人|管理人|房东|协调人)"
+        ]
+      }
+    },
+    {
+      "from": "+15550500401",
+      "text": "I'm Dana, Unit B310. Hannah 15550500402 and Wei 15550500403 live with me.",
+      "expect": {
+        "mustNotIntroduce": true,
+        "mustUseTools": ["renamePerson", "recordUnit", "addResident"],
+        "replyMustNotMatch": [
+          "[Ww]hat should I call you|[Hh]ow should I (?:call|address) you|[Ww]hat(?:'s| is) your name|怎么称呼|叫什么|贵姓",
+          "[0-9]+号(?:住客|联系人|管理人|房东|协调人)",
+          "[Ii]f anything (?:comes up|happens)|[Jj]ust (?:text|message) me|[Ii]'?ll (?:sort|follow|take care)"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "id": "corpus-063-open-onboarding-known-self-name-no-reask-2026-10-06",
+  "source": "062 的反面，也是老板 2026-10-06 那条要求的边界：**已经说过自己名字的人，一个字都不许再问一遍**。他第一句就自报名字并给了房号，中间没有别人入册——名册上仍然只有他自己，`enrollmentOpen` 在第二轮照样成立（入门准则还在场），这正是最容易顺手再问一遍名字的地方。两轮都钉住：不许出现任何「怎么称呼你 / what should I call you」式的提问。第一轮还必须把名字当场记下来（renamePerson，HEAD 的按名绑定就够：这一户此刻只有他一个人顶着占位名），并且**不许再问**——他这一句里已经给了。第二轮的「不许再问」同时钉住复审第 3 条：这句话只问一次，之后不再追。",
+  "onboarding": true,
+  "household": { "label": "评测-自报名字之后不再问名字" },
+  "turns": [
+    {
+      "from": "+15550500411",
+      "text": "Hi, I'm Dana. I live in Unit B310.",
+      "expect": {
+        "mustIntroduce": true,
+        "mustUseTools": ["renamePerson", "recordUnit"],
+        "replyMustNotMatch": [
+          "[Ww]hat should I call you|[Hh]ow should I (?:call|address) you|[Ww]hat(?:'s| is) your name|怎么称呼|叫什么|贵姓",
+          "[0-9]+号(?:住客|联系人|管理人|房东|协调人)"
+        ]
+      }
+    },
+    {
+      "from": "+15550500411",
+      "text": "ok, thanks",
+      "expect": {
+        "mustNotIntroduce": true,
+        "replyMustNotMatch": [
+          "[Ww]hat should I call you|[Hh]ow should I (?:call|address) you|[Ww]hat(?:'s| is) your name|怎么称呼|叫什么|贵姓",
+          "[0-9]+号(?:住客|联系人|管理人|房东|协调人)"
+        ]
+      }
+    }
+  ]
+}

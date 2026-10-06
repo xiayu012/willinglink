@@ -35,6 +35,7 @@ import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
 import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
 import { HISTORY_BUDGET, planHistory } from "./history-policy";
 import { shouldCollectRoster } from "./intake-once";
+import { selfNameUnknown } from "./membership-facts";
 import {
   decideLanguage,
   observeLanguage,
@@ -2209,11 +2210,25 @@ export async function runColivingTurn(args: {
    * **名册那一半挂 `shouldCollectRoster`，不直接看 `complete`**（老板 2026-10-06）：
    * 这一户已经有人报过人时**不再收名册**——后来开口的成员不该把"谁住这儿"从头问一遍。
    * 房号那一半不放宽：这一户是哪个 Unit 还没人说过时照旧问（那是"这栋房子是哪一套"）。
+   *
+   * **第三个析取项：他本人叫什么我们还不知道**（老板 2026-10-06：「也要问对方的名字。
+   * 现在的情况是只问其他室友的名字」）。前两项管的是"这栋房子"，这一项管的是"他"：
+   * 一个已经有人报过名册、房号也已知的房子里，**新开口的这个人自己**仍然可能只是个
+   * 占位名——不加这一项，他那一轮根本装不到入门准则，他自己的名字就永远没人问。
+   * **放在最后**：前两项为真时（绝大多数首轮）不进这一次查询，常见路径一字未变；
+   * 这次查询只发生在**他第一次开口**（`history.length === 0`）且前两项都不成立时。
+   * 判据（占位名 + 没人确认过）见 `membership-facts.ts` 的 `selfNameUnknown`——
+   * 已经知道真名的人**不会**被再问一遍。
    */
   const firstEnrollmentTurn =
     history.length === 0 &&
     (!sender.unit ||
-      shouldCollectRoster(await repo.rosterStatus(sender.householdId)));
+      shouldCollectRoster(await repo.rosterStatus(sender.householdId)) ||
+      selfNameUnknown(
+        (await repo.getMembers(sender.householdId, channel)).find(
+          (m) => m.personId === sender.personId
+        )
+      ));
 
   /**
    * **第一条：首次接触那条固定的自我介绍——现在就发，早于下面所有分支和模型调用。**
@@ -2742,6 +2757,12 @@ export async function runColivingTurn(args: {
      *
      * 名册那一半同样走 `shouldCollectRoster`（见 `intake-once.ts`）：`members.length <= 1`
      * 已经蕴含"还没有别人"，显式写出来只是让**边界只有一处**。
+     *
+     * **「他本人怎么称呼」不进这一条**（2026-10-06 复审）：它只在
+     * **第一次单独接触**（上面的 `firstEnrollmentTurn`）里问一句。这里加进来的话，
+     * 他不答或转头交办别的事时，入门准则会一轮一轮跟着他，「问名字」就变成了
+     * 持续追收——正是这一轮要避免的打扰。之后他自己报出来，照旧当场用
+     * `renamePerson` 记下（`domain/onboarding.md`），但**不再由结构信号主动追**。
      */
     enrollmentOpen:
       !firstEnrollmentTurn &&
@@ -4000,19 +4021,59 @@ export async function runColivingTurn(args: {
     renamePerson: tool({
       description:
         "改某个人的显示名。自然听出真名才用（本人说「我是小王」或别人提到）；" +
-        "要称呼他却不知名字时，问一句「怎么称呼你」是自然的，问到了就记。",
+        "要称呼他却不知名字时，问一句「怎么称呼你」是自然的，问到了就记。" +
+        "**本人说他自己是谁就带 `self: true`**：那一次按人认、不按名字找。",
       inputSchema: z.object({
-        currentName: z.string().describe("现在系统里叫什么（占位名或旧名）"),
+        currentName: z
+          .string()
+          .optional()
+          .describe("现在系统里叫什么（占位名或旧名）；`self: true` 时可省"),
         newName: z.string().describe("听出来的真名或他希望被怎么称呼"),
         confirmed: z
           .boolean()
           .optional()
           .describe("true=他本人说的；false=从别人嘴里听来的，可能不准"),
+        self: z
+          .boolean()
+          .optional()
+          .describe(
+            "true=发信人在说他自己是谁（名字对不上也照改）；别人替他报的名字别带"
+          ),
       }),
-      execute: async ({ currentName, newName, confirmed }) => {
-        const m = await repo.findPersonByName(sender.householdId, currentName);
+      execute: async ({ currentName, newName, confirmed, self }) => {
+        // **`self:true` 走人，不走名字。** 名字是给人看的一栏，不是身份：
+        // 名册上可以有两个不同的人顶着同一个占位名，按名字找会把**别人的**
+        // 名字改掉。绑定用 `sender.personId`——他就是这一轮跟你说话的那个人，
+        // 所以先核一下他确实还在这栋房子的活跃名册里，认不出就一个字节都不改。
+        if (self) {
+          const me = (await repo.getMembers(sender.householdId)).find(
+            (m) => m.personId === sender.personId
+          );
+          if (!me) {
+            return {
+              ok: false,
+              reason: "认不出你是这套房里的哪一位，没有改任何名字",
+            };
+          }
+          await repo.renamePerson({
+            personId: me.personId,
+            name: newName,
+            confirmed: confirmed ?? true,
+          });
+          return { ok: true };
+        }
+        // 改别人：名字必须**唯一定位**到一个人（`findPersonByName`：重名 /
+        // 模糊命中不止一个都回 null）。
+        const m = currentName
+          ? await repo.findPersonByName(sender.householdId, currentName)
+          : null;
         if (!m) {
-          return { ok: false, reason: `房子里没有叫「${currentName}」的人` };
+          return {
+            ok: false,
+            reason: currentName
+              ? `房子里没有能唯一对上「${currentName}」的人（没人叫这个名，或者重名说不清是谁），没有改任何名字；如果这句话是**本人**在说他自己是谁，请带 self: true 再来一次`
+              : "改别人的名字要给 currentName，否则认不出是谁，没有改任何名字",
+          };
         }
         await repo.renamePerson({
           personId: m.personId,

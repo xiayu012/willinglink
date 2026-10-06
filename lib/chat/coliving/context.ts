@@ -17,7 +17,11 @@ import {
 } from "./repo";
 import { shouldCollectRoster } from "./intake-once";
 import { languageInstruction, type LanguageDecision } from "./language";
-import { roleLabel } from "./membership-facts";
+import {
+  nameProvenanceMark,
+  roleLabel,
+  selfNameUnknown,
+} from "./membership-facts";
 import type {
   ContextReceiptSection,
   ContextSectionsReceipt,
@@ -54,11 +58,13 @@ function describeMember(m: Member, isSelf: boolean): string {
   const tag = isSelf
     ? `（就是现在跟你说话的人${m.address ? `，号码 ${m.address}` : ""}）`
     : "";
-  // 占位名逐个标出来。**不要靠在别处写一句「名字带 X 字样的是占位符」**——
-  // 占位名格式一改那句话就静默失效（真踩过：AI 把「2号、3号」念进了短信）。
-  const placeholder = m.nameConfirmed ? "" : "〔占位名，不是真名，不可念出口〕";
+  // 名字的来历逐个标出来：**占位名**（内部编号，不许念出口）和**真名但没人
+  // 替他确认过**（室友转述来的、名册导入的）是两回事，标成同一句话会让模型
+  // 既不敢念、又不知道该不该问。判据只在 `membership-facts.ts` 里那一处
+  // （`nameProvenanceMark`）；`nameConfirmed` 那条安全线不变——没确认过照样标。
+  const nameMark = nameProvenanceMark(m);
   const notes = m.notes.length ? `：${m.notes.join("；")}` : "";
-  return `- ${m.name}${placeholder}（${role}）${tag}${notes}`;
+  return `- ${m.name}${nameMark}（${role}）${tag}${notes}`;
 }
 
 // 分节收据的形状只在纯模块 `context-receipt.ts`（零 import）里定义一处，运行时、
@@ -271,16 +277,24 @@ export async function buildContext(
         "三年。**在他自己说之前，你不知道他住了多久**；关于他目前只知道一个手机号。"
     );
     /**
-     * **开局缺的两件事实**（只陈述"不知道什么"，不写怎么问——问法在
-     * `domain/onboarding.md`）。为什么放在运行时：这两件该在第一轮问出来，
+     * **开局缺的事实**（只陈述"不知道什么"，不写怎么问——问法在
+     * `domain/onboarding.md`）。为什么放在运行时：这些该在第一轮问出来，
      * 而第一轮的话题是什么都有可能（一句 "hi" 也一样），**靠话题路由不一定命中
      * 入门准则**，漏掉就等于这一轮白过。资料齐全的人这一节根本不进
-     * （`roster.complete` 且房号已知）——所以**不构成对普通对话的额外要求**。
+     * （`roster.complete` 且房号已知、他本人的名字也确认过）——
+     * 所以**不构成对普通对话的额外要求**。
      *
      * 缺项要说**具体到"姓名 + 手机号"**：只说"还住着谁"，模型会满足于一句
      * 「还有别人吗」——真实评测里第二条就是这么漏掉室友的。
      */
     const missing: string[] = [];
+    // 他**本人**叫什么（老板 2026-10-06：「也要问对方的名字。现在的情况是
+    // 只问其他室友的名字」）。判据在 `selfNameUnknown`：占位名 + 没人确认过。
+    // 已经报过名字的人（他自己说过、或名册里转述来且确认过的真名）不进这一条，
+    // **不会**被再问一遍；只有「手上只是个内部编号」才算不知道。
+    if (selfNameUnknown(members.find((m) => m.personId === sender.personId))) {
+      missing.push("他本人怎么称呼（我们手上还没有他的名字）");
+    }
     if (!sender.unit) {
       missing.push("这套房是哪个 Unit（房号）");
     }
@@ -295,7 +309,7 @@ export async function buildContext(
     }
     if (missing.length) {
       lines.push(
-        `**这个人的第一轮里还没有的两件事实**：${missing.join("、")}。` +
+        `**这个人的第一轮里还没有的这几件事实**：${missing.join("、")}。` +
           "他刚开口，这是问出来的自然时机（**他这一句里已经给了的就不要再问**；" +
           "他给多少就记多少）。"
       );
@@ -381,7 +395,9 @@ export async function buildContext(
   lines.push(
     "〔占位名〕是系统编的号不是真名，**任何情况下不许说进消息**——要提到又不知其名，" +
       "用位置或事情指（「另一位」「住楼上那位」），或自然问一句「怎么称呼你」" +
-      "（问到用 renamePerson 记）。**不得向一位住户披露另一位的工作/收入/身份/" +
+      "（问到用 renamePerson 记）。**标着〔还没经他本人确认〕的是真名**，可以称呼、" +
+      "可以念出口，只是别当成他自己确认过的事实用。" +
+      "**不得向一位住户披露另一位的工作/收入/身份/" +
       "健康/投诉/欠租等私事**——资料给你判断用，不外传。"
   );
   lines.push("");
