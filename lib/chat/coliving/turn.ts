@@ -34,6 +34,7 @@ import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
 import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
 import { HISTORY_BUDGET, planHistory } from "./history-policy";
+import { shouldCollectRoster } from "./intake-once";
 import {
   decideLanguage,
   observeLanguage,
@@ -2204,10 +2205,15 @@ export async function runColivingTurn(args: {
    * 只在第一轮查这一次，`&&` 短路）。它管两件事，都**跟"要不要介绍"无关**（那是下面的
    * 介绍资格）：给路由一个**结构信号** `firstEnrollment`（一句 "hi" 没有话题词，话题路由
    * 永远命不中「第一次接触」那段准则）；让两条**不收集任何登记信息**的短路让位。
+   *
+   * **名册那一半挂 `shouldCollectRoster`，不直接看 `complete`**（老板 2026-10-06）：
+   * 这一户已经有人报过人时**不再收名册**——后来开口的成员不该把"谁住这儿"从头问一遍。
+   * 房号那一半不放宽：这一户是哪个 Unit 还没人说过时照旧问（那是"这栋房子是哪一套"）。
    */
   const firstEnrollmentTurn =
     history.length === 0 &&
-    (!sender.unit || !(await repo.rosterStatus(sender.householdId)).complete);
+    (!sender.unit ||
+      shouldCollectRoster(await repo.rosterStatus(sender.householdId)));
 
   /**
    * **第一条：首次接触那条固定的自我介绍——现在就发，早于下面所有分支和模型调用。**
@@ -2733,11 +2739,14 @@ export async function runColivingTurn(args: {
      * "roommate" 会把冲突准则按**关键词**装进来，第二轮于是变成"顺带问作息"的
      * 访谈（真实英文评测第二轮）。这一轮该按**收集资料**办，所以由这个信号改装
      * 入门准则（`index.ts` 里独占那一条），把关键词那一支压掉。
+     *
+     * 名册那一半同样走 `shouldCollectRoster`（见 `intake-once.ts`）：`members.length <= 1`
+     * 已经蕴含"还没有别人"，显式写出来只是让**边界只有一处**。
      */
     enrollmentOpen:
       !firstEnrollmentTurn &&
       ctx.members.length <= 1 &&
-      (!sender.unit || !ctx.roster.complete),
+      (!sender.unit || shouldCollectRoster(ctx.roster)),
   };
 
   const { doctrine, runtime, loadedModuleIds, chars } = assembleSystemPrompt({
@@ -3977,9 +3986,13 @@ export async function runColivingTurn(args: {
         const status = await repo.rosterStatus(sender.householdId);
         return {
           ok: true,
+          // **不再收名册时不许在这句回执里带出"还差几个"**——那等于当场又给模型
+          // 一个去补收的理由（老板 2026-10-06 要停的正是这件事）。数字照记。
           note: status.complete
             ? "记下了，名册已经齐了，以后不会再问这个"
-            : `记下了，还差 ${total - status.knownCount} 个人的号码`,
+            : status.intakeSupplied
+              ? "记下了。这一户的名册已经有人报过，不用再去问缺的那几位号码"
+              : `记下了，还差 ${total - status.knownCount} 个人的号码`,
         };
       },
     }),

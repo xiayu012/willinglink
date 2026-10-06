@@ -2,6 +2,7 @@ import "server-only";
 
 import postgres from "postgres";
 import { assertCanWrite } from "./guard";
+import { householdIntakeSupplied } from "./intake-once";
 import { normalizePhone } from "./phone";
 
 /**
@@ -2255,23 +2256,44 @@ export async function finishOutreachRun(args: {
 export async function rosterStatus(householdId: string): Promise<{
   declaredSize: number | null;
   knownCount: number;
+  /**
+   * **这一户历史上记过的人**：按人去重，**含已离开的（`valid_to` 非空）与明确不住
+   * 这儿的**。只增不减——所以「不用再收名册」不会因为有人搬走、名册只剩一个人在册
+   * 又重新开口（见 `intake-once.ts` 的两条反例）。
+   */
+  historicalCount: number;
   complete: boolean;
+  /**
+   * **这一户已经有人报过人了**（不止一个人被记过）——判据与边界见 `intake-once.ts`
+   * （老板 2026-10-06）。**是推导出来的、不是存下来的**（跟 `complete` 一样）：
+   * 不新增列、不新增迁移。**停止收集 ≠ 名册齐全**，这一项为 true 时 `complete`
+   * 仍可能是 false（真实那一户就没人报过总人数）。
+   */
+  intakeSupplied: boolean;
 }> {
   const [row] = await db()<
-    { declaredSize: number | null; knownCount: number }[]
+    { declaredSize: number | null; knownCount: number; historicalCount: number }[]
   >`
     select h.declared_size as "declaredSize",
            (select count(*)::int from coliving.membership mb
              where mb.household_id = h.id and mb.valid_to is null
-               and mb.resides is not false) as "knownCount"
+               and mb.resides is not false) as "knownCount",
+           -- 历史人数：**不过滤 valid_to、不过滤 resides**（离开的人与宿管都算"报过"）
+           (select count(distinct mb.person_id)::int from coliving.membership mb
+             where mb.household_id = h.id) as "historicalCount"
     from coliving.household h where h.id = ${householdId}
   `;
   const declaredSize = row?.declaredSize ?? null;
   const knownCount = row?.knownCount ?? 0;
+  const historicalCount = row?.historicalCount ?? 0;
+  const complete = declaredSize !== null && knownCount >= declaredSize;
   return {
     declaredSize,
     knownCount,
-    complete: declaredSize !== null && knownCount >= declaredSize,
+    historicalCount,
+    complete,
+    // 判据在 `intake-once.ts`（纯模块、可离线测）：这里只喂事实，不写第二套阈值。
+    intakeSupplied: householdIntakeSupplied({ historicalCount, complete }),
   };
 }
 

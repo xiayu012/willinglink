@@ -1,0 +1,21 @@
+{
+  "id": "corpus-059-open-onboarding-english-introduce-request-2026-10-06",
+  "source": "2026-10-06 老板批准的窄范围语气修正（只改准则措辞，不改运行时）的英文回归之二：第一句就是**介绍你自己的请求**，而这也正是他第一次开口（`onboarding`，房间空的、不预置任何人；号码是虚构测试号段，跑批时换成真号）。\n\n这一轮最容易出两种毛病，都不是本场景要钉的措辞问题，而是**结构**问题：① 第二条把刚发出去的那条固定介绍又抄一遍（同一段介绍连发两遍）；② 只顾着介绍自己，把还缺的房号和室友漏掉。所以这里只钉三件确定的事：第一条固定介绍真的发出去了、第二条问出 Unit、第二条问出室友 + **明确写 phone number(s)**。\n\n**不钉任何禁用措辞**：介绍以什么口气写、有没有把「我不是管理员」讲成一段免责声明，由 Codex 逐轮人工读报告判断（机械断言证明不了语气）。语气侧对应的准则改动在 `always/craft.md`（不把角色写成「管这栋房子的人」）与 `domain/onboarding.md`（这两件是帮他和同屋接上头，不是登记）。全部号码与姓名都是虚构测试数据。",
+  "onboarding": true,
+  "household": { "label": "评测-059 陌生号码英文自我介绍请求" },
+  "turns": [
+    {
+      "from": "+15550590001",
+      "text": "hi, can you introduce yourself?",
+      "expect": {
+        "mustIntroduce": true,
+        "replyMustMatch": [
+          "[Uu]nit|[Aa]partment (?:number|no)",
+          "[Nn]ames?",
+          "[Pp]hone\\s*numbers?",
+          "[Rr]oommate|who else|live with|other (?:people|residents)"
+        ]
+      }
+    }
+  ]
+}

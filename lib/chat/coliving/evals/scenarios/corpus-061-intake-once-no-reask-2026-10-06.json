@@ -1,0 +1,49 @@
+{
+  "id": "corpus-061-intake-once-no-reask-2026-10-06",
+  "source": "老板 2026-10-06 的那条要求：「只需要一个人说过就彻底结束。不再问任何了。宁愿漏人也要少打扰用户。」真实事故（household e710dceb…，只读证据）：一个人报过房号 b405 并报了两位室友的姓名号码之后，**另一位成员**（同一户、已经收到过固定介绍）开口说 hello，收到的却是「who else lives in the house with you? Their names and phone numbers」——同一户被从头收第二遍名册。\n\n判据落在 `intake-once.ts`（纯模块、可离线测）：**这一户历史上记过的人不止一个**（按人去重，含已离开的与明确不住这儿的，只增不减）→ 不再向住户收名册。运行时两个来源都挂同一个判据：结构信号（`firstEnrollment` / `enrollmentOpen`，`turn.ts`）与运行时上下文里那一节名册说明（`context.ts`）。**停止收集 ≠ 名册齐全**：`complete` 仍按 `declared_size` 算，这一户没人报过总人数，所以停了之后名册照旧可能漏人。\n\n三轨钉的事实（一间空测试屋、不预置任何人，Alex / Devon / Marisol / Priya 与四个号码全是虚构测试数据，用项目统一的 555 测试号段，跑批时换成本次运行独有的真号）：\n\n1. **A 一次把房号和两位室友的姓名号码报齐** → 房号被系统认下来（clean HEAD 的评测 schema 还不认识 `mustRecordUnit` 这个观测字段，所以「这一轮的房号有没有真的记下来」留给人读报告核对，本场景不拿字段断言）、两个号码照旧走 `addResident`；已经说过的房号不许再问一遍，也不许顺带把「roommate」当关键词做起息访谈。这一轮**不设** `mustNotIntroduce`（他第一次开口，那条固定介绍本来就该发）。\n2. **B（室友之一）第一次开口说 hello** → **那条固定自我介绍照旧发**（介绍资格按人算，跟历史 / 名册都无关：老板要停的只有收名册这一件事），而**收名册的话一个字都不许再出现**——这一轮就是主回归断言，旧代码下它是红的（名册没齐 → 结构信号装入门准则，或运行时上下文那节名册说明直接叫模型「先问一句这屋一共住几个人」，两处都指向同一句重复提问）。\n3. **A 后来主动补第三位室友的号码** → 停止收名册**不等于**拒收：他主动报的照收（`addResident`），也不许反过来把「还差几位」再问一遍（那句话正是老板要停的）。\n\n**故意不设的两条**（免得被当成漏了）：① 这一户房号已知，但 B 那一轮**不设**「不许再问房号」——房号那一半**不在这条边界里**（还没人说过 Unit 时照旧该问，见任务书「disambiguating an unknown shared Unit」）；② 不设 `singleHousehold` / `mustLandUnit` / `mustSenderName`：这条场景不测跨号码并房，也不测谁被认成谁，那些各有自己的场景。\n\n**已知限制**（写清楚免得被当成证据）：本场景**没有花过钱跑过**（老板交代只做离线小样），所以它是一条**待跑**的回归断言，不是已跑通的实测结果；真实跑批时第 2 轮那句回复会不会真的出现重复提问，由报告逐轮人工读——本场景只把「不许出现」写成确定性断言。另外，第 1 轮模型会不会同时给新加的室友发一条打招呼，取决于它当轮的选择，两种走法第 2 轮的判定都成立（有没有那条出站都不影响固定介绍按人发、也不影响名册那两处来源被同一判据关掉）。",
+  "onboarding": true,
+  "household": { "label": "评测-061 同户第二人不再被收名册" },
+  "turns": [
+    {
+      "from": "+15550610001",
+      "text": "Hi, I'm Alex. I'm in Unit B407. My roommates are Devon (15550610002) and Marisol (15550610003) — those are their phone numbers.",
+      "expect": {
+        "mustIntroduce": true,
+        "mustUseTools": ["addResident"],
+        "replyMustNotMatch": [
+          "[Ww]hich unit|[Ww]hat(?:'s| is) your unit|[Ww]hat unit",
+          "[Uu]sual hours|generally home|sleep schedule|night shift|作息|几点(?:睡|起)|夜班"
+        ]
+      }
+    },
+    {
+      "from": "+15550610002",
+      "text": "Hi, this is Devon.",
+      "expect": {
+        "mustIntroduce": true,
+        "replyMustNotMatch": [
+          "[Ww]ho else (?:lives|is living|shares|resides|is (?:there|in the house))",
+          "[Aa]ny other (?:roommates?|residents?|tenants?|housemates?|people)",
+          "[Nn]ames?\\s+and\\s+phone\\s+numbers?",
+          "[Hh]ow many (?:people|residents|roommates|of you)",
+          "[Ww]ho (?:are you living with|do you live with|else is in the house)"
+        ]
+      }
+    },
+    {
+      "from": "+15550610001",
+      "text": "Oh, one more — our other roommate is Priya, her number is 15550610004. I forgot to mention her earlier.",
+      "expect": {
+        "mustNotIntroduce": true,
+        "mustUseTools": ["addResident"],
+        "replyMustNotMatch": [
+          "[Ww]ho else (?:lives|is living|shares|resides|is (?:there|in the house))",
+          "[Aa]ny other (?:roommates?|residents?|tenants?|housemates?|people)",
+          "[Nn]ames?\\s+and\\s+phone\\s+numbers?",
+          "[Hh]ow many (?:people|residents|roommates|of you)",
+          "[Ww]ho (?:are you living with|do you live with|else is in the house)"
+        ]
+      }
+    }
+  ]
+}

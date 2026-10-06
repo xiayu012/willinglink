@@ -1,0 +1,21 @@
+{
+  "id": "corpus-058-open-onboarding-english-greeting-2026-10-06",
+  "source": "2026-10-06 老板批准的窄范围语气修正（只改准则措辞，不改运行时）的英文回归之一：**一句招呼、别的一个字都没有**。房间里没有预置任何人（`onboarding`），号码是虚构的测试号段，跑批时换成本次运行独有的真号；谁也不认识谁。\n\n要看的不是结构（结构另有断言），是**这句话读起来是什么口气**：平等地问一句，还是柜台/管理员在收登记（AI 是协调员，不是同住的人，别写成室友口吻）。2026-10-06 之前的真实英文入门第一条曾被准则里的一句「你不是客服台，是管这栋房子的人」带成管理者口吻——「Hi. Two things so I've got the house straight: which unit are you in, and who else lives here — their names and phone numbers?」。**本场景不钉任何禁用措辞**：语气好不好由 Codex 逐轮人工读报告判断（机械断言证明不了语气，见 `docs/FEATURE_RUNTIME_ARCHITECTURE.md`）。\n\n结构上只钉三件确定的：① 第一条固定自我介绍真的发出去了（`mustIntroduce`，它不是 reply，正则碰不到）；② 第二条问出这套房的 Unit；③ 第二条问出室友是谁、以及**明确写 phone number(s)**（bare \"numbers\" 会和刚报的房号混，见 `domain/onboarding.md`）。全部号码与姓名都是虚构测试数据。",
+  "onboarding": true,
+  "household": { "label": "评测-058 陌生号码英文招呼" },
+  "turns": [
+    {
+      "from": "+15550580001",
+      "text": "hello",
+      "expect": {
+        "mustIntroduce": true,
+        "replyMustMatch": [
+          "[Uu]nit|[Aa]partment (?:number|no)",
+          "[Nn]ames?",
+          "[Pp]hone\\s*numbers?",
+          "[Rr]oommate|who else|live with|other (?:people|residents)"
+        ]
+      }
+    }
+  ]
+}

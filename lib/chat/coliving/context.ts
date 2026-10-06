@@ -15,6 +15,7 @@ import {
   rosterStatus,
   type Sender,
 } from "./repo";
+import { shouldCollectRoster } from "./intake-once";
 import { languageInstruction, type LanguageDecision } from "./language";
 import { roleLabel } from "./membership-facts";
 import type {
@@ -75,8 +76,17 @@ export type ColivingContext = {
    * 生成器靠这个判断"该不该问总人数"，批判器也需要同一份数据——
    * 否则批判器只看得到 members 列表里已知的几个名字，会把「名册没收全，
    * 该问总人数」的合法提问，误判成"人数明明知道、何必再问"（第18轮踩过）。
+   *
+   * `intakeSupplied` = 「这一户已经有人报过人，不再向住户收名册」（判据见
+   * `intake-once.ts`），**不是** `complete` 的另一种写法：两件不同的事实。
    */
-  roster: { declaredSize: number | null; knownCount: number; complete: boolean };
+  roster: {
+    declaredSize: number | null;
+    knownCount: number;
+    historicalCount: number;
+    complete: boolean;
+    intakeSupplied: boolean;
+  };
   /**
    * 本轮上下文的分节收据（只记分节 id 与字符数，不记正文），见
    * `context-receipt.ts` 的 `ContextReceipt`。与 `text` 同时产出：收据描述的
@@ -274,7 +284,9 @@ export async function buildContext(
     if (!sender.unit) {
       missing.push("这套房是哪个 Unit（房号）");
     }
-    if (!roster.complete) {
+    // 名册那一半只在**这一户还没人报过人**时才提（`intake-once.ts`，老板 2026-10-06）。
+    // 房号那一半不放宽：这一户是哪个 Unit 还没人说过时照旧问。
+    if (shouldCollectRoster(roster)) {
       missing.push(
         roster.declaredSize === null
           ? "这屋还住着谁——每位室友的姓名和手机号（名册上目前只有我们已经拿到号码的人）"
@@ -351,14 +363,20 @@ export async function buildContext(
   lines.push(
     roster.complete
       ? "**名册已确认完整**，分配共用资源就按上面确认住在这里的人数算。"
-      : roster.declaredSize !== null
-        ? `**⚠️ 有人说过这屋一共住 ${roster.declaredSize} 人，` +
-          `但名册上只有 ${roster.knownCount} 个。** ` +
-          `还差 ${roster.declaredSize - roster.knownCount} 个人的号码，问到了就用 addResident 加进来。`
-        : "**⚠️ 名册还没确认过完整性。** 分配共用资源之前，" +
-          "要么先问一句这屋一共住几个人（**问到了立刻用 confirmRoster 记下来**，" +
-          "不记的话下一轮你还会再问一遍），要么在给方案时说清这是按目前知道的人算的。" +
+      : roster.intakeSupplied
+        ? "**⚠️ 名册还没确认过完整性，但这一户已经有人报过——不再向住户收名册。** " +
+          "**不要再问「这屋还住着谁」「一共住几个人」**（这户已经答过一轮，换个人再问一遍" +
+          "就是打扰）；他主动报上来的名字 / 号码照收（用 addResident 加）。" +
+          "分配共用资源之前，在方案里说清这是按上面名册上的人数算的——" +
           "**不要笃定地说「三个人分」，除非你真的确认过只有三个人。**"
+        : roster.declaredSize !== null
+          ? `**⚠️ 有人说过这屋一共住 ${roster.declaredSize} 人，` +
+            `但名册上只有 ${roster.knownCount} 个。** ` +
+            `还差 ${roster.declaredSize - roster.knownCount} 个人的号码，问到了就用 addResident 加进来。`
+          : "**⚠️ 名册还没确认过完整性。** 分配共用资源之前，" +
+            "要么先问一句这屋一共住几个人（**问到了立刻用 confirmRoster 记下来**，" +
+            "不记的话下一轮你还会再问一遍），要么在给方案时说清这是按目前知道的人算的。" +
+            "**不要笃定地说「三个人分」，除非你真的确认过只有三个人。**"
   );
   lines.push(
     "〔占位名〕是系统编的号不是真名，**任何情况下不许说进消息**——要提到又不知其名，" +

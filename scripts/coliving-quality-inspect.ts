@@ -4480,6 +4480,34 @@ async function main() {
     assert.deepEqual([...COORDINATOR_IDENTITY_ANCHORS], ["AI"], "报身份的锚点就是「AI」不能省");
   });
 
+  /**
+   * **常驻层内部不能自相矛盾：craft 讲语气那句不得把角色写成「管这栋房子的人」。**
+   *
+   * `always/identity.md` 是权威口径（「是『协调员』，不是『管理员』……不自称管理员、
+   * 不说「归我管」」），而 `always/craft.md` 反客服腔那一条曾经收在一句「你不是客服台，
+   * 是管这栋房子的人」上：2026-10-06 的真实英文入门第一条正是被这句带成了管理者口吻
+   * （「Hi. Two things so I've got the house straight: which unit are you in, and
+   * who else lives here — their names and phone numbers?」）。
+   *
+   * **这条只查我们自己的准则文本，不查模型回复**：判的是「这句话还在不在 doctrine 里」，
+   * 不是给住户可见的回复立禁词表——回复的措辞由 doctrine 与逐轮人工阅读管，机械断言
+   * 证明不了语气（见 `docs/FEATURE_RUNTIME_ARCHITECTURE.md` 的「机械检查证明什么」）。
+   */
+  check("常驻层身份口径一致：craft 不再把协调员写成「管这栋房子的人」", () => {
+    const craft = readFileSync(
+      "lib/ai/brains/coliving/doctrine/always/craft.md",
+      "utf8"
+    );
+    assert(
+      !craft.includes("管这栋房子的人"),
+      "craft.md 不得再把角色写成「管这栋房子的人」——那是管理员口吻，与 identity.md 的「协调员，不是管理员」直接冲突"
+    );
+    assert(
+      craft.includes("不是这栋房子的管理员") && craft.includes("协调员"),
+      "craft.md 讲「别滑到客服腔」那句必须把角色锚回「协调员 / 不是管理员」，不许只删掉旧说法、留下一段没有身份的话"
+    );
+  });
+
   check("自称问答：中文问句只读内容文件的中文身份段，别的问法不背这一段", () => {
     const selfBundle = buildFeatureQaFacts({
       openFeatures: OPEN_FEATURES,
