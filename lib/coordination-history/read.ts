@@ -2,6 +2,8 @@ import "server-only";
 
 import postgres from "postgres";
 
+import { unitDisplayName } from "./display-name";
+
 /**
  * 「协调历史」公开只读页的数据访问层。
  *
@@ -58,6 +60,13 @@ export type HistoryMessage = {
 
 export type HistoryHousehold = {
   id: string;
+  /**
+   * 展示名：左栏列表、中栏标题、搜索框读的都是它。
+   *
+   * **优先已记录的房号（`dwelling.unit`）**，没记录过房号才回退导入时给的
+   * `household.label`；判定见 `display-name.ts`。字段名仍叫 `label`，因为
+   * 展示层只是把它当「这一行叫什么」用，不关心它是从哪一列来的。
+   */
   label: string;
   status: string;
   /** 隔离测试屋。页面上标出来，免得演示时把测试数据当成真实住户 */
@@ -88,6 +97,8 @@ type HouseholdRow = {
   status: string;
   is_test: boolean;
   created_at: Date;
+  /** 这套房记录在案的房号。**没记录过就是 null**（导入的房子常常只有 label） */
+  unit: string | null;
 };
 
 type MembershipRow = {
@@ -135,12 +146,24 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
       //     的判据：shadow_run 里那三栋、加上最早手工建的这栋，都叫这个前缀。
       //
       // 判断在 SQL 这一层做，不靠前端隐藏。
+      //
+      // `left join dwelling` **只为取显示用的房号**（`d.unit`），显示规则见
+      // `display-name.ts`。两点别改坏：
+      //   · 排除判据仍看 `h.label`——「影子验证」前缀是命名约定，跟房号无关，
+      //     换成 unit 判断就漏掉「有 unit 的影子房」、误伤「没 unit 的真实房」。
+      //   · **没有 group by / distinct**：两栋不同的房子可以是同一个房号，
+      //     按房号收拢会让两组人的记录在页面上塌成一条。一栋房子一行。
+      //
+      // join 进来之后 `id` / `label` / `created_at` 两边都有，**必须带表别名**，
+      // 否则 Postgres 直接报 ambiguous；`status` / `is_test` 只有 household 有，
+      // 也一并写上，读的人不用回头查列到底在哪张表。
       sql<HouseholdRow[]>`
-        select id, label, status, is_test, created_at
-        from coliving.household
-        where is_test = false
-          and label not like '影子验证%'
-        order by created_at desc
+        select h.id, h.label, h.status, h.is_test, h.created_at, d.unit
+        from coliving.household h
+        left join coliving.dwelling d on d.id = h.dwelling_id
+        where h.is_test = false
+          and h.label not like '影子验证%'
+        order by h.created_at desc
       `,
       sql<MembershipRow[]>`
         select m.household_id, m.person_id, p.display_name, m.role, m.resides
@@ -234,7 +257,8 @@ export async function readCoordinationHistory(): Promise<CoordinationHistoryData
 
         return {
           id: h.id,
-          label: h.label,
+          // 展示名：房号优先，没记录过房号才回退导入给的 label
+          label: unitDisplayName(h.unit, h.label),
           status: h.status,
           isTest: h.is_test,
           people: everyone,
