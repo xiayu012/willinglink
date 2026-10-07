@@ -608,3 +608,60 @@ schema 与工具选择仪式），又让「能不能发」变成事后把关。�
 **默认宽容下不要再新建「清单外 = 拒绝」的路径**：真正办不了的事项由老板登记进
 `blacklist.ts`，而不是靠路由默认拒绝。**不要**恢复企业微信、小红书私信、cron 主动发起
 或 LLM 批判 / 重写。
+
+## 只读窗口 `/coordination-history` 的实时更新（2026-10-06）
+
+那一页是**公开、只读、靠 URL 分享**给合作方看的窗口（`app/coordination-history/`）。
+老板 2026-10-06 否掉了原先「前台每 30 秒重读一次」的做法：「三十秒太长了。一有
+消息短信任何动静就要更新。」——周期没有变小的余地（三秒一次等于每隔三秒把整页
+重读一遍，绝大部分时候什么都没变），所以信号改由**写库那一方**发出来：
+
+```
+写库（收短信的 Twilio 回调等，任意实例）
+  → Postgres 触发器 pg_notify('coordination_history_change', '1')
+  → 每个 Vercel 实例一条 LISTEN   lib/coordination-history/change-feed.ts
+  → SSE                            app/api/coordination-history/events/route.ts
+  → 浏览器 EventSource             lib/coordination-history/live-updates.ts
+  → startTransition(() => router.refresh())
+```
+
+**走数据库、不走进程内存**：页面同时活在好几个实例上，写库的还可能是另一个
+实例，内存里的 EventEmitter 只通知得到自己那一个。
+
+- **通道上只有常量 `'1'`**：没有房号、人名、电话、正文。谁改了什么不走这条路，
+  前端收到信号去请求那一页，过滤照旧由服务端做（`is_test`、影子房）。顺带一个
+  好处：同一事务里内容相同的通知 Postgres 只投递一条，一次导入十一个人只推
+  一个信号——**常量载荷本身就是合并机制**。
+- **`is_test` 的房子整栋不发声**（判据就是这一列，这一批不读也不改它的语义）。
+  影子房的 `label like '影子验证%'` **没有**进触发器：那是展示层的命名约定，
+  抄进 SQL 等于焊死；真要治就给影子房补一个显式标记列。
+- **写路径优先级最高**：触发器挂在 `coliving.message` 的 INSERT 上，而住户的短信
+  就是这样落库的——触发器里任何异常都会让**那条消息永久丢掉**。所以每个函数
+  整个身体包在 `exception when others` 里：出任何事只是这一轮不实时，绝不向外抛。
+- **连接必须直连**：`LISTEN` 是会话级的，Neon 的池化地址后面是 PgBouncer
+  （transaction 模式），挂不住。地址按 `POSTGRES_URL_NON_POOLING` →
+  `DATABASE_URL_UNPOOLED` → 从 `POSTGRES_URL` 去掉 **`*.neon.tech` 主机名**里的
+  `-pooler` 推出来（`direct-url.ts`）；仓库里当前没有前两个键，走的是推导。
+  池化查询流量（`read.ts`）不受影响：`sql.listen()` 内部另开一条专用连接。
+- **不会偷偷退回轮询**：源连不上时路由**不发 `ready`**，只回 `retry: 30000` 然后
+  关；客户端只在收到过 `ready` 的连接上补刷，所以那条重试循环里**一次都不会重读
+  页面**。每 4 分钟主动轮换一次（`ROTATE_MS`，远早于 `maxDuration = 300`），新
+  连接照例发 `ready`，客户端借此补上断开那几十毫秒里漏掉的信号。
+- 挂后台 / 断网时**连接直接关掉**；回前台重连后的 `ready` 顺带补刷。一次重读可能
+  跑好几秒，这期间的信号只记一个待办，落地后补一次，不叠发。
+- **一个视图都不在时那条数据库连接要真的关掉**（`change-listener.ts` 管引用计数）：
+  postgres.js 的 `unlisten()` **只发一条 `UNLISTEN`，不关 TCP**——那条连接是
+  `listen()` 内部另开的专用实例（`idle_timeout: null`，本来就是长活的），只
+  unlisten 的话没人看时库上还挂着一条永远不走的空闲连接。关它只能对当初调
+  `listen()` 的那个实例调 `end()`（**带 `timeout: 3` 秒**：这一步在串行队列里
+  await，库不可达时无上限地挂会把后面所有订阅一起堵死）；`end()` 是单向的，所以
+  关掉的那个实例直接丢弃，下一个订阅重新开——而「取客户端」这个动作必须排在串行
+  队列**里面**，否则「退订还在排队 → 新视图订阅」会拿到那个马上要被关掉的实例。
+
+**迁移**：`lib/db/migrations/manual/coliving-world-20.sql`（7 个触发器：message /
+conversation / communication / membership / household / person / dwelling；可重复
+执行，回滚 SQL 在文件末尾注释里）。**无鉴权变化**：`proxy.ts` 里
+`/api/coordination-history/` 那条放行本来就盖到 SSE 路由。确定性单测（假流、假
+调度器、假数据库客户端，零数据库）：
+`lib/coordination-history/live-updates.test.ts`、`direct-url.test.ts`、
+`change-listener.test.ts`。

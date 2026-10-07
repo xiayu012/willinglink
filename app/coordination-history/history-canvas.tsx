@@ -13,7 +13,11 @@ import {
 } from "react";
 import { useDropzone } from "react-dropzone";
 
-import { createAutoRefresh } from "@/lib/coordination-history/auto-refresh";
+import {
+  createLiveUpdates,
+  LIVE_FEED_URL,
+  type LiveUpdatesController,
+} from "@/lib/coordination-history/live-updates";
 import type {
   ImportFailure,
   ImportReport,
@@ -87,9 +91,10 @@ import type {
  * `lib/coordination-history/import.ts`）：文件拖进去 / Ctrl+V 粘进去 / 点它
  * 选一个，三条路都通。除此之外这里不发送任何写请求。
  *
- * 写只有那一处；**读是另一回事**：这一页会自己把服务端数据重读一遍（标签页在
- * 前台、浏览器在线时每 30 秒一次，见 `lib/coordination-history/auto-refresh.ts`），
- * 所以旁边有人发了消息，看着这一页的人不用自己去按浏览器刷新。
+ * 写只有那一处；**读是另一回事**：这一页会自己把服务端数据重读一遍——库里一有
+ * 动静就重读（Postgres `LISTEN/NOTIFY` → SSE，见
+ * `lib/coordination-history/live-updates.ts`），所以旁边有人发了消息，看着这一页
+ * 的人几乎同时就能看见，不用自己去按浏览器刷新。
  * ────────────────────────────────────────────────────────────────────────── */
 
 /** 中枢自己的颜色。永远是圆角方块，跟人的圆点区分开 */
@@ -834,21 +839,21 @@ export function HistoryCanvas({
   }, [household?.id]);
 
   /**
-   * 后台自动刷新：**只在这一页被人看着的时候**（前台 + 在线），每 30 秒把服务端
-   * 数据重读一遍。什么时候刷、什么时候停全在
-   * `lib/coordination-history/auto-refresh.ts`（纯逻辑、假时钟单测），这里只把
-   * 环境信号接上去。
+   * 后台实时更新：**库里一有动静就把服务端数据重读一遍**，不是定时轮询。
+   * 什么时候重读、什么时候把连接停掉全在 `lib/coordination-history/live-updates.ts`
+   * （纯逻辑、假流单测），这里只把环境信号和 React 接上去。
    *
    * `router.refresh()` 不重挂组件，所以选中的套房、筛选词、成员抽屉、导入回执
    * 都留着，URL 也不动。
    */
   const [refreshing, startRefresh] = useTransition();
-  // **刷新还在路上时不要再发第二次**：一次刷新可能比一个间隔还久，
-  // `useTransition` 的 `isPending` 会一直为真到它落地。
+  // **重读还在路上时不要再发第二次**：一次可能跑好几秒，`useTransition` 的
+  // `isPending` 会一直为真到它落地。控制器把这期间的信号记成一个待办，等下面
+  // 那个「落地了」的 effect 再补一次。
   //
-  // 两个 ref 是为了让下面那个 effect 的依赖是空的：`useRouter()` 返回的对象只要
-  // 每渲染换一次，写进依赖就会让控制器每次渲染重挂，30 秒倒计时被反复拨回原点，
-  // 自动刷新会静悄悄地不工作。
+  // 三个 ref 是为了让下面那个 effect 的依赖是空的：`useRouter()` 返回的对象只要
+  // 每渲染换一次，写进依赖就会让控制器每次渲染重挂，连接被反复掐断重连。
+  const liveRef = useRef<LiveUpdatesController | null>(null);
   const refreshRef = useRef<() => void>(() => {});
   const refreshingRef = useRef(false);
   useEffect(() => {
@@ -857,7 +862,8 @@ export function HistoryCanvas({
   });
 
   useEffect(() => {
-    const controller = createAutoRefresh({
+    const controller = createLiveUpdates({
+      url: LIVE_FEED_URL,
       refresh: () => refreshRef.current(),
       isBusy: () => refreshingRef.current,
       // 信号现读，不缓存挂载时那份：后台标签页被冻住时会错过 online 事件
@@ -866,6 +872,7 @@ export function HistoryCanvas({
         online: navigator.onLine,
       }),
     });
+    liveRef.current = controller;
 
     // 切前后台、窗口聚焦、断网、恢复走同一条判断
     const onSignal = () => controller.sync();
@@ -881,9 +888,17 @@ export function HistoryCanvas({
       window.removeEventListener("focus", onSignal);
       window.removeEventListener("online", onSignal);
       window.removeEventListener("offline", onSignal);
+      liveRef.current = null;
       controller.stop();
     };
   }, []);
+
+  // 这一轮重读落地了：路上收到的信号攒在控制器里，这里叫它看一眼
+  useEffect(() => {
+    if (!refreshing) {
+      liveRef.current?.sync();
+    }
+  }, [refreshing]);
 
   function switchHousehold(next: string) {
     setHouseholdId(next);
