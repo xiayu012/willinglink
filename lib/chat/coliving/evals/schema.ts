@@ -266,6 +266,15 @@ export type ScenarioTurn = {
 export type ScenarioExpectation = {
   /** 至少多少条出站通过审稿、可供投递。离线评测仍不真的发短信。 */
   minAcceptedOutbound?: number;
+  /**
+   * **至多多少条出站通过审稿**——用来钉死「同一条规则同一个人只收到一条」。
+   *
+   * 上限和下限是一对：`minAcceptedOutbound` 抓「该发没发」（定案通知整个漏掉），
+   * 这一条抓「发重了」（2026-10-07 付费跑测 corpus-064：模型自己用 `contactPerson`
+   * 给 Elena／Marcus 各发了一条定案通知，代码派发又各发了一条，**每人收到两条**）。
+   * 只查**通过审稿**的出站，与下限同口径——被拦下的草稿没送达，不算多。
+   */
+  maxAcceptedOutbound?: number;
   /** toolsUsed 必须包含全部这些工具，否则判失败 */
   mustUseTools?: string[];
   /**
@@ -360,6 +369,11 @@ export function evaluateTurnExpectation(
   if (expect.minAcceptedOutbound !== undefined && acceptedCount < expect.minAcceptedOutbound) {
     failures.push(
       `应有至少 ${expect.minAcceptedOutbound} 条通过审稿的出站，实际 ${acceptedCount} 条；调用联系工具不等于联系成功`
+    );
+  }
+  if (expect.maxAcceptedOutbound !== undefined && acceptedCount > expect.maxAcceptedOutbound) {
+    failures.push(
+      `至多只能有 ${expect.maxAcceptedOutbound} 条通过审稿的出站，实际 ${acceptedCount} 条；同一条规则同一个人重复通知是真实事故`
     );
   }
   for (const t of expect.mustUseTools ?? []) {

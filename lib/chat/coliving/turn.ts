@@ -32,7 +32,9 @@ import {
 } from "./onboarding";
 import { APPROVED_FEATURES, runApprovedFeature } from "./features";
 import { isFeatureQaQuestion, runFeatureQa } from "./feature-qa";
-import { addFeatureUsage, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
+import { addFeatureUsage, EMPTY_FEATURE_USAGE, productionFeatureLlm, usageOfFeatureError } from "./feature-llm";
+import { dispatchPendingFinalNotices } from "./final-notice-dispatch";
+import { isAbortError } from "./abort-error";
 import { HISTORY_BUDGET, planHistory } from "./history-policy";
 import { shouldCollectRoster } from "./intake-once";
 import { selfNameUnknown } from "./membership-facts";
@@ -46,7 +48,13 @@ import {
 import { scheduleAffirmationReply } from "./schedule-affirmation";
 import type { FeatureHandling } from "./feature-types";
 import * as repo from "./repo";
-import { deliverSms, resolveNamedRecipient, smsDeliveryDeps } from "./sms-delivery";
+import {
+  deliverFinalNoticeReply,
+  deliverFinalNoticeSms,
+  deliverSms,
+  resolveNamedRecipient,
+  smsDeliveryDeps,
+} from "./sms-delivery";
 import { activeHouseholdFeatureIds } from "./household-feature-grants";
 import {
   advanceRuleConsultationSession,
@@ -401,6 +409,17 @@ export const TRUTHFUL_UNSENT_REPLY_EN =
  */
 export const STANCE_ACK_REPLY = "好，你的表态我已经记下了。";
 export const STANCE_ACK_REPLY_EN = "Okay — I've noted your position.";
+
+/**
+ * **这一轮必须中止的错误**：评测预算超限，或这一轮被取消（`isAbortError`）。
+ *
+ * 给 `catch` 用的唯一判据——写文案失败、并进回复失败、派发出错这些地方都只吞"这一步
+ * 没成"的普通失败，这两种一律往上抛（吞掉它们等于在被取消之后继续调模型、写库、发短信）。
+ * 超时**不算**：那只是这一步太慢，退回普通回复、下一轮再补，别把整轮废掉。
+ */
+function isFatalTurnError(error: unknown): boolean {
+  return isEvalBudgetExceeded(error) || isAbortError(error);
+}
 
 /**
  * **假完成替换的上下文选择（纯函数，可离线断言）。**
@@ -2846,6 +2865,36 @@ export async function runColivingTurn(args: {
    */
   const ownRuleStance = { recorded: false };
 
+  /**
+   * 这一轮有没有规则被代码证明**定案**（`closeConsultationIfComplete` 返回 done 且无异议）。
+   *
+   * **只当「值不值得去查一遍待发台账」的开关**，本身不决定收件人——收件人一律由
+   * `repo.finalNoticeCandidates`（按这条规则自己的 sent/queued 回执）+ `final-notice.ts`
+   * 的纯函数算。生产缺口就是这个：最后一位住户回「我同意」→ 规则收口 → 模型只回了他一句
+   * 「那就定了」，另外两位一条消息都没收到。
+   */
+  const settledRuleThisTurn = { ruleId: null as string | null };
+
+  /**
+   * 这一轮**待发的定案通知台账**，工具阶段只读一次（结果缓存）。
+   *
+   * 用途只有一个：模型在 `contactPerson` 里显式带上 `finalNoticeRuleId` 时，核对
+   * 「这条规则现在确实还有这个人的待发通知」。生成之后那次派发**不用这份缓存**——
+   * 那时要重新读，才能看见这一轮刚写下的回执（见下面的派发段）。
+   *
+   * **这一轮刚定案的规则要作废缓存**（`recordStance` 收口那一步）：那份待办是**刚刚**
+   * 才写进去的，作成缓存之后读的旧快照里没有它，模型同一轮紧接着补一条会被白拒一次。
+   */
+  let pendingNoticesCache: Awaited<
+    ReturnType<typeof repo.finalNoticeCandidates>
+  > | null = null;
+  const loadPendingNotices = async () => {
+    if (pendingNoticesCache === null) {
+      pendingNoticesCache = await repo.finalNoticeCandidates(sender.householdId);
+    }
+    return pendingNoticesCache;
+  };
+
   /** 没调 decide 就直接说话时，兜底补一条，保证链路完整（设计稿第十四点） */
   const ensureDecision = async (
     kind: string,
@@ -3013,12 +3062,25 @@ export async function runColivingTurn(args: {
     contactPerson: tool({
       description:
         "主动给这栋房子里的另一个人发消息（非回复当前这位）。这是你按流程做的" +
-        "判断，不是征求当前这位同意。**正文只写对方能自己观察到的共享事项 + 你要他做的" +
-        "动作**（例如客厅电视声、走廊杂物、深夜洗衣时间）；**不要提是谁反映的**：默认匿名，" +
+        "判断，不是征求当前这位同意。**你是替住户转达，不是住在这里的人**：发出去的是" +
+        "住户交办的事、或他们商定 / 正在商量的安排。**拟提案本身没问题**——住户请你拟、" +
+        "或你自己拟一条，说清**还只是在商量**就行；**不行的是把还没商定的草案说成已经定下、" +
+        "派给对方的义务**（「我要求你」「我定的标准」「这就是你的那份」），" +
+        "**也不要把你拟的说成是某位住户提的**。**已经商定好的分工照实转达**（比如大家已经" +
+        "说好周三归他倒垃圾，就直接告诉他）——这条不是「不许派活」。" +
+        "**也不要把你自己算进「我们」「大家」「每个人」里**：这些家务你不做；住户原话里的" +
+        "「我们」照原样保留。**「我已经发给他了」「我问他了」这类如实说明照说**。" +
+        "**正文只写对方能自己观察到的共享事项 + 请对方做或一起商量的那个动作**" +
+        "（例如客厅电视声、走廊杂物、深夜洗衣时间）；**还没商定的就写成在商量中的提案**" +
+        "（还在确认、尚未全部同意），不要写成已经定下来派给他做的事。" +
+        "**不要提是谁反映的**：默认匿名，" +
         "不得出现发信人的姓名，也不要用「他想请你…」「她说让你…」这类把请求归因给某人的说法。" +
         "**不要带来源人的私人处境**——他的睡眠（补觉、睡不着、失眠）、健康、财务、去向、" +
         "情绪、动机都不要写进这条短信；只说共享可观察的事和请求动作。" +
-        "对被投诉一方先按中立提醒说，不要上来就指控。",
+        "对被投诉一方先按中立提醒说，不要上来就指控。" +
+        "**共同规则的定案通知一般不用你发**——那条由系统按规则自己的发送记录统一发，" +
+        "通常不要填 `finalNoticeRuleId`。只有系统漏发、你确实要自己补一条时，才填上那条" +
+        "规则的 id，让这一条走和系统同一条领取路径（否则同一个人会收到两条）。",
       inputSchema: z.object({
         name: z.string().describe("要联系的人的名字，必须是房子里现有的人"),
         purpose: z
@@ -3034,10 +3096,22 @@ export async function runColivingTurn(args: {
           .string()
           .optional()
           .describe("填 shared 时写清这条对哪些人一样（人名）"),
+        finalNoticeRuleId: z
+          .string()
+          .optional()
+          .describe(
+            "**几乎不用填。** 只有你要发的这条就是某条刚定案的全屋共同规则的定案通知时，" +
+              "才填那条规则的 id（`proposeRule` / `recordStance` 的回执里有）。" +
+              "系统会用它自己的领取路径发出去，保证同一条规则同一个人只收到一条。" +
+              "**发别的事一律不要填**——填错会被拒绝，什么都不会发出去。"
+          ),
         message: z
           .string()
           .describe(
-            "真正要发出去的短信正文。短、具体、直接说事。不提是谁反映的。"
+            "真正要发出去的短信正文。短、具体、直接说事：说的是住户交办或大家商量的" +
+              "这件事本身、以及请对方做或一起商量的动作。你是转达、不住在这里——不把" +
+              "你自己算进「我们 / 大家」，也不把还没商定的草案说成已经定下、派给对方的义务" +
+              "（说清还在商量）；**已经商定好的分工照实说**。不提是谁反映的。"
           ),
         act: z
           .enum(["ask", "inform", "propose", "confirm", "remind", "escalate"])
@@ -3075,6 +3149,7 @@ export async function runColivingTurn(args: {
         purpose,
         scope,
         sharedWith,
+        finalNoticeRuleId,
         act,
         message: raw,
         scheduleWindowLabel,
@@ -3159,6 +3234,71 @@ export async function runColivingTurn(args: {
         }
         if (contacted.has(target.personId)) {
           return { ok: false, reason: `本轮已经给 ${target.name} 发过了` };
+        }
+        /**
+         * **共同规则定案通知：走和代码派发完全同一条领取路径。**
+         *
+         * 生产事故（2026-10-07 付费跑测 corpus-064）：规则刚定案那一轮，模型自己用
+         * `contactPerson` 给 Elena 和 Marcus 各发了一条它写的定案通知，生成之后代码
+         * 派发又按台账给两人各发了一条规范通知——**每个人收到两条**。原因不是谁写错
+         * 了话，是**两条互不知情的出口**：模型那条没有 (规则, 人) 回执，派发看不见它。
+         *
+         * 修法不是「这个收件人本轮已经发过就跳过」——那会把同一轮里**无关的转达**
+         * （Tessa 让带一句水槽的事给 Marcus）也算成"已通知"，把定案通知整个吞掉。修法
+         * 是让模型这条也走**领取**：显式填 `finalNoticeRuleId`，代码核对这条规则确实
+         * 还有这个人的待发通知，再用 `deliverFinalNoticeSms` 原子领取 (规则, 人) 落库。
+         * 回执和代码派发那份是同一份，**绑了规则的这两条出口**不会各发一条。
+         *
+         * **这只是「填了这项」时的保证**：不填就等于一条没有 (规则, 人) 回执的普通转达，
+         * 系统认不出它是定案通知、也拦不住重复——去重靠的是这条记录，不是正文长得像。
+         *
+         * **对不上一律拒绝、如实说明，零出站、不进 `contacted`**——不许把没发出去的
+         * 说成发过了（不填这项时照旧走下面的普通消息路径，逐字不变）。
+         */
+        if (finalNoticeRuleId) {
+          const pending = await loadPendingNotices();
+          const rule = pending.find((c) => c.ruleId === finalNoticeRuleId);
+          if (!rule) {
+            return {
+              ok: false,
+              reason:
+                `「${finalNoticeRuleId}」现在没有待发的定案通知（可能还没定案、有人` +
+                "反对、或已经发完了）。这条不发，也不要对谁说已经通知过了。",
+            };
+          }
+          if (!rule.residents.some((m) => m.personId === target.personId)) {
+            return {
+              ok: false,
+              reason: `${target.name} 不是这条规则定案时的参与人，定案通知不发给他。`,
+            };
+          }
+          const delivered = await deliverFinalNoticeSms({
+            householdId: sender.householdId,
+            channel,
+            senderIsTest: sender.isTest,
+            ruleId: finalNoticeRuleId,
+            recipient: target,
+            text: message,
+          });
+          if (!delivered) {
+            return {
+              ok: false,
+              reason:
+                `这条规则给 ${target.name} 的定案通知已经有发送记录了（刚发过或正在` +
+                "发），不要再发第二条，也不要再说一遍这条规则。",
+            };
+          }
+          contacted.add(target.personId);
+          outbound.push({
+            to: target.address ?? "",
+            personId: target.personId,
+            text: message,
+            communicationId: delivered.communicationId,
+            // 对同样的人都一样的规矩，不是针对他个人的事。
+            sharedRule: true,
+            sharedWith: sharedWith ?? null,
+          });
+          return { ok: true, sentTo: target.name };
         }
         const duplicate = await repo.findRecentOpenCommunication({
           toPersonId: target.personId,
@@ -3326,9 +3466,19 @@ export async function runColivingTurn(args: {
 
     proposeRule: tool({
       description:
-        "把共同生活的安排记成规则（时段/分工/访客等）。规则不是你和房东单方" +
-        "定的，是住在这里的人一起定的。你给默认方案并先照执行，已明确表过态的" +
-        "人用 recordStance 记谁同意/谁异议；全问过才算成立。",
+        "**这里只登记「全屋适用」的共同规则**（要住在这里的每个人都守的时段 / 分工 / 访客等）：" +
+        "**只涉及其中几个人的私下安排（两个人之间的约定、某一间房里的事）不要登记在这里**" +
+        "——那用现有的记录 / 转达路径办就行，不要把它登记成全屋规则。规则不是你和房东单方" +
+        "定的，是要守它的人一起定的：你拟的只是**草案**，他们明确同意之前不算数、" +
+        "也不要想当然地执行。**拟草案本身没问题**，只是对外（发给别人、回给提这件事的人）" +
+        "要说清**还在确认、尚未全部同意**——不要写成已经定下来、也不要写成你派给谁的分工；" +
+        "**住户已经商定好的分工照实转达**，**工具做过的也照实说**（「这条我登记了」「我问过谁了」）。" +
+        "已明确表过态的人用 recordStance 记谁同意/谁异议。" +
+        "**问谁、谁同意才算数，都看这条规则管到谁**（见〈共同生活的规则怎么定〉）：全屋适用的" +
+        "（安静时段、厨房时段、垃圾、共用空间）要住在这里的每个人明确同意；**只涉及其中几个人的" +
+        "安排（两个人之间的私下约定、某一间房里的事）由那几个人定**，不拉不相干的人、也不许不相干" +
+        "的人把它否掉；**已经定过的规则只是照旧提醒，不用重开征询、不用再表态一次**。" +
+        "住户私下交办你去提醒某一个具体的人（`domain/relay.md` 的活）也不是这一件，不用在这里记。",
       inputSchema: z.object({
         kind: z
           .string()
@@ -3364,9 +3514,15 @@ export async function runColivingTurn(args: {
           ok: true,
           ruleId,
           note:
-            `这条规则要问过这 ${residents.length} 个人（确认不住在这里的不算）` +
-            `才算成立：${residents.map((m) => m.name).join("、")}。` +
-            "系统当前不能代为私信住户，只能记录已经表过的态。",
+            `**这里登记的是「全屋适用」那条口径**：要守它的人是住在这里的这 ${residents.length} 个人` +
+            `（确认不住在这里的不算），要他们**每个人都明确同意**才算成立：${residents.map((m) => m.name).join("、")}。` +
+            "逐个去问（可以用 contactPerson 真的发出去）；谁**明确说了同意还是不同意**" +
+            "就用 recordStance 记下来。有人只回了句别的、或者还没回，都不算同意" +
+            "（`asked` 只是「问过还没答」，不是同意）。" +
+            "**这其实是「只涉及其中几个人的安排」（两个人之间的私下约定、某一间房里的事）就别登记在这里**" +
+            "——那由那几个人自己定，不要把不相干的人拉进来问、也不许不相干的人把它否掉" +
+            "（`domain/relay.md` 那种私下交办的提醒更不是规则：提醒不需要谁同意）。" +
+            "成立之后**定案通知由系统统一发**，你不用自己发。",
         };
       },
     }),
@@ -3401,23 +3557,45 @@ export async function runColivingTurn(args: {
         // **齐了不等于都同意**：有异议也会走到这一步，提示语要分开说，
         // 不能不管有没有异议都说"定下来了"（第15轮踩过：一个人同意都
         // 没有、只有一条异议，也曾经被这么告诉模型）。
-        const { done, objectedCount } = await repo.closeConsultationIfComplete(
-          target
-        );
+        const close = await repo.closeConsultationIfComplete(target);
+        const { done, objectedCount } = close;
+        // 只是「这一轮有规则定案过」的开关，供生成之后去查一遍待发台账。
+        if (done && objectedCount === 0) {
+          settledRuleThisTurn.ruleId = target;
+          // 这一轮刚刚写出新的待发通知，工具阶段读过的那份台账就过期了。
+          // 不作废它的话，同一轮里紧接着 `contactPerson(finalNoticeRuleId)` 会
+          // 拿着「还没有这条待办」的旧快照把它拒掉（不是错发，是白拒一次，
+          // 最后仍由派发那条发出去——但没必要让模型看见一个假原因）。
+          pendingNoticesCache = null;
+        }
         // **工具回执**：这一轮真的为**当前发信人本人**记下了立场（写库成功）。
         // 只给假完成替换用——那条泛化的「我没替你转话」对刚表过态的住户答非所问。
         if (m.personId === sender.personId) {
           ownRuleStance.recorded = true;
         }
+        /**
+         * 回执**不再给「还要通知谁」的名单**，也不再让模型自己去发。
+         *
+         * 名单和投递都由代码在生成之后按台账做（`final-notice-dispatch.ts`）：
+         * 让模型自己减人会算错，而且「这一轮发过的」根本不能当收据——那可能是一条
+         * 跟这条规则无关的提醒。模型这一轮只需要答当前说话的人。
+         */
         return {
           ok: true,
           note: done
             ? objectedCount > 0
-              ? "所有人都表过态了，**但有人不同意**，这条规则还没定下来——" +
-                "根据异议调整方案，再走一轮征询，不要当成已成立说出去。"
-              : "所有人都表过态了，**这条规则已经定下来**。不用再问任何人，" +
-                "把最终结果告诉大家就行。"
-            : undefined,
+              ? "所有人都表过态了，**但有人不同意**（表过态不等于同意），" +
+                "这条规则还没定下来——根据异议调整方案，再走一轮征询，" +
+                "不要当成已成立说出去。"
+              : "所有人都表过态了、**没有异议，这条规则正式成立**，不用再问任何人。" +
+                "**定案通知由系统统一发**：它按这条规则自己的发送记录逐个发给还没收到的人，" +
+                "**你不要再用 contactPerson 发一遍**——那会让同一个人收到两条一模一样的通知。" +
+                "这一轮你只回当前说话的人：**回一两句就行，不用把规则原文再念一遍**，" +
+                "系统会把那句定案通知接在你的回复后面；**也不要替还没发出去的通知打包票**。"
+            : "这条规则**还没成立**。**成立的条件是每个人都明确同意，不是每个人都回过话**：" +
+              "有人只是回了别的、或者还没回，都不算同意。" +
+              "这一轮该做的是去问还没表态的人（`contactPerson` 可以真的发出去），" +
+              "**不要对任何人说它已经生效、也不要说「就差你一个」**。",
         };
       },
     }),
@@ -4202,7 +4380,9 @@ export async function runColivingTurn(args: {
           .array(z.string())
           .optional()
           .describe(
-            "结果已经通过之前对话说清楚、当事人知情时，在这里列人名（本轮无法代发，只能靠这里）"
+            "**这件事的最终结果已经让他本人知道**的当事人列人名：之前对话里跟他说清楚过，" +
+              "或这一轮真的把**这件事的结果**发到了他手上。**只是给别人带过一句无关的话、" +
+              "或者只是发过别的提醒，不算**——没让他知道这件事的结果，一个字都不许列。"
           ),
       }),
       execute: async ({
@@ -4251,11 +4431,15 @@ export async function runColivingTurn(args: {
             });
           }
 
-          // 通知覆盖率核对：这件事标过"影响到谁"的名单，逐个查是不是
-          // 模型显式声明"已经跟他们说过了"（notifiedParties）。严格口径
-          // （2026-09-12）之后普通对话没有任何第三方出站，代码不可能
-          // 代为通知，所以"本轮联系过"不再是一种知情来源——只有名单本人
-          // 是当前说话人、或模型在 notifiedParties 里列出来才算数。
+          // 通知覆盖率核对：这件事标过"影响到谁"的名单，逐个查是不是真的知道了。
+          // 知情来源只有两种，**都要有据可查**：名单本人就是当前说话人、或模型在
+          // notifiedParties 里点名。
+          //
+          // **不拿 `contacted`（这一轮成功发过谁）当知情凭证。** 「这一轮给这个人发出去过
+          // 一条消息」证明不了他知道**这件事的结果**——那完全可能是替别人带的一句无关的话
+          // （064 同轮里就有：替 Tessa 把水槽的事带给 Marcus）。拿它当收据，等于让一次
+          // 无关转达替这件事的知情作保。判据与定案通知的 (规则, 人) 台账同一条原则：
+          // **收据必须是「这件事 × 这个人」的**，不是「这个人这一轮收到过什么」。
           const parties = await repo.getCaseParties(caseId);
           const explicitlyNotified = new Set<string>();
           for (const n of notifiedParties ?? []) {
@@ -4276,8 +4460,8 @@ export async function runColivingTurn(args: {
               reason:
                 "这件事标过受影响的人，收口前每个人都要知道最终结果：" +
                 stillUnnotified.map((p) => p.personName).join("、") +
-                " 还没确认知情。如果之前已经跟他们说清楚了，在 notifiedParties 里列出来再收口" +
-                "（系统当前不能代为私信住户）。",
+                " 还没确认知情。如果确实已经让他们本人知道了，在 notifiedParties 里列出来再收口" +
+                "（**没让他知道过的不许代表作保**）——这一轮给别人带过一句别的话，不算他知道这件事的结果。",
             };
           }
           for (const p of parties) {
@@ -4305,7 +4489,7 @@ export async function runColivingTurn(args: {
           ok: true,
           note:
             kind === "resolved" && (accounting ?? []).length > 0
-              ? "交代完了。注意：系统当前不能代为私信住户，相关的人是否知情以 notifiedParties 为准。"
+              ? "交代完了。注意：知情与否只看**当事人本人**——他自己就是当前说话人，或你点名列进 notifiedParties；没让他知道过的不许替他认。"
               : undefined,
         };
       },
@@ -4775,8 +4959,8 @@ export async function runColivingTurn(args: {
       }
       raw = deliveredReply ?? "";
     } catch (error) {
-      // 评测预算触限必须向上抛，不能被"兜底失败就退回自由文本"吞掉。
-      if (isEvalBudgetExceeded(error)) throw error;
+      // 评测预算触限、这一轮被取消，都必须向上抛，不能被"兜底失败就退回自由文本"吞掉。
+      if (isFatalTurnError(error)) throw error;
       console.log(
         "[turn] 强制 sendReply 兜底失败，退回自由文本：",
         error instanceof Error ? error.message : String(error)
@@ -5078,26 +5262,204 @@ export async function runColivingTurn(args: {
     await repo.linkResponse({ personId: sender.personId, messageId: inboundId });
   }
 
+  /**
+   * **定案通知：代码定路由，措辞层写语言。**
+   *
+   * 生产缺口：三位住户一起定下一条厨房规则，最后一位回「我同意」→ 规则收口 →
+   * 模型只回了最后这位一句「那就定了」，另外两位一条消息都没收到。收件人一律由
+   * 台账算（`repo.finalNoticeCandidates`：定案那一刻登记的待办 ＋ (规则, 人) 回执），
+   * 正文由措辞层写一次（`composeRuleNotices` 的 announce，提示词里只有规则本身），
+   * 模型没有再选一次收件人的机会，所以不会重复发、也不会发错人。
+   *
+   * **当前说话人那份并进本轮回复**：把措辞层那句**追加**在回复正文后面（原话一个字
+   * 不删），并在落库那一刻原子领取一条**专用 decision**（带 (规则, 人) 两个 id）——
+   * 回执就是这条回复自己的 communication，所以不会再追一条一模一样的自我短信，
+   * 也不会把这一轮发给别人的消息误当成「他已经收到通知」。
+   *
+   * 只在跟规矩/纠纷相关的那几轮跑（与 `proposeRule` 摆出来的信号同一个），
+   * 所以是「后续相关的一轮接着补」。
+   */
+  const noticeText = new Map<string, string>();
+  let noticeUsage = EMPTY_FEATURE_USAGE;
+  const composeNotice = async (ruleStatement: string): Promise<string | null> => {
+    const hit = noticeText.get(ruleStatement);
+    if (hit !== undefined) return hit || null;
+    try {
+      const composed = await composeRuleNotices(
+        ruleStatement,
+        productionFeatureLlm(modelId),
+        language
+      );
+      noticeUsage = addFeatureUsage(noticeUsage, composed.usage);
+      noticeText.set(ruleStatement, composed.notices.announce);
+      return composed.notices.announce;
+    } catch (error) {
+      // 普通失败自己吞掉（这条规则这轮不发），但**已经花掉的用量照记**，不凭空消失。
+      noticeUsage = addFeatureUsage(noticeUsage, usageOfFeatureError(error));
+      if (isFatalTurnError(error)) throw error;
+      noticeText.set(ruleStatement, "");
+      return null;
+    }
+  };
+
+  /**
+   * 当前说话人这一轮的回复里**也带上**那句定案通知。
+   *
+   * **只追加、不替换，一个字都不丢。** 这一轮的回复可能同时答了别的事（多话题），
+   * 也可能只是短短一句「那就定了」——两种都照原样留着，通知另起一段接在后面。
+   * 以前按长度分「短的替换、长的追加」，可长度**证明不了**"只说了这一件事"：
+   * 短的多话题回复会被整条抹掉。这里宁可多留几句，也不误删住户本该看到的内容。
+   *
+   * 只在**这一轮 `recordStance` 真的把这条规则问完**（无异议）时才算数；而且要不
+   * 要真的并进去，由落库那一刻的**原子领取**决定（`deliverFinalNoticeReply`）——
+   * 领到了才并，领不到说明这份通知已经在路上，回复照原样发。
+   */
+  let replyNotice: { ruleId: string; text: string } | null = null;
+  if (settledRuleThisTurn.ruleId !== null && reply) {
+    const settledRuleId = settledRuleThisTurn.ruleId;
+    try {
+      const pending = await repo.finalNoticeCandidates(sender.householdId);
+      const mine = pending.find((c) => c.ruleId === settledRuleId);
+      const notice = mine ? await composeNotice(mine.statement) : null;
+      if (notice) {
+        replyNotice = { ruleId: settledRuleId, text: `${reply}\n\n${notice}` };
+      }
+    } catch (error) {
+      if (isFatalTurnError(error)) throw error;
+      // 并进回复失败就退回普通回复；台账还在，后面那轮相关话题会补发。
+      console.log(
+        "[turn] 定案通知并入回复失败（改由台账补发）：",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
   let replyCommunicationId: string | null = null;
   if (reply) {
-    const did = await ensureDecision("reply_only");
-    replyCommunicationId = await repo.queueCommunication({
-      householdId: sender.householdId,
-      decisionId: did,
-      caseId: activeCaseId,
-      toPersonId: sender.personId,
-      channel,
-      purpose: "回复本人",
-      body: reply,
-    });
-    await repo.appendMessage({
-      conversationId,
-      personId: sender.personId,
-      direction: "outbound",
-      channel,
-      body: reply,
-      communicationId: replyCommunicationId,
-    });
+    /**
+     * **带定案通知的那条回复单独领一条 decision。**
+     *
+     * 领取时就带上 (规则, 人) 两个 id（不是事后往整轮共用的那条 decision 上补标记）：
+     * 那条共用 decision 底下还挂着这一轮发给**别人**的消息，拿它当回执会把「发给别人
+     * 的一条无关消息」算成「这个人已经收到通知」。领取同时保证同一条 (规则, 人) 只有
+     * 一条通知——并发轮次里领不到的那一轮，回复照原样发、一个字都不改。
+     *
+     * **这一步外面故意不套 `try/catch` 兜底**：它和下面那条普通回复落库是同一档的
+     * 写操作，失败就是真的写不进去，照旧往上抛（和改之前 `queueCommunication` 一样）。
+     * 更不能「领了一半再退回普通路径」——领取已经写了 decision ＋ communication ＋
+     * 那条出站消息，退回再写一条会让这条回复发两遍。要兜底就得连领取一起回滚，
+     * 那是另一个量级的改动。**领到了就走上面那一支、不再 appendMessage**：消息已经在
+     * 领取的事务里写完了（见 `claimFinalNoticeDelivery`），下面那一支是没领到时的普通回复。
+     */
+    const noticed = replyNotice
+      ? await deliverFinalNoticeReply({
+          householdId: sender.householdId,
+          channel,
+          senderIsTest: sender.isTest,
+          ruleId: replyNotice.ruleId,
+          personId: sender.personId,
+          text: replyNotice.text,
+          caseId: activeCaseId,
+          conversationId,
+        })
+      : null;
+    if (noticed && replyNotice) {
+      reply = replyNotice.text;
+      replyCommunicationId = noticed.communicationId;
+    } else {
+      const did = await ensureDecision("reply_only");
+      replyCommunicationId = await repo.queueCommunication({
+        householdId: sender.householdId,
+        decisionId: did,
+        caseId: activeCaseId,
+        toPersonId: sender.personId,
+        channel,
+        purpose: "回复本人",
+        body: reply,
+      });
+      await repo.appendMessage({
+        conversationId,
+        personId: sender.personId,
+        direction: "outbound",
+        channel,
+        body: reply,
+        communicationId: replyCommunicationId,
+      });
+    }
+  }
+
+  const noticeOutbound: OutboundMessage[] = [];
+  if (
+    settledRuleThisTurn.ruleId !== null ||
+    topicHitsTenancy ||
+    topicHitsHouseRules ||
+    topicHitsConflict
+  ) {
+    try {
+      const noticeResult = await dispatchPendingFinalNotices({
+        loadPending: () => repo.finalNoticeCandidates(sender.householdId),
+        composeAnnouncement: composeNotice,
+        // 预算超限 / 主动中止照旧往上抛，别当普通失败吞掉。
+        isFatal: isFatalTurnError,
+        deliver: async ({ ruleId, recipient, text }) => {
+          const member = ctx.members.find(
+            (m) => m.personId === recipient.personId
+          );
+          // 只有**不知道地址**才算真联系不上。姓名没本人确认**不算**：名册导入的
+          // 真名 `nameConfirmed` 是 false，用那条闸会把真实在住的成员整个挡在通知外。
+          if (!member?.address) return null;
+          // 领取 + 落库在一个事务里做（`(规则, 人)` 只能领一次）；这条通知的
+          // decision 就是领取时新建的那一条，回执靠它上面两个 id 关联回来。
+          const delivered = await deliverFinalNoticeSms({
+            householdId: sender.householdId,
+            channel,
+            senderIsTest: sender.isTest,
+            ruleId,
+            recipient: member,
+            text,
+          });
+          if (!delivered) return null;
+          return { to: delivered.to, communicationId: delivered.communicationId };
+        },
+      });
+      for (const s of noticeResult.sent) {
+        noticeOutbound.push({
+          to: s.to,
+          personId: s.personId,
+          text: s.text,
+          communicationId: s.communicationId,
+          // 对共用者一样的规矩，不是针对他个人的事——与实验路径同一个口径。
+          sharedRule: true,
+        });
+      }
+      if (noticeResult.outstanding.length > 0) {
+        console.log(
+          "[turn] 定案通知还有没发出去的（保持待办，下一轮相关话题再补）：",
+          noticeResult.outstanding.map((o) => `${o.ruleId}/${o.personId}`).join(", ")
+        );
+      }
+      if (noticeResult.deferred.length > 0) {
+        console.log(
+          "[turn] 定案通知本轮配额用完，剩下的留到下一轮：",
+          noticeResult.deferred.join(", ")
+        );
+      }
+    } catch (error) {
+      if (isFatalTurnError(error)) throw error;
+      // 台账读不出来 / 编排本身出错：**一条都不发、也不假称已发**。回执仍然只在
+      // `communication.status` 里，下一轮相关话题照旧会重来。
+      console.log(
+        "[turn] 定案通知派发失败（不假称已通知）：",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+  // 通知也过一遍同一条确定性出站闸（与模型发出去的消息同一套）。**放在所有回复检查
+  // 之后**：这些不是模型这一轮说的话，不该被当成「模型声称联系过谁」的证据，去把
+  // `checkFalseContactClaim` / `acceptedContactNames` 放松掉。
+  if (noticeOutbound.length > 0) {
+    await enforceOutboundGate(noticeOutbound);
+    outbound.push(...noticeOutbound);
   }
 
   return {
@@ -5149,8 +5511,12 @@ export async function runColivingTurn(args: {
     toolsUsed,
     introduction,
     unknownSender: false,
-    // 主生成用量 + 前门里已经花掉的功能调用用量（路由 none / 失败也不丢）。
-    usage: addFeatureUsage(frontDoorUsage, sumUsage(result.steps)),
+    // 主生成用量 + 前门里已经花掉的功能调用用量（路由 none / 失败也不丢）
+    // + 定案通知补发那一次窄步的用量（补发真的花了钱，不能凭空消失）。
+    usage: addFeatureUsage(
+      addFeatureUsage(frontDoorUsage, sumUsage(result.steps)),
+      noticeUsage
+    ),
     turnStartedAt,
   };
 }

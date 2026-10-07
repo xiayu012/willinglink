@@ -1,0 +1,28 @@
+{
+  "id": "corpus-066-english-dishes-proposal-first-turn-2026-10-06",
+  "source": "2026-10-06 **定向子集复测，不是替代品**：只取 corpus-065 的**第 1 轮原句**（逐字未改）单独跑一遍，人和建屋 setup 与 065 相同（同样三位虚构住户 Nina / Paul / Grace）。\n\n为什么要单独跑这一轮：2026-10-07 付费跑测（tests/coliving-eval/reports/2026-10-07T01-17-47-237Z.json）在这一轮抓到两条真实出站——发给 Paul 的写成 Idea for the house: **everyone** washes their own dishes，发给 Grace 的写成 A proposal for the house: **each of us** washes our own dishes，回复又写成 That's your part too, same as everyone here。`identity.md` 明写你不住在这里、「我们 / 大家 / 每个人」指的是住户、不包括你，而当时 `contactPerson` 的说明却把它写成「对方能观察到的共享事项 + **你要他做的动作**」——读起来像请求归你所有、分工由你派。本轮就是把这句话改掉之后，专门盯这一轮还会不会重演。\n\n**只做结构断言，不认证语言**：这一轮必须调 `proposeRule`，并且必须**真的把话发给 Paul 和 Grace 各一条**（通过审稿的出站，`mustContactNames`）——调了工具不等于发出去了。**措辞本身这条证明不了**（不设 `replyMustMatch` / `outboundMustNotMatch`），语气与身份口径由 semantic judge 与人工逐轮阅读判断（见 CLAUDE.md「机械检查证明不了语气」）。\n\n**与 064 / 065 的关系**：064、065 的输入**一个字都没有改**，本条也不替代它们——064 仍然覆盖「全员同意后定案通知只发一次」，065 仍然覆盖「有人反对就不定案 + 如实说已发出」这两条完整多轮反例。本条只是把 065 第 1 轮单独拎出来做一次**更窄、更便宜**的定向复测。边界照旧：只覆盖「脏碗不过夜」这一条规则，不得被归类成「厨房卫生」「公共区域整洁」这类主题大类。人名、电话、对话全部虚构，不是真实住户、不是真实事件。",
+  "household": { "label": "Eval-066 English dishes proposal, focused first turn only" },
+  "people": [
+    { "phone": "+15550660001", "name": "Nina", "role": "tenant" },
+    { "phone": "+15550660002", "name": "Paul", "role": "tenant" },
+    { "phone": "+15550660003", "name": "Grace", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["Nina", "Paul", "Grace"],
+    "priorMessages": [
+      { "person": "Nina", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "Paul", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "Grace", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550660001",
+      "text": "Can we make a rule about dishes? Nobody should leave dirty dishes in the sink overnight — wash them before bed. Is everyone okay with that?",
+      "expect": {
+        "mustUseTools": ["proposeRule"],
+        "mustContactNames": ["Paul", "Grace"]
+      }
+    }
+  ]
+}

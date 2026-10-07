@@ -4508,6 +4508,43 @@ async function main() {
     );
   });
 
+  /**
+   * **两条常驻前提**（2026-10-07 付费跑测 corpus-064 的两个真实错句）：
+   *
+   * - 第 1 轮：回复写成 "It would work the same way for all three of us, you included"——
+   *   把 AI 自己算进了住户人数里，等于凭空多出一个不存在的室友；
+   * - 第 4 轮：工具只有 `decide` / `logEvent` / `sendReply`、`outbound` 是空的，回复却写
+   *   "I'm logging it and sending it to the landlord; I'll tell you what comes back"——
+   *   把「记下来」说成「已经报给房东」，还预支了一个不会自己发生的结果。
+   *
+   * 两句都是**前提**问题、不是措辞问题，所以修在常驻层（`identity.md` 每一轮都读）：
+   * 放在哪一层比句子写得多漂亮更要紧（见 CLAUDE.md「轻易不要改大脑提示词」）。
+   * 断言只钉「这两条前提还在」，**不钉具体措辞**——改说法可以，删掉不行；
+   * 也不顺带审计别的准则文字（那是另一次改动的事）。
+   */
+  check("常驻层两条前提：AI 不在住户名单里；说过做过什么以工具回执为准", () => {
+    const identity = readFileSync(
+      "lib/ai/brains/coliving/doctrine/always/identity.md",
+      "utf8"
+    );
+    assert(
+      identity.includes("你不在这套房子的住户名单里") &&
+        identity.includes("指的永远是住户，不包括你"),
+      "identity.md 必须写明 AI 不住在这里、「我们 / 大家 / 全屋」指的是住户不算它自己" +
+        "（064 第 1 轮的 'all three of us, you included' 就是把 AI 算成了室友）"
+    );
+    assert(
+      identity.includes("以工具回执为准") && identity.includes("没发生的下一步"),
+      "identity.md 必须写明「这一轮做过什么以工具回执为准」：没有回执不许说已经发了、" +
+        "也不许预支下一步（064 第 4 轮零出站却写了 'sending it to the landlord'）"
+    );
+    assert(
+      identity.includes("不等于对方已经知道"),
+      "还要写明「记下来」不等于「通知到」：`logEvent` / `decide` 只留了记录，" +
+        "没真的发出去就不许说已经转过去了"
+    );
+  });
+
   check("自称问答：中文问句只读内容文件的中文身份段，别的问法不背这一段", () => {
     const selfBundle = buildFeatureQaFacts({
       openFeatures: OPEN_FEATURES,

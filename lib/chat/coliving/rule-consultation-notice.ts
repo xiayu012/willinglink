@@ -8,6 +8,7 @@ import {
   type FeatureUsage,
 } from "./feature-llm";
 import type { LanguageDecision } from "./language";
+import { loadRuleNoticeDoctrine } from "./rule-notice-doctrine";
 
 /**
  * **共同规则协商的措辞层——只写文案，不决定「该不该发」。**
@@ -32,8 +33,12 @@ import type { LanguageDecision } from "./language";
  * - `ack` —— 住户刚表态 / 问进度时，回他一句简短的确认或说明。
  *
  * **注意（已知边界）**：这不是主生成那条 doctrine 路径，而是一条收窄的小生成路径
- * （与已批准功能模块的 `compose` 同构）。措辞在启用前必须按 doctrine 走一遍人工阅读 /
- * 语义审稿（见 CLAUDE.md「机械检查证明不了语气」）。
+ * （与已批准功能模块的 `compose` 同构）——它**不加载** `always/` 那几份常驻准则。
+ * 所以「这条规则属于住在一起的人、不是你定的标准」这类立场**不能只写在 doctrine 里**：
+ * 这里把该路径的措辞约束单独摆成一份可编辑文件
+ * （`doctrine/content/rule-notice.md`，经 `rule-notice-doctrine.ts` 读入并校验），
+ * 让这条路读得到同一套立场。措辞在启用前仍要按 doctrine 走一遍人工阅读 / 语义审稿
+ * （见 CLAUDE.md「机械检查证明不了语气」）。
  */
 
 /** 三种文案的严格 schema：一个固定 JSON 对象，缺一项即安全不发送。 */
@@ -50,8 +55,13 @@ export const RULE_NOTICE_STAGE = "rule:notice";
 export const RULE_NOTICE_NAME = "rule_consultation_notice";
 
 /**
- * 措辞系统提示：**只给这一次协商的规则事实**，要求简短、中性、说清合理理由、
- * 不念流程、不指名任何人、不透露是谁提出的。
+ * 措辞系统提示：**只给这一次协商的规则事实** + 文件里那五段措辞约束。
+ *
+ * **立场与边界来自 doctrine 文件，不来自这里**（`rule-notice-doctrine.ts` 读
+ * `doctrine/content/rule-notice.md`）：这条路径**不加载 doctrine**，所以
+ * 「这条规则属于住在一起的人、不是谁单方面立的」这句必须由那份文件供进来，
+ * 否则通知会漂回「这条标准是我立的 / 我对每个人都有要求」那种管理者口吻（真实事故）。
+ * 代码这一层只管**格式**（JSON 形状、三种文案的键名）与**这一轮的规则事实**。
  *
  * **不写死"用中文"**：说哪种语言由 `structuredCall` 的轮次语言指令给（`call.language`，
  * 见 `language.ts`），这里再写一句"都用中文"只会跟那条硬指令打架——英文住户回一个
@@ -59,19 +69,22 @@ export const RULE_NOTICE_NAME = "rule_consultation_notice";
  * "用住户这一轮说话的那种语言"，把语言交给唯一的那个判定。
  */
 export function ruleNoticeSystem(rule: string): string {
+  const d = loadRuleNoticeDoctrine();
   return [
     "你在一个合租房短信系统里，替一条**全屋共同规则**写通知。",
     `这条规则是：「${rule}」。`,
-    "住户们正在一起确认这条规则，必须**所有人都同意**才算定案。",
+    "住户们正在一起确认这条规则，必须**所有人都明确同意**才算定案。",
     "",
-    "请写三种短信，都用**住户这一轮说话的那种语言**、简短（一两句）、自然、第三人称中性的口吻，各说清一个合理理由；",
-    "不许念流程，不许出现「状态机 / 协商 / 投票 / 征询 / 流程」这类系统词：",
-    "- consult：发给一位还没表态的室友，请他就这条规则表个态（同意或不同意都可以）。",
-    "- announce：发给一位室友，告诉他这条规则已经**所有人都同意、正式生效**。",
-    "- ack：住户刚表态或问进度时，回他一句简短的确认或说明。",
+    d.authority,
     "",
-    "**绝对不许**提到是谁先提出这条规则的、有人投诉、或任何人的私人情况；",
-    "也不要单独点名任何一位住户（规则本身说的「每个人」可以照说）。",
+    d.privacy,
+    "",
+    "请写三种短信，都用**住户这一轮说话的那种语言**、简短（一两句）、自然、第三人称中性的口吻；",
+    "不许念流程，不许出现「状态机 / 协商 / 投票 / 征询 / 流程」这类系统词，也不要堆理由说教：",
+    `- consult：${d.consult}`,
+    `- announce：${d.announce}`,
+    `- ack：${d.ack}`,
+    "",
     "只输出一个 JSON 对象：{\"consult\":\"…\",\"announce\":\"…\",\"ack\":\"…\"}，不要输出任何别的文字。",
   ].join("\n");
 }

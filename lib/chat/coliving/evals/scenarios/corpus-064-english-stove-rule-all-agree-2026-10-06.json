@@ -1,0 +1,57 @@
+{
+  "id": "corpus-064-english-stove-rule-all-agree-2026-10-06",
+  "source": "2026-10-06 纯虚构英文多轮语料，对着一条真实生产缺口：三位住户一起定下一条厨房规则，最后一位回「我同意」之后，**另外两位一条消息都没收到**——规则在库里已经收口，模型只回了最后说话的那位一句「那就定了」。\n\n本条走**当前生产默认**的通用路径（不开启任何实验开关，`COLIVING_COORDINATION_SHARED_RULE` 保持默认关闭）：第 1 轮 Elena 自然提出一条精确的厨房规则（灶台前沿 + 灶边台面，做完饭擦干净），第 2 轮 Marcus 明确同意，第 3 轮 Tessa 明确同意——这一轮 `recordStance` 由代码证明全员同意、规则正式成立，**定案通知必须发到另外两位（Elena、Marcus）手里**，而 Tessa 本人拿到的那条要并进她这一轮的回复里（不再追发一条一模一样的自我短信）。第 4 轮 Elena 换一个跟规则无关的话题（水槽上方的灯在闪），用来证明**定案通知不会在后续轮次重复发**，也不会因为话题碰到房子的事就被重新翻出来群发。\n\n机械断言只查确定性事实：调了哪个工具、出站发给了谁、**这一轮通过审稿的出站上限（`maxAcceptedOutbound: 2`，两位收件人各一条——定案通知不许重发）**、回复里有没有出现不该出现的口吻。**语言质量本身这条证明不了**——定案通知读起来是否得体、有没有管理者口吻，留给 semantic judge 与人工逐轮阅读（见 CLAUDE.md「机械检查证明不了语气」）。\n\n边界：只覆盖「做完饭擦灶台前沿和灶边台面」这一件精确行为，不得被归类成「厨房整洁」「公共区域卫生」这类主题大类。人名、电话、对话全部虚构，不是真实住户、不是真实事件，也不授权任何新的出站能力或跨户复用的规则。",
+  "household": { "label": "Eval-064 English stove rule, all agree then no repeat" },
+  "people": [
+    { "phone": "+15550640001", "name": "Elena", "role": "tenant" },
+    { "phone": "+15550640002", "name": "Marcus", "role": "tenant" },
+    { "phone": "+15550640003", "name": "Tessa", "role": "tenant" }
+  ],
+  "setup": {
+    "confirmedNames": ["Elena", "Marcus", "Tessa"],
+    "priorMessages": [
+      { "person": "Elena", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "Marcus", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." },
+      { "person": "Tessa", "direction": "outbound", "body": "I'm the AI resident coordinator. You can text me about shared-living issues." }
+    ]
+  },
+  "turns": [
+    {
+      "from": "+15550640001",
+      "text": "Can we agree on one thing for the kitchen? Whoever cooks should wipe the front edge of the stove and the counter right next to it before they leave. It gets greasy and the next person ends up leaning on it. Does that sound fair to you two?",
+      "expect": {
+        "mustUseTools": ["proposeRule"]
+      }
+    },
+    {
+      "from": "+15550640002",
+      "text": "Works for me. Wipe the front edge of the stove and the counter next to it after cooking — I'm in."
+    },
+    {
+      "from": "+15550640003",
+      "text": "I agree too. Wiping the front edge of the stove after cooking is fine with me.",
+      "expect": {
+        "mustUseTools": ["recordStance"],
+        "mustContactNames": ["Elena", "Marcus"],
+        "maxAcceptedOutbound": 2,
+        "replyMustMatch": ["stove|stovetop|counter|kitchen|cook|wipe"],
+        "replyMustNotMatch": [
+          "(?:the )?standard I(?:'m| am)? ?(?:set|setting|holding)",
+          "what I(?:'m| am) (?:asking|requiring) of (?:each|every)",
+          "I(?:'ll| will) rethink",
+          "I(?:'ve| have) (?:decided|set) (?:that|this)"
+        ]
+      }
+    },
+    {
+      "from": "+15550640001",
+      "text": "Different thing — the light above the kitchen sink is flickering. Should I just swap the bulb myself, or does that need to go through the landlord?",
+      "expect": {
+        "mustNotContactNames": ["Marcus", "Tessa"],
+        "outboundMustNotMatch": [
+          "everyone (?:has )?agreed|all agreed|we(?:'ve| have) all agreed|now in (?:effect|place)"
+        ]
+      }
+    }
+  ]
+}

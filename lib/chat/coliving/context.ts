@@ -424,23 +424,42 @@ export async function buildContext(
     for (const r of rules) {
       // **结论由代码给，不让模型自己数人头。** 它拿名单去减人会算错，
       // 而且每一轮都要重算——确定性的账不该进提示词。
+      //
+      // **草案与已成立必须一眼分得开**：不能读起来像已经在跑的规矩（2026-10-06 前
+      // 插入即 `'active'`，等于把 AI 拟的一版直接当全屋生效的规矩）。
+      //
+      // 判据用「走完一轮征询 ＋ 没有异议」而不是只看 `status`：定案那一刻两者是一起
+      // 写的（`closeConsultationIfComplete`），但历史行里可能还留着旧的 `'active'`，
+      // 其中有的其实只有异议、从来没成立过——那些一样不许当成在跑的规矩。
+      const settled = r.consultedAt !== null && r.objectedCount === 0;
+      const draft =
+        r.status === "proposed" || !settled
+          ? "**草案（还没生效，谁都没有义务）** "
+          : "";
       let state: string;
-      if (r.pendingNames.length === 0) {
-        state =
-          r.objectedCount > 0
-            ? `**都表过态了**（同意 ${r.agreedCount}，有异议 ${r.objectedCount}）—— 有异议就调整后再走一遍`
-            : `**都表过态了，${r.agreedCount} 位都同意，这条已经定下来了。别再问了。**`;
+      if (settled) {
+        // **结论以「明确同意」为准，不是「都回过话」**（2026-10-07 付费跑测 065：
+        // 模型把「还差 N 位没表态」读成了「等大家都回一声就生效」，对住户说
+        // 「it only takes effect once everyone has answered」——回过话 ≠ 同意，
+        // 有人不同意一样不成立）。所以两条分支都把「明确同意」写在最前面。
+        state = `**${r.agreedCount} 位都明确同意，这条已经成立。别再问了。**`;
+      } else if (r.objectedCount > 0 && r.pendingNames.length === 0) {
+        state = `**都表过态了**（明确同意 ${r.agreedCount}，有异议 ${r.objectedCount}）—— **这条不成立**，按异议调整后再走一遍`;
       } else {
         state =
-          `同意 ${r.agreedCount}${r.objectedCount ? `，异议 ${r.objectedCount}` : ""}，` +
-          `**还差 ${r.pendingNames.length} 位没表态：${r.pendingNames.join("、")}**`;
+          `明确同意 ${r.agreedCount}${
+            r.objectedCount ? `，异议 ${r.objectedCount}` : ""
+          }，` +
+          `**还差 ${r.pendingNames.length} 位没有明确表态：${r.pendingNames.join("、")}**`;
       }
-      lines.push(`- [${r.kind}] ${r.statement}
+      lines.push(`- [${r.kind}] ${draft}${r.statement}
   → ${state}（id: ${r.id}）`);
     }
     lines.push(
-      "还差人没表态的：先照它执行，只问没表态的几位（表过态的别再问），答复用 " +
-        "recordStance 记。**老规则必须带上边括号里的 id**——不带 id 只对本轮刚用 " +
+      "**成立的条件是每个人都明确同意，不是每个人都回过话。**" +
+        "**还差人没表态的：它还不成立，不许按它去要求谁**，也不许说成已经定了——" +
+        "只问没表态的几位（表过态的别再问，没回不算同意），答复用 recordStance 记。" +
+        "**老规则必须带上边括号里的 id**——不带 id 只对本轮刚用 " +
         "proposeRule 提的规则有效，对着老规则会静默失败。"
     );
   }

@@ -1,6 +1,7 @@
 import "server-only";
 
 import postgres from "postgres";
+import type { FinalNoticeCandidate } from "./final-notice";
 import { assertCanWrite } from "./guard";
 import { householdIntakeSupplied } from "./intake-once";
 import { normalizePhone } from "./phone";
@@ -123,7 +124,15 @@ export type HouseRule = {
   id: string;
   kind: string;
   statement: string;
-  /** 走完一轮征询的时间。null = 还没问全，只是默认在跑 */
+  /**
+   * `'proposed'` = **还只是一版草案，没生效**；`'active'` = 全员明确同意后成立。
+   *
+   * 2026-10-06 起插入时是 `'proposed'`（`saveRule`），只有定案（`consulted_at`
+   * 写上且没有异议）才升 `'active'`（`closeConsultationIfComplete`）。渲染层据此
+   * 明确写出「草案（还没生效）」，不让一版草案在上下文里读起来像已经在跑的规矩。
+   */
+  status: "proposed" | "active";
+  /** 走完一轮征询的时间。null = 还没问全 */
   consultedAt: Date | null;
   agreedCount: number;
   objectedCount: number;
@@ -251,7 +260,7 @@ export async function getActiveRules(
   householdId: string
 ): Promise<HouseRule[]> {
   return await db()<HouseRule[]>`
-    select r.id, r.kind, r.statement,
+    select r.id, r.kind, r.statement, r.status,
            r.consulted_at as "consultedAt",
            coalesce(array_length(r.agreed_by, 1), 0) as "agreedCount",
            coalesce(array_length(r.objected, 1), 0) as "objectedCount",
@@ -288,12 +297,16 @@ export async function getOpenCases(householdId: string): Promise<OpenCase[]> {
 
 // ── 会话与消息 ───────────────────────────────────────────────────────────────
 
-export async function getOrCreateConversation(args: {
-  personId: string;
-  householdId: string;
-  channel: string;
-}): Promise<string> {
-  const rows = await db()<{ id: string }[]>`
+/**
+ * 取/建一条会话。**接受调用方的事务**（同 `insertDecision` / `insertCommunication`）：
+ * 定案通知那条「领取 (规则, 人) ＋ 写 decision ＋ 写 communication ＋ 写消息」必须在
+ * **同一个事务**里一次做完——见 `claimFinalNoticeDelivery` 里为什么。
+ */
+async function insertConversation(
+  sql: postgres.Sql | postgres.TransactionSql,
+  args: { personId: string; householdId: string; channel: string }
+): Promise<string> {
+  const rows = await sql<{ id: string }[]>`
     insert into coliving.conversation (person_id, household_id, channel)
     values (${args.personId}, ${args.householdId}, ${args.channel})
     on conflict (person_id, channel) do update
@@ -302,6 +315,40 @@ export async function getOrCreateConversation(args: {
     returning id
   `;
   return rows[0].id;
+}
+
+export async function getOrCreateConversation(args: {
+  personId: string;
+  householdId: string;
+  channel: string;
+}): Promise<string> {
+  return await insertConversation(db(), args);
+}
+
+/** 写一条消息。**接受调用方的事务**，理由同 `insertConversation`。 */
+async function insertMessage(
+  sql: postgres.Sql | postgres.TransactionSql,
+  args: {
+    conversationId: string;
+    personId: string;
+    direction: "inbound" | "outbound";
+    channel: string;
+    body: string;
+    externalMessageId?: string | null;
+    communicationId?: string | null;
+  }
+): Promise<string | null> {
+  const rows = await sql<{ id: string }[]>`
+    insert into coliving.message
+      (conversation_id, person_id, direction, channel, body,
+       external_message_id, communication_id)
+    values (${args.conversationId}, ${args.personId}, ${args.direction},
+            ${args.channel}, ${args.body},
+            ${args.externalMessageId ?? null}, ${args.communicationId ?? null})
+    on conflict do nothing
+    returning id
+  `;
+  return rows[0]?.id ?? null;
 }
 
 export async function appendMessage(args: {
@@ -314,17 +361,7 @@ export async function appendMessage(args: {
   communicationId?: string | null;
   /** 返回消息 id，调用方要用它把「人类回应」关联回对应的沟通 */
 }): Promise<string | null> {
-  const rows = await db()<{ id: string }[]>`
-    insert into coliving.message
-      (conversation_id, person_id, direction, channel, body,
-       external_message_id, communication_id)
-    values (${args.conversationId}, ${args.personId}, ${args.direction},
-            ${args.channel}, ${args.body},
-            ${args.externalMessageId ?? null}, ${args.communicationId ?? null})
-    on conflict do nothing
-    returning id
-  `;
-  return rows[0]?.id ?? null;
+  return await insertMessage(db(), args);
 }
 
 /**
@@ -892,7 +929,7 @@ function replyDueFor(
   return hours === null ? null : new Date(Date.now() + hours * 3600 * 1000);
 }
 
-export async function queueCommunication(args: {
+export type CommunicationInput = {
   householdId: string;
   decisionId?: string | null;
   caseId?: string | null;
@@ -904,10 +941,19 @@ export async function queueCommunication(args: {
   act?: CommunicationAct | null;
   /** 要不要盯着对方回音。**默认 false**，见 coliving-world-15.sql 的说明 */
   expectsReply?: boolean;
-}): Promise<string> {
+};
+
+/**
+ * 入队一条 communication。**接受调用方的事务**（同 `insertDecision`）：定案通知那条
+ * 「查在途回执 ＋ 落库」必须在同一个事务、同一把咨询锁里，不能分成两次连接写。
+ */
+async function insertCommunication(
+  sql: postgres.Sql | postgres.TransactionSql,
+  args: CommunicationInput
+): Promise<string> {
   const act = args.act ?? null;
   const expectsReply = args.expectsReply ?? false;
-  const rows = await db()<{ id: string }[]>`
+  const rows = await sql<{ id: string }[]>`
     insert into coliving.communication
       (household_id, decision_id, case_id, to_person_id, channel, purpose, body,
        act, expects_reply, reply_due_at)
@@ -918,6 +964,12 @@ export async function queueCommunication(args: {
     returning id
   `;
   return rows[0].id;
+}
+
+export async function queueCommunication(
+  args: CommunicationInput
+): Promise<string> {
+  return await insertCommunication(db(), args);
 }
 
 export async function findRecentOpenCommunication(args: {
@@ -1213,6 +1265,18 @@ export async function setHouseholdUnit(args: {
  *
  * 同 kind 的旧规则**不删除**，而是 retire 掉——保留历史而不是覆盖历史。
  * `agreedBy` 是 Ostrom 那条：规则由住的人参与形成才活得下来，所以要记谁同意过。
+ *
+ * ## 新记下来的是**草案**（`status = 'proposed'`），不是生效的规则
+ *
+ * 2026-10-06 改。以前这里一插入就写 `'active'`，等于把「AI 拟的一版」直接当成
+ * 全屋生效的规矩——住户还没表态就被当成已经定了，也是「AI 有个人权威」那类问题的
+ * 一部分。现在：
+ *
+ * - 插入 `'proposed'`（草案），**草案本身不生效、不许拿去要求谁**；
+ * - **草案只顶掉草案**：同 kind 里旧的 `'proposed'` 行 retire 掉（否则模型每提一版
+ *   就在上下文里堆一行）；**在跑的 `'active'` 不动**——旧规则在新规则真正定案之前
+ *   一直有效，这才是「草案不是规章」该有的样子；
+ * - 升 `'active'` 与 retire 旧规则都挪到**定案那一刻**（`closeConsultationIfComplete`）。
  */
 export async function saveRule(args: {
   householdId: string;
@@ -1227,12 +1291,12 @@ export async function saveRule(args: {
       set status = 'retired', valid_to = now()
       where household_id = ${args.householdId}
         and kind = ${args.kind}
-        and status = 'active'
+        and status = 'proposed'
     `;
     const rows = await tx<{ id: string }[]>`
       insert into coliving.rule
         (household_id, kind, statement, status, agreed_by, source_case_id)
-      values (${args.householdId}, ${args.kind}, ${args.statement}, 'active',
+      values (${args.householdId}, ${args.kind}, ${args.statement}, 'proposed',
               ${tx.array(args.agreedBy ?? [])}::uuid[],
               ${args.sourceCaseId ?? null})
       returning id
@@ -2046,14 +2110,6 @@ export async function recordConsultation(args: {
   }
 }
 
-/** 所有在住的人都问过了 → 这条规则算走完一轮，正式成立 */
-export async function closeConsultation(ruleId: string): Promise<void> {
-  await db()`
-    update coliving.rule set consulted_at = now(), status = 'active'
-    where id = ${ruleId}
-  `;
-}
-
 /**
  * 表态齐了就自动收口。**由代码判断，不靠模型**。
  *
@@ -2070,29 +2126,347 @@ export async function closeConsultation(ruleId: string): Promise<void> {
  * 过：recordStance 的返回提示原样写死"这条规则已经定下来"，一个人同意
  * 都没有、只有一条异议，也被这么告诉模型），所以额外把 objectedCount
  * 带出去。
+ *
+ * ## 有异议时**不许**把规则置成 `'active'`（2026-10-06 修）
+ *
+ * 以前这条 SQL 无论是非都把 `status` 写成 `'active'`：一条只有异议、谁也
+ * 没同意的规则，在库里读起来和「全员同意生效」一模一样（`getActiveRules`
+ * 把 `status in ('active','proposed')` 一起读，`context.ts` 靠 `objectedCount`
+ * 才没念错成「已经定下来了」——但库里的状态本身已经在撒谎）。
+ * 现在：
+ *
+ * - **有异议** → 仍然记 `consulted_at`（这一轮确实问完了，模型不该被催着
+ *   再问一遍），但 `status` 保持原样（`'proposed'`）。规则**不成立**，
+ *   要按异议改了再走一轮。
+ * - **无异议** → 升 `'active'`，并**在这一刻**把同 kind 里旧的 `'active'`
+ *   规则 retire 掉（`saveRule` 只顶掉旧草案，不顶在跑的规则——退休动作
+ *   属于「新规则真的定案了」，不属于「有人提了一版」）。
+ *
+ * `objected_count` 取自 `returning` 里的**同一行**，所以「升不升 active」与
+ * 「告诉调用方有没有异议」用的是同一个数字，不会两处不一致。
+ *
+ * ## `consulted_at` 不是收口开关；反对者改口同意要能再收口一次（2026-10-06 补）
+ *
+ * 上面那版把 `consulted_at is null` 当成**唯一的收口闸**，于是留下一个死角：
+ * 全员都表过态、其中一条是异议 → 记 `consulted_at`、状态停在 `'proposed'`；
+ * 之后**同一个人对同一条没改过的草案改口同意** → `consulted_at` 已经非空，
+ * 收口 SQL 从此不再执行：这条规则既不会升 `'active'`，也**永远不会登记定案通知**。
+ *
+ * 现在收口与否**现场算**（就是 `not exists` 那条拿名册比 `agreed_by` / `objected`），
+ * `consulted_at` 只做审计戳——这正是 `coliving-world-10.sql` 给这一列下的定义
+ * （"不再是完成判断的依据"）。闸门改成：
+ *
+ * - `'proposed'` 的草案**永远可以收口**，包括异议撤回之后的第二次；
+ * - 从没收口过的旧行（`'active'` 且 `consulted_at is null`）照旧允许收口；
+ * - **已经收口过的 `'active'` 规则不再重收**——幂等，不会重复登记待发台账；
+ * - **已退休 / 有效期已过的行一律不收口**：`saveRule` 退休旧草案时写的就是
+ *   `status='retired' + valid_to`，模型手里那个陈旧 `ruleId` 不能把一条退休规则
+ *   重新置成 `'active'`、再群发一遍定案通知。
  */
 export async function closeConsultationIfComplete(
   ruleId: string
 ): Promise<{ done: boolean; objectedCount: number }> {
   const rows = await db()<{ id: string; objected_count: number }[]>`
-    update coliving.rule r
-    set consulted_at = now(), status = 'active'
-    where r.id = ${ruleId}
-      and r.consulted_at is null
-      and not exists (
-        select 1 from coliving.membership mb
-        join coliving.person p on p.id = mb.person_id
-        where mb.household_id = r.household_id
-          and mb.valid_to is null
-          and mb.resides is not false
-          and not (p.id = any(r.agreed_by))
-          and not (p.id = any(r.objected))
-      )
-    returning r.id, coalesce(array_length(r.objected, 1), 0) as objected_count
+    with target as (
+      select r.id, r.household_id from coliving.rule r where r.id = ${ruleId}
+    ),
+    expected as (
+      select array_agg(p.id) as ids
+      from target t
+      join coliving.membership mb on mb.household_id = t.household_id
+      join coliving.person p on p.id = mb.person_id
+      where mb.valid_to is null and mb.resides is not false
+    ),
+    closed as (
+      update coliving.rule r
+      set consulted_at = now(),
+          status = case when coalesce(array_length(r.objected, 1), 0) = 0
+                        then 'active' else r.status end
+      where r.id = ${ruleId}
+        -- 只认在册的草案 / 在跑的规则。已退休、或有效期已过的行不能被一个陈旧
+        -- id 复活（saveRule 退休旧草案时填的就是 status='retired' + valid_to）。
+        and r.status in ('proposed', 'active')
+        and (r.valid_to is null or r.valid_to > now())
+        -- **收口与否现场算，不拿 consulted_at 当完成开关**（见上「consulted_at
+        -- 不是收口开关」与 coliving-world-10.sql 对那一列的定义）。这一条同时
+        -- 管幂等：草案永远可以收口（含"先有人反对、后来同一个人改口同意"的第二次
+        -- 收口）；从没收口过的旧行照旧允许收口；**已经收口过的 'active' 规则不再
+        -- 重收**，所以待发台账不会重复登记。
+        and (r.status = 'proposed' or r.consulted_at is null)
+        and not exists (
+          select 1 from coliving.membership mb
+          join coliving.person p on p.id = mb.person_id
+          where mb.household_id = r.household_id
+            and mb.valid_to is null
+            and mb.resides is not false
+            and not (p.id = any(r.agreed_by))
+            and not (p.id = any(r.objected))
+        )
+      returning r.id, r.kind, r.household_id,
+                coalesce(array_length(r.objected, 1), 0) as objected_count
+    ),
+    retired as (
+      update coliving.rule prev
+      set status = 'retired', valid_to = now()
+      from closed c
+      where prev.household_id = c.household_id
+        and prev.kind = c.kind
+        and prev.id <> c.id
+        and prev.status = 'active'
+        and c.objected_count = 0
+      returning prev.id
+    ),
+    notice_work as (
+      insert into coliving.decision
+        (household_id, kind, target_person_ids, intent, rationale, model_id,
+         doctrine_modules, context_chars, context_snapshot, payload)
+      select c.household_id, 'contact_group', e.ids,
+             '共同规则定案通知（待发台账）',
+             '代码在规则定案那一刻登记的定案通知待办：参与人名单冻结在此，' ||
+             '回执按 (规则, 人) 记；只有登记过的规则才会被补发，历史规则不回溯。',
+             null, '{}'::text[], 0, null,
+             jsonb_build_object(
+               'finalNoticeRuleId', c.id::text,
+               'finalNoticePersonIds', array_to_string(e.ids, ',')
+             )
+      from closed c, expected e
+      where c.objected_count = 0 and e.ids is not null
+      returning id
+    )
+    select id, objected_count from closed
   `;
   return rows.length > 0
     ? { done: true, objectedCount: rows[0].objected_count }
     : { done: false, objectedCount: 0 };
+}
+
+/**
+ * **定案通知的待发台账**：只列**登记过通知待办**、且还有人没拿到的规则。
+ *
+ * 待办是 `closeConsultationIfComplete` 在**定案那一刻**写下的 `contact_group` decision
+ * （`payload.finalNoticeRuleId` ＋ `finalNoticePersonIds`）。所以驱动表是 `decision`，
+ * **不是 `rule`**：上线前就已定案的老规则没有待办、永远不会被翻出来群发；参与人名单
+ * **冻结在定案那一刻**（之后搬进来的人不会被通知「大家都同意了」，他根本没参与过）；
+ * 共识证明是显式的——登记的每一位都必须真的在 `r.agreed_by` 里，不用
+ * 「`consulted_at` 有值 ＋ 没异议」间接推断。
+ *
+ * 回执按 `decision.payload` 里代码写死的两个 id（`finalNoticeRuleId` ＋
+ * `finalNoticePersonId`，先例是 `latestBlacklistReference`）关联
+ * `communication.status`，且**收件人要对上**（`c.to_person_id =
+ * payload.finalNoticePersonId`）——本轮那条 decision 是整轮共用的，别的工具也挂在
+ * 它下面，只按 decision 认会把无关消息当成收据。`sent` 才算已通知；`queued` 在途先不
+ * 重发、**不算已通知**，日后变 `failed` / `skipped` 自动落回待发。名册口径与
+ * `getActiveRules` 一致（`valid_to is null` ＋ `resides is not false`）。
+ *
+ * **返回的每一条都真的还有人没拿到**（`limit` 之前就按同一套回执判据筛过），且按
+ * 定案时间从老到新排——待办在库里是永久的，不筛就会被发完的老规则占满名额。
+ */
+export async function finalNoticeCandidates(
+  householdId: string
+): Promise<FinalNoticeCandidate[]> {
+  return await db()<FinalNoticeCandidate[]>`
+    select * from (
+    select distinct on (d.payload->>'finalNoticeRuleId')
+           d.payload->>'finalNoticeRuleId' as "ruleId",
+           r.statement,
+           r.consulted_at as "consultedAt",
+           coalesce(array_length(r.objected, 1), 0) as "objectedCount",
+           coalesce((
+             select json_agg(json_build_object('personId', p.id,
+                                               'name', p.display_name)
+                             order by p.display_name)
+             from unnest(
+                    string_to_array(d.payload->>'finalNoticePersonIds', ',')::uuid[]
+                  ) as u(pid)
+             join coliving.membership mb on mb.person_id = u.pid
+               and mb.household_id = r.household_id
+               and mb.valid_to is null
+               and mb.resides is not false
+             join coliving.person p on p.id = u.pid
+           ), '[]'::json) as "residents",
+           coalesce((
+             select array_agg(distinct c.to_person_id)
+             from coliving.decision rd
+             join coliving.communication c on c.decision_id = rd.id
+             where rd.household_id = r.household_id
+               and rd.payload->>'finalNoticeRuleId' = r.id::text
+               and rd.payload->>'finalNoticePersonId' is not null
+               -- **收件人也必须对上**：本轮那条 decision 是整轮共用的，别的工具
+               -- （contactPerson / 回复本身）也挂在它下面；只按 decision 认，会把
+               -- 「发给别人的一条无关消息」当成这个人已收到定案通知。
+               and c.to_person_id = (rd.payload->>'finalNoticePersonId')::uuid
+               and c.status = 'sent'
+           ), '{}') as "acceptedPersonIds",
+           coalesce((
+             select array_agg(distinct c.to_person_id)
+             from coliving.decision rd
+             join coliving.communication c on c.decision_id = rd.id
+             where rd.household_id = r.household_id
+               and rd.payload->>'finalNoticeRuleId' = r.id::text
+               and rd.payload->>'finalNoticePersonId' is not null
+               and c.to_person_id = (rd.payload->>'finalNoticePersonId')::uuid
+               and c.status = 'queued'
+           ), '{}') as "inFlightPersonIds"
+    from coliving.decision d
+    join coliving.rule r on r.id = (d.payload->>'finalNoticeRuleId')::uuid
+    where d.household_id = ${householdId}
+      and d.kind = 'contact_group'
+      and d.payload->>'finalNoticeRuleId' is not null
+      and d.payload->>'finalNoticePersonIds' is not null
+      and r.status = 'active'
+      and not exists (
+        select 1
+        from unnest(
+               string_to_array(d.payload->>'finalNoticePersonIds', ',')::uuid[]
+             ) as u(pid)
+        where not (u.pid = any(r.agreed_by))
+      )
+      -- **只列还真有人没拿到的待办，而且要在 limit 之前筛**：不筛的话，早就全部发完的
+      -- 老待办会一直占着这 10 个位置，新的待办永远排不进来（这条待办在库里是永久的，
+      -- 已经全发完的规则不会消失）。判据与下面算回执的那两个子查询同一套：
+      -- 这个人有 sent/queued 的通知就不算缺口。
+      and exists (
+        select 1
+        from unnest(
+               string_to_array(d.payload->>'finalNoticePersonIds', ',')::uuid[]
+             ) as u(pid)
+        join coliving.membership mb on mb.person_id = u.pid
+          and mb.household_id = r.household_id
+          and mb.valid_to is null
+          and mb.resides is not false
+        where not exists (
+          select 1
+          from coliving.decision rd
+          join coliving.communication c on c.decision_id = rd.id
+          where rd.household_id = r.household_id
+            and rd.payload->>'finalNoticeRuleId' = r.id::text
+            and rd.payload->>'finalNoticePersonId' = u.pid::text
+            and c.to_person_id = u.pid
+            and c.status in ('sent', 'queued')
+        )
+      )
+    order by d.payload->>'finalNoticeRuleId', d.decided_at desc
+    ) t
+    -- 等得最久的先发；条数上限之外的那些留到下一轮，下一轮它们就是最老的。
+    order by t."consultedAt" nulls last, t."ruleId"
+    limit 10
+  `;
+}
+
+/**
+ * **领一条定案通知的落库位置（同一 (规则, 人) 只能领到一次）。**
+ *
+ * 回执本来就是 `coliving.communication.status`（`sent` 算数、`queued` 在途），但
+ * 「查有没有在途回执」和「写下这条 communication」如果分成两次连接，两个并发轮次会
+ * 同时查到"还没有"、于是同一个人收到两条一样的定案通知。所以这里在**一个事务**里：
+ * 拿 `(规则, 人)` 的咨询锁 → 复查回执 → 写 decision（带 `finalNoticeRuleId` ＋
+ * `finalNoticePersonId`，回执靠这两个 id 关联回来）→ 写 communication → 写那条
+ * 出站消息，**一次做完**。
+ *
+ * **消息也放进同一个事务，是 2026-10-07 修的一处静默丢件**：领取成功、可后面
+ * 「取会话 / 写消息」那两步在**另一次连接**上做，任一失败就只剩一条 `queued` 的
+ * communication——没有 provider 回执（调用方拿不到投递地址）、也没有任何重试（台账
+ * 把 `queued` 当在途，那个人从此被划掉），这位住户的定案通知就永远发不出去了。
+ * 收进同一个事务之后，失败整体回滚：这条 `(规则, 人)` **没被领走**，人仍在待发名单里，
+ * 下一轮相关话题照旧重来。**不另立「已通知」标记、也不加 outbox 机制**——回执仍然只有
+ * `communication.status` 这一个来源。
+ *
+ * 领到返回两个 id，调用方接着投递（消息已经在库里了）；**没领到返回 `claimed:false`**
+ * ——那条通知已经在路上（别人已发或在途），调用方什么都不用做，不是缺口。
+ *
+ * 只吃代码算出来的 id，不碰模型自由文本；`assertCanWrite` 硬闸在这里、**写之前**跑
+ * （调用方可能已经把正文交进来了，但一个字都还没落库）。
+ */
+export async function claimFinalNoticeDelivery(args: {
+  householdId: string;
+  /** 目标房子是不是测试屋——只给 `assertCanWrite` 硬闸用。 */
+  senderIsTest: boolean;
+  ruleId: string;
+  personId: string;
+  channel: string;
+  body: string;
+  purpose: string;
+  caseId?: string | null;
+  act?: CommunicationAct | null;
+  expectsReply?: boolean;
+  /** decision 的形状：单独发通知是 `contact_one`，并进本轮回复是 `reply_only`。 */
+  decisionKind: string;
+  decisionIntent: string;
+  decisionRationale: string | null;
+  /** 单独发通知时给（这条 decision 针对谁）；并入回复时为空。 */
+  targetPersonIds?: string[] | null;
+  /**
+   * 消息要写进哪条会话。**并进本轮回复时给**（当前说话人的会话已经在了）；
+   * 单独发通知时不给，按 (人, 渠道) 在同一个事务里取/建。
+   */
+  conversationId?: string | null;
+}): Promise<{
+  claimed: boolean;
+  decisionId: string | null;
+  communicationId: string | null;
+}> {
+  assertCanWrite({
+    isTestHousehold: args.senderIsTest,
+    what: `发送定案通知（${args.ruleId}）`,
+  });
+  return await db().begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${`final-notice:${args.ruleId}:${args.personId}`}))`;
+    const existing = await tx<{ id: string }[]>`
+      select c.id
+      from coliving.decision rd
+      join coliving.communication c on c.decision_id = rd.id
+      where rd.household_id = ${args.householdId}
+        and rd.payload->>'finalNoticeRuleId' = ${args.ruleId}
+        and rd.payload->>'finalNoticePersonId' = ${args.personId}
+        and c.to_person_id = ${args.personId}::uuid
+        and c.status in ('sent', 'queued')
+      limit 1
+    `;
+    if (existing.length > 0) {
+      return { claimed: false, decisionId: null, communicationId: null };
+    }
+    const decisionId = await insertDecision(tx, {
+      householdId: args.householdId,
+      kind: args.decisionKind,
+      targetPersonIds: args.targetPersonIds ?? [],
+      intent: args.decisionIntent,
+      rationale: args.decisionRationale,
+      modelId: null,
+      payload: {
+        finalNoticeRuleId: args.ruleId,
+        finalNoticePersonId: args.personId,
+      },
+    });
+    const communicationId = await insertCommunication(tx, {
+      householdId: args.householdId,
+      decisionId,
+      caseId: args.caseId ?? null,
+      toPersonId: args.personId,
+      channel: args.channel,
+      purpose: args.purpose,
+      body: args.body,
+      act: args.act ?? null,
+      expectsReply: args.expectsReply ?? false,
+    });
+    // **领取、communication、消息三样一起成败**：只领到前两样而消息没写进去，
+    // 就是一条永远不会被投递、也不会被重试的 `queued`（见上面的说明）。
+    const conversationId =
+      args.conversationId ??
+      (await insertConversation(tx, {
+        personId: args.personId,
+        householdId: args.householdId,
+        channel: args.channel,
+      }));
+    await insertMessage(tx, {
+      conversationId,
+      personId: args.personId,
+      direction: "outbound",
+      channel: args.channel,
+      body: args.body,
+      communicationId,
+    });
+    return { claimed: true, decisionId, communicationId };
+  });
 }
 
 // ── 主动发起的候选 ───────────────────────────────────────────────────────────
