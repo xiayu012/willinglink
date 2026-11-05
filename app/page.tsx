@@ -1,24 +1,25 @@
 import type { Metadata } from "next";
-import {
-  ArrowDown,
-  ArrowRight,
-  Check,
-  CheckCheck,
-  ChevronDown,
-  CircleCheck,
-  FileText,
-  Mail,
-  MessageSquare,
-  ShieldCheck,
-  Sparkles,
-  Zap,
-} from "lucide-react";
+import Image from "next/image";
+import { ArrowRight, ChevronDown, Leaf } from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
-  title: "FretGone — Your HOA. Off your plate.",
+  title: "FretGone — A community you shape. A place that feels yours.",
   description:
-    "We handle your HOA’s conversations, coordination, and routine follow-through. No new app for homeowners. From $200 per HOA per month. First month free.",
+    "Every owner has a voice. FretGone handles the conversations, coordination, and everyday follow-through behind your HOA. From $200 per community per month. First month free.",
+  openGraph: {
+    title: "FretGone — A community you shape.",
+    description:
+      "Self-governance. Without the administrative burden. HOA coordination from $200/month. First month free.",
+    images: [
+      {
+        url: "/images/community-open-gate.webp",
+        width: 1536,
+        height: 1024,
+        alt: "A homeowner opening a garden gate into her neighborhood.",
+      },
+    ],
+  },
 };
 const email = "mailto:contact@fretgone.com";
 
@@ -29,379 +30,253 @@ export default function Home() {
         Skip to content
       </a>
       <header className={styles.header}>
-        <a href="/" className={styles.brand} aria-label="FretGone home">
-          <span className={styles.logo}>
-            <Zap size={19} fill="currentColor" />
-          </span>
+        <a className={styles.brand} href="/" aria-label="FretGone home">
           fretgone<span>.</span>
         </a>
         <nav aria-label="Main navigation">
-          <a href="#how-it-works">How it works</a>
+          <a href="#service">The service</a>
           <a href="#pricing">Pricing</a>
-          <a href="#questions">FAQs</a>
+          <a href={email}>Contact</a>
         </nav>
-        <a href={email} className={styles.navCta}>
-          Let’s talk <ArrowRight size={16} />
+        <a className={styles.headerCta} href={email}>
+          First month free <ArrowRight size={15} />
         </a>
       </header>
       <main id="main">
-        <section className={styles.hero}>
-          <div className={styles.container}>
-            <div className={styles.heroGrid}>
-              <div className={styles.heroCopy}>
-                <div className={styles.pill}>
-                  <span /> HOA BACK-OFFICE SERVICE
-                </div>
-                <h1>
-                  Your HOA.
-                  <br />
-                  <span>Off your plate.</span>
-                </h1>
-                <p>
-                  We handle the conversations, coordination, and everyday
-                  follow-through. Your owners have a voice. Your board gets its
-                  time back.
-                </p>
-                <div className={styles.heroActions}>
-                  <a href={email} className={styles.button}>
-                    Get your first month free <ArrowRight size={18} />
-                  </a>
-                  <a href="#how-it-works" className={styles.secondaryLink}>
-                    See how it works <ArrowDown size={16} />
-                  </a>
-                </div>
-                <div className={styles.heroPrice}>
-                  <strong>
-                    From $200<span>/month</span>
-                  </strong>
-                  <span>For your entire HOA.</span>
-                </div>
-              </div>
-              <div
-                className={styles.scene}
-                aria-label="Illustrative example of the service workflow"
-              >
-                <div className={styles.sceneLabel}>
-                  <Sparkles size={14} /> THE WORK MOVES. YOU DON’T HAVE TO.
-                </div>
-                <div className={styles.workboard}>
-                  <div className={styles.boardHeader}>
-                    <div>
-                      <span className={styles.boardIcon}>
-                        <Zap size={17} fill="currentColor" />
-                      </span>
-                      <strong>Your community, moving forward.</strong>
-                    </div>
-                    <span className={styles.example}>EXAMPLE</span>
-                  </div>
-                  <div className={styles.boardBody}>
-                    <div className={styles.boardIntro}>
-                      <div>
-                        <small>THE BIG PICTURE</small>
-                        <h2>
-                          Less in your inbox.
-                          <br />
-                          More taken care of.
-                        </h2>
-                      </div>
-                      <span className={styles.orbit}>
-                        <CheckCheck size={30} strokeWidth={2.5} />
-                      </span>
-                    </div>
-                    <div className={styles.task}>
-                      <span className={styles.taskIcon}>
-                        <MessageSquare size={17} />
-                      </span>
-                      <div>
-                        <strong>Courtyard ideas</strong>
-                        <span>Owner feedback gathered</span>
-                      </div>
-                      <span className={styles.status}>Heard</span>
-                    </div>
-                    <div className={styles.task}>
-                      <span className={styles.taskIcon}>
-                        <CheckCheck size={19} />
-                      </span>
-                      <div>
-                        <strong>A shared proposal</strong>
-                        <span>Common ground & open concerns</span>
-                      </div>
-                      <span className={styles.blueStatus}>Recorded</span>
-                    </div>
-                    <div className={styles.task}>
-                      <span className={styles.taskIcon}>
-                        <FileText size={17} />
-                      </span>
-                      <div>
-                        <strong>The board journal</strong>
-                        <span>Conversations & next steps, together</span>
-                      </div>
-                      <span className={styles.status}>Updated</span>
-                    </div>
-                    <div className={styles.boardBottom}>
-                      <ShieldCheck size={14} />
-                      <span>Your authority. Your approval.</span>
-                      <span>↗</span>
-                    </div>
-                  </div>
-                </div>
-                <div className={styles.approval}>
-                  <span className={styles.approvalIcon}>
-                    <ShieldCheck size={22} />
-                  </span>
-                  <div>
-                    <strong>A purchase needs your OK.</strong>
-                    <span>Review it from your phone.</span>
-                  </div>
-                  <span className={styles.reviewLabel}>
-                    For review <ArrowRight size={13} />
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div className={styles.heroChecks}>
+        <section className={styles.hero} aria-labelledby="hero-title">
+          <div className={styles.heroArt}>
+            <Image
+              className={styles.heroImage}
+              src="/images/community-open-gate.webp"
+              alt="A homeowner opens her garden gate toward a sunlit neighborhood where people are enjoying their own daily lives."
+              fill
+              priority
+              sizes="(max-width: 760px) 100vw, 76vw"
+            />
+          </div>
+          <div className={styles.heroVeil} />
+          <div className={styles.heroContent}>
+            <p className={styles.eyebrow}>HOA COORDINATION, DONE FOR YOU</p>
+            <h1 id="hero-title">
+              A community <br />
+              you shape.
               <span>
-                <Check size={16} /> No new homeowner accounts
+                A place that <br />
+                feels yours.
               </span>
-              <span>
-                <Check size={16} /> Keep your existing tools
-              </span>
-              <span>
-                <Check size={16} /> Sensitive actions need your approval
-              </span>
-            </div>
+            </h1>
+            <p className={styles.heroDescription}>
+              Every owner deserves a voice in what happens next. We bring those
+              voices together—and take the coordination off your board’s hands.
+            </p>
+            <p className={styles.heroPromise}>
+              Self-governance.
+              <br className={styles.mobileBreak} /> Without the administrative
+              burden.
+            </p>
+            <a className={styles.button} href={email}>
+              Start with a free month <ArrowRight size={18} />
+            </a>
+            <p className={styles.heroNote}>
+              Familiar text & email. No new homeowner accounts.
+            </p>
+          </div>
+        </section>
+        <section
+          id="pricing"
+          className={styles.priceBar}
+          aria-label="HOA service pricing"
+        >
+          <div className={styles.basePrice}>
+            <strong>
+              $200<span>/month</span>
+            </strong>
+            <span>For your entire HOA · under 500 homes</span>
+          </div>
+          <div className={styles.largePrice}>
+            <strong>500–999 homes: $500/month</strong>
+            <span>1,000+ homes: not currently available</span>
+          </div>
+          <a href={email}>
+            Your first month is on us <ArrowRight size={18} />
+          </a>
+        </section>
+
+        <section id="service" className={styles.section}>
+          <div className={styles.sectionHeading}>
+            <p className={styles.eyebrow}>
+              MORE VOICE. LESS WEIGHT ON YOUR SHOULDERS.
+            </p>
+            <h2>
+              Being part of a community
+              <br />
+              shouldn’t be a second job.
+            </h2>
+            <p>
+              Owners keep reaching out by text and email. We handle the
+              listening, the back-and-forth, and the next steps—so participation
+              leads somewhere.
+            </p>
+          </div>
+          <div className={styles.steps}>
+            <article>
+              <span>01 / LISTEN</span>
+              <h3>Every owner heard.</h3>
+              <p>
+                Gather views and ask the follow-up questions. Give people room
+                to participate, without making everyone attend another meeting.
+              </p>
+            </article>
+            <article>
+              <span>02 / FIND COMMON GROUND</span>
+              <h3>A way forward, together.</h3>
+              <p>
+                Work toward proposals people can agree on. When views differ,
+                preserve the concerns and the path the conversation took.
+              </p>
+            </article>
+            <article>
+              <span>03 / CARRY IT THROUGH</span>
+              <h3>Less left on the board.</h3>
+              <p>
+                Handle authorized routine follow-through. Bring sensitive steps
+                to a board member for approval, with a clear record of what
+                happens.
+              </p>
+            </article>
           </div>
         </section>
 
-        <section
-          id="how-it-works"
-          className={`${styles.section} ${styles.container}`}
-        >
-          <div className={styles.sectionHeading}>
+        <section className={styles.setup}>
+          <div className={styles.setupInner}>
+            <span className={styles.setupMark}>
+              <Leaf size={33} strokeWidth={1.1} />
+            </span>
             <div>
-              <span className={styles.kicker}>
-                YOUR COMMUNITY. LESS BUSYWORK.
-              </span>
+              <p className={styles.eyebrow}>A SIMPLE BEGINNING</p>
               <h2>
-                From “someone should”
+                One board member.
                 <br />
-                to <span>taken care of.</span>
+                About ten minutes to get started.
               </h2>
-            </div>
-            <p>
-              Homeowners keep using text and email.
-              <br />
-              We take on the work in between.
-            </p>
-          </div>
-          <div className={styles.features}>
-            <article>
-              <div className={styles.featureTop}>
-                <span className={styles.featureIcon}>
-                  <MessageSquare size={23} />
-                </span>
-                <span>01</span>
-              </div>
-              <h3>Hear every owner.</h3>
               <p>
-                Gather opinions, ask follow-up questions, and give everyone a
-                way to participate.
-              </p>
-            </article>
-            <article>
-              <div className={styles.featureTop}>
-                <span className={styles.featureIcon}>
-                  <CheckCheck size={25} />
-                </span>
-                <span>02</span>
-              </div>
-              <h3>Find a way forward.</h3>
-              <p>
-                Work toward a proposal people can agree on. If they can’t, keep
-                a clear record of why.
-              </p>
-            </article>
-            <article>
-              <div className={styles.featureTop}>
-                <span className={styles.featureIcon}>
-                  <CircleCheck size={23} />
-                </span>
-                <span>03</span>
-              </div>
-              <h3>Handle the follow-through.</h3>
-              <p>
-                Carry out authorized routine work. Send sensitive actions to
-                your board for approval.
-              </p>
-            </article>
-          </div>
-          <div className={styles.setup}>
-            <div className={styles.setupIcon}>
-              <Zap size={24} />
-            </div>
-            <div>
-              <h3>One board member. About 10 minutes to get started.</h3>
-              <p>
-                Authorize your channels. Agree on boundaries. We confirm the
-                tool setup together.
+                A short setup conversation to authorize your channels and agree
+                on boundaries. We confirm your existing tools, journal access,
+                and approval workflow together.
               </p>
             </div>
-            <a href={email}>
-              Let’s talk setup <ArrowRight size={17} />
+            <a href={email} className={styles.textLink}>
+              Talk through your setup <ArrowRight size={17} />
             </a>
           </div>
         </section>
 
-        <section id="pricing" className={styles.pricingSection}>
-          <div className={styles.container}>
-            <div className={styles.pricingHeading}>
-              <div>
-                <span className={styles.kicker}>
-                  ONE HOA. ONE MONTHLY PRICE.
-                </span>
-                <h2>
-                  A small bill.
-                  <br />
-                  <span>A big weight off.</span>
-                </h2>
-              </div>
-              <div className={styles.freeBadge}>
-                <Sparkles size={18} /> First month free.
-              </div>
-            </div>
-            <div className={styles.prices}>
-              <article className={styles.priceCard}>
-                <div className={styles.planHeading}>
-                  <h3>Under 500 homes</h3>
-                  <span>ENTIRE HOA</span>
-                </div>
-                <p className={styles.price}>
-                  $200<span>USD / month</span>
-                </p>
-                <a href={email} className={styles.button}>
-                  Start with a free month <ArrowRight size={17} />
-                </a>
-              </article>
-              <article className={styles.priceCard}>
-                <div className={styles.planHeading}>
-                  <h3>500–999 homes</h3>
-                  <span>ENTIRE HOA</span>
-                </div>
-                <p className={styles.price}>
-                  $500<span>USD / month</span>
-                </p>
-                <a href={email} className={styles.outlineButton}>
-                  Start with a free month <ArrowRight size={17} />
-                </a>
-              </article>
-            </div>
-            <div className={styles.pricingFoot}>
-              <p>
-                <Check size={15} /> Both plans: conversations, coordination, a
-                board journal, and authorized follow-through.
-              </p>
-              <span>1,000+ homes: not currently available.</span>
-            </div>
-          </div>
-        </section>
-
-        <section
-          id="questions"
-          className={`${styles.section} ${styles.container} ${styles.faq}`}
-        >
+        <section className={`${styles.section} ${styles.faq}`}>
           <div>
-            <span className={styles.kicker}>
-              GOOD QUESTIONS. CLEAR ANSWERS.
-            </span>
+            <p className={styles.eyebrow}>CONFIDENCE COMES FROM CLARITY</p>
             <h2>
-              A little clarity.
+              Your community.
               <br />
-              <span>Then, let’s talk.</span>
+              Your say.
             </h2>
-            <a href={email} className={styles.contactLink}>
-              contact@fretgone.com <ArrowRight size={16} />
+            <p className={styles.faqIntro}>
+              We take on the work.
+              <br />
+              Your board keeps its authority.
+            </p>
+            <a className={styles.textLink} href={email}>
+              Ask us anything <ArrowRight size={17} />
             </a>
           </div>
           <div className={styles.questions}>
             <details>
               <summary>
-                Is this another app we need to learn?
-                <ChevronDown size={18} />
+                Are we buying software or a service?
+                <ChevronDown size={17} />
               </summary>
               <p>
-                No new FretGone accounts. This is a service that does the work.
-                Owners keep texting and emailing; your board gets a shared
-                Notion journal to read without a Notion signup. Access is
-                arranged during setup.
+                A service that does the work: homeowner conversations,
+                coordination, documentation, and authorized follow-through.
+                Owners keep using text and email. There is no new FretGone app
+                or account for them to learn.
               </p>
             </details>
             <details>
               <summary>
-                What stays in the board’s hands?
-                <ChevronDown size={18} />
+                How does the board stay informed?
+                <ChevronDown size={17} />
               </summary>
               <p>
-                Your board keeps its authority and responsibilities. We work
-                within agreed permissions, seek owner agreement, and keep
-                unresolved concerns on record. Sensitive actions, including
-                purchases, are intended for phone approval.
+                A board-only Notion journal brings together discussions,
+                decisions, progress, and unresolved concerns. Board members can
+                read it without a Notion signup; controlled access is arranged
+                during setup. Private homeowner messages are not shared with
+                other homeowners.
               </p>
             </details>
             <details>
               <summary>
-                How does it work with our existing tools?
-                <ChevronDown size={18} />
+                What needs our approval?
+                <ChevronDown size={17} />
               </summary>
               <p>
-                The proposed browser-agent workflow reads tasks from the journal
-                and works in your existing email, HOA, and accounting tools on a
-                designated, available board computer. Compatibility and approval
-                delivery are confirmed during setup; someone needn’t sit
-                watching routine work.
+                We agree on permissions before starting. Sensitive actions, such
+                as spending money or placing orders, are intended to come to a
+                board member’s phone for approval or rejection. Your board
+                retains its responsibilities; a conversation does not replace
+                your association’s required decision process.
               </p>
             </details>
             <details>
               <summary>
-                What about privacy and the activity record?
-                <ChevronDown size={18} />
+                Can we keep the tools we already use?
+                <ChevronDown size={17} />
               </summary>
               <p>
-                The journal is intended for board members, not other homeowners.
-                We agree on access, retention, and actual data flows before
-                connecting channels. AWS-backed tamper-evident archiving is an
-                option to confirm; Notion alone is not immutable. Browser
-                safeguards depend on the selected tools and configuration, and
-                we don’t promise absolute protection or zero third-party
-                processing.
+                Yes—that is the intended setup. A browser agent on a designated,
+                available board computer reads tasks from the journal and works
+                in your existing email, HOA, and accounting tools. Compatibility
+                and phone approvals are confirmed before starting. Routine work
+                is intended to run without someone watching the screen.
+              </p>
+            </details>
+            <details>
+              <summary>
+                How are privacy and records protected?
+                <ChevronDown size={17} />
+              </summary>
+              <p>
+                We review access, retention, provider data flows, and approval
+                controls before connecting channels. AWS-backed tamper-evident
+                archiving is an option to confirm; Notion alone is not
+                immutable. Browser safeguards depend on the selected tools and
+                configuration. We explain the actual setup rather than promise
+                absolute protection.
               </p>
             </details>
           </div>
         </section>
-        <section className={styles.finalCta}>
-          <div className={styles.container}>
-            <div>
-              <span className={styles.kicker}>
-                LESS ON YOUR PLATE. MORE LIFE OUTSIDE IT.
-              </span>
-              <h2>
-                Your next board meeting
-                <br />
-                could have a <span>shorter to-do list.</span>
-              </h2>
-            </div>
-            <a href={email} className={styles.button}>
-              Let’s make that happen <ArrowRight size={18} />
-            </a>
-          </div>
+        <section className={styles.closing}>
+          <p className={styles.eyebrow}>
+            A LITTLE LESS TO CARRY. A LITTLE MORE ROOM TO LIVE.
+          </p>
+          <h2>
+            Make room for the community
+            <br />
+            you want to call home.
+          </h2>
+          <a className={styles.button} href={email}>
+            Let’s start a conversation <ArrowRight size={18} />
+          </a>
+          <a className={styles.contactEmail} href={email}>
+            contact@fretgone.com
+          </a>
         </section>
       </main>
-      <footer className={`${styles.container} ${styles.footer}`}>
+      <footer className={styles.footer}>
         <div>
-          <a href="/" className={styles.brand}>
-            <span className={styles.logo}>
-              <Zap size={17} fill="currentColor" />
-            </span>
-            fretgone<span>.</span>
+          <a className={styles.brand} href="/">
+            fretgone.
           </a>
           <span>© {new Date().getFullYear()} FretGone LLC</span>
         </div>
@@ -409,9 +284,7 @@ export default function Home() {
           <a href="/about">About</a>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>
-          <a href={email}>
-            Contact <Mail size={13} />
-          </a>
+          <a href={email}>Contact</a>
         </nav>
       </footer>
     </div>
