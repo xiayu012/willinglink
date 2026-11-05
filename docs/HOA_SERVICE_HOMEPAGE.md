@@ -18,3 +18,11 @@ Privacy and security: intended board-only records and private homeowner communic
 - To restore: move the new app/page.tsx aside or remove its route, move app/(chat)/legacy-home/page.tsx back to app/(chat)/page.tsx, and remove `/` from the static public bypass so the old guest-auth flow applies again. Only one page may own `/`.
 
 Static design and minimal homepage routing are authorized for direct Codex implementation under the revised AGENTS.md. No backend feature, database, paid model evaluation, or real messaging is part of this change.
+
+## Commercial redesign — 2026-11-04
+
+Owner feedback: the initial editorial design felt academic, too wordy, and visually inconsistent. Reference research used the official PayHOA, Vantaca, and TownSq homepages for their outcome-led headline, prominent contact action, workflow illustration, and clear section sequence. No vendor assets, customer claims, or endorsements were copied.
+
+The replacement uses a consistent sans-serif system, navy/cobalt/lime palette, aligned service cards, compact pricing, and four collapsed FAQs. JSX text reduced from approximately 940 words to 521 (including collapsed content). Prices, first free month, email-only contact, and the preserved original homepage remain unchanged.
+
+Verification: 214 offline quality checks passed; TypeScript reports only the existing speech-input.tsx:55/56 TS2717 conflicts. The full Next development server ran out of memory on this computer. Visual and interaction checks therefore used a lightweight static render of the actual homepage component with its stylesheet, without application services: desktop plus 390px mobile, no horizontal overflow, eight mailto contact links, and FAQ expansion. This verifies the static design, not a full application/browser end-to-end run. A heading specificity issue found during visual review was corrected.
