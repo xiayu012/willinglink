@@ -4,13 +4,13 @@ import { ArrowRight, ChevronDown, Leaf } from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
-  title: "FretGone — A community you shape. A place that feels yours.",
+  title: "FretGone — Your community. Your say. We do the work.",
   description:
-    "Every owner has a voice. FretGone handles the conversations, coordination, and everyday follow-through behind your HOA. From $200 per community per month. First month free.",
+    "Your HOA belongs to its owners. We gather their views, work toward agreement, and take on the everyday work. $200/month for HOAs under 500 homes. First month free.",
   openGraph: {
-    title: "FretGone — A community you shape.",
+    title: "FretGone — Your community. Your say.",
     description:
-      "Self-governance. Without the administrative burden. HOA coordination from $200/month. First month free.",
+      "Owners shape the decisions. We handle the work. The board can see the record. HOA service from $200/month. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -56,29 +56,28 @@ export default function Home() {
           </div>
           <div className={styles.heroVeil} />
           <div className={styles.heroContent}>
-            <p className={styles.eyebrow}>HOA COORDINATION, DONE FOR YOU</p>
+            <p className={styles.eyebrow}>
+              SELF-GOVERNANCE, WITHOUT THE BUSYWORK.
+            </p>
             <h1 id="hero-title">
-              A community <br />
-              you shape.
-              <span>
-                A place that <br />
-                feels yours.
-              </span>
+              Your community. <br />
+              Your say.
+              <span>We do the work.</span>
             </h1>
             <p className={styles.heroDescription}>
-              Every owner deserves a voice in what happens next. We bring those
-              voices together—and take the coordination off your board’s hands.
+              Your HOA belongs to its owners. We listen to them, work toward
+              agreement, and handle the everyday work—so your board doesn’t have
+              to.
             </p>
             <p className={styles.heroPromise}>
-              Self-governance.
-              <br className={styles.mobileBreak} /> Without the administrative
-              burden.
+              The work changes hands.
+              <br className={styles.mobileBreak} /> The power stays yours.
             </p>
             <a className={styles.button} href={email}>
-              Start with a free month <ArrowRight size={18} />
+              Try the first month free <ArrowRight size={18} />
             </a>
             <p className={styles.heroNote}>
-              Familiar text & email. No new homeowner accounts.
+              Keep texting. Keep emailing. No new accounts.
             </p>
           </div>
         </section>
@@ -98,50 +97,48 @@ export default function Home() {
             <span>1,000+ homes: not currently available</span>
           </div>
           <a href={email}>
-            Your first month is on us <ArrowRight size={18} />
+            First month free <ArrowRight size={18} />
           </a>
         </section>
 
         <section id="service" className={styles.section}>
           <div className={styles.sectionHeading}>
-            <p className={styles.eyebrow}>
-              MORE VOICE. LESS WEIGHT ON YOUR SHOULDERS.
-            </p>
+            <p className={styles.eyebrow}>A SAY THAT LEADS SOMEWHERE.</p>
             <h2>
-              Being part of a community
-              <br />
-              shouldn’t be a second job.
+              An opinion should do more <br />
+              than sit in an inbox.
             </h2>
             <p>
-              Owners keep reaching out by text and email. We handle the
-              listening, the back-and-forth, and the next steps—so participation
-              leads somewhere.
+              We do the work between “here’s what I think” and “here’s what
+              happens next.” Listening. Finding agreement. Getting things done.
             </p>
           </div>
           <div className={styles.steps}>
             <article>
-              <span>01 / LISTEN</span>
-              <h3>Every owner heard.</h3>
+              <span>01 / HEAR PEOPLE OUT</span>
+              <h3>Every owner has a say.</h3>
               <p>
-                Gather views and ask the follow-up questions. Give people room
-                to participate, without making everyone attend another meeting.
+                We collect owners’ views by text and email, then ask the
+                follow-up questions. Participation shouldn’t depend on who can
+                attend a meeting.
               </p>
             </article>
             <article>
-              <span>02 / FIND COMMON GROUND</span>
-              <h3>A way forward, together.</h3>
+              <span>02 / WORK TOWARD AGREEMENT</span>
+              <h3>Disagreement counts, too.</h3>
               <p>
-                Work toward proposals people can agree on. When views differ,
-                preserve the concerns and the path the conversation took.
+                We look for a proposal everyone can accept. If we can’t get
+                there, we record what was discussed and what remains unresolved.
+                No invented consensus.
               </p>
             </article>
             <article>
-              <span>03 / CARRY IT THROUGH</span>
-              <h3>Less left on the board.</h3>
+              <span>03 / DO THE WORK</span>
+              <h3>Your board can step back.</h3>
               <p>
-                Handle authorized routine follow-through. Bring sensitive steps
-                to a board member for approval, with a clear record of what
-                happens.
+                We handle the replies, coordination, and tasks you authorize.
+                Spending and other sensitive actions go to a board member for
+                review. Routine work shouldn’t need a full-time volunteer.
               </p>
             </article>
           </div>
@@ -153,36 +150,35 @@ export default function Home() {
               <Leaf size={33} strokeWidth={1.1} />
             </span>
             <div>
-              <p className={styles.eyebrow}>A SIMPLE BEGINNING</p>
+              <p className={styles.eyebrow}>SMALL SETUP. REAL RELIEF.</p>
               <h2>
                 One board member.
                 <br />
-                About ten minutes to get started.
+                About ten minutes to begin.
               </h2>
               <p>
-                A short setup conversation to authorize your channels and agree
-                on boundaries. We confirm your existing tools, journal access,
-                and approval workflow together.
+                Connect your board’s email and text channels. Agree on what we
+                can do and what needs approval. We check your tools with you
+                before starting.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
-              Talk through your setup <ArrowRight size={17} />
+              Let’s talk setup <ArrowRight size={17} />
             </a>
           </div>
         </section>
 
         <section className={`${styles.section} ${styles.faq}`}>
           <div>
-            <p className={styles.eyebrow}>CONFIDENCE COMES FROM CLARITY</p>
+            <p className={styles.eyebrow}>TRANSPARENCY INCLUDES US.</p>
             <h2>
-              Your community.
-              <br />
-              Your say.
+              See the work. <br />
+              Question it.
             </h2>
             <p className={styles.faqIntro}>
-              We take on the work.
-              <br />
-              Your board keeps its authority.
+              Your board gets a journal of discussions, decisions, open
+              questions, and our actions. You should be able to judge our work
+              by the record.
             </p>
             <a className={styles.textLink} href={email}>
               Ask us anything <ArrowRight size={17} />
@@ -191,27 +187,25 @@ export default function Home() {
           <div className={styles.questions}>
             <details>
               <summary>
-                Are we buying software or a service?
+                What are we paying for?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                A service that does the work: homeowner conversations,
-                coordination, documentation, and authorized follow-through.
-                Owners keep using text and email. There is no new FretGone app
-                or account for them to learn.
+                The work itself: talking with owners, finding agreement, keeping
+                records, and carrying out approved tasks. You’re hiring help,
+                not taking on another system to manage. Owners and board members
+                don’t need FretGone accounts.
               </p>
             </details>
             <details>
               <summary>
-                How does the board stay informed?
+                Who can read the journal?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                A board-only Notion journal brings together discussions,
-                decisions, progress, and unresolved concerns. Board members can
-                read it without a Notion signup; controlled access is arranged
-                during setup. Private homeowner messages are not shared with
-                other homeowners.
+                The journal is for your board. Members can read it without a
+                Notion account; we arrange access during setup. An owner’s
+                private texts and emails are not published to other owners.
               </p>
             </details>
             <details>
@@ -220,11 +214,11 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                We agree on permissions before starting. Sensitive actions, such
-                as spending money or placing orders, are intended to come to a
-                board member’s phone for approval or rejection. Your board
-                retains its responsibilities; a conversation does not replace
-                your association’s required decision process.
+                We agree on limits first. The setup is designed to send
+                spending, orders, and other sensitive actions to a board
+                member’s phone: read, then approve or decline. We confirm that
+                flow before starting. Your HOA’s voting rules and board
+                responsibilities still apply.
               </p>
             </details>
             <details>
@@ -233,40 +227,35 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Yes—that is the intended setup. A browser agent on a designated,
-                available board computer reads tasks from the journal and works
-                in your existing email, HOA, and accounting tools. Compatibility
-                and phone approvals are confirmed before starting. Routine work
-                is intended to run without someone watching the screen.
+                That’s the plan. A browser agent works on a board computer in
+                your existing email, HOA, and accounting websites. The computer
+                needs to stay available, not attended. We check compatibility
+                before connecting your tools.
               </p>
             </details>
             <details>
               <summary>
-                How are privacy and records protected?
+                Can the record be changed? What about privacy?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                We review access, retention, provider data flows, and approval
-                controls before connecting channels. AWS-backed tamper-evident
-                archiving is an option to confirm; Notion alone is not
-                immutable. Browser safeguards depend on the selected tools and
-                configuration. We explain the actual setup rather than promise
-                absolute protection.
+                A Notion page alone can be edited. An AWS-backed archive can
+                help make changes detectable; we confirm its availability and
+                scope before offering that protection. Before connecting
+                accounts, we also explain who can access the data, which
+                providers process it, and how long it is kept.
               </p>
             </details>
           </div>
         </section>
         <section className={styles.closing}>
-          <p className={styles.eyebrow}>
-            A LITTLE LESS TO CARRY. A LITTLE MORE ROOM TO LIVE.
-          </p>
+          <p className={styles.eyebrow}>YOUR HOME. YOUR NEIGHBORS. YOUR SAY.</p>
           <h2>
-            Make room for the community
-            <br />
-            you want to call home.
+            Self-governance should work. <br />
+            It shouldn’t be your second job.
           </h2>
           <a className={styles.button} href={email}>
-            Let’s start a conversation <ArrowRight size={18} />
+            Put us to work <ArrowRight size={18} />
           </a>
           <a className={styles.contactEmail} href={email}>
             contact@fretgone.com
