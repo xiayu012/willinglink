@@ -162,13 +162,13 @@ export default function Home() {
         <section className={`${styles.section} ${styles.faq}`}>
           <div>
             <h2>
-              Our mistakes belong <br />
-              in the record.
+              Every step. <br />
+              Kept on record.
             </h2>
             <p className={styles.faqIntro}>
-              We keep a Notion journal for your board: what owners raised, what
-              was discussed, what was decided, and what we did—including
-              problems and unfinished work.
+              Your board’s Notion journal records the conversations, decisions,
+              actions, and outcomes as they happen. New entries add to the
+              history; earlier entries stay.
             </p>
             <a className={styles.textLink} href={email}>
               Ask us anything <ArrowRight size={17} />
