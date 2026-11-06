@@ -56,3 +56,12 @@ Owner rejected the prior rewrite as generic, padded, and forgettable. The new le
 Accountability now makes a concrete ethical commitment: “Our mistakes belong in the record.” The supporting sentence includes problems and unfinished work, without claiming an immutable system has been implemented. Approval, voting responsibilities, compatibility checks, and archive limitations remain explicit in the concise answers. Images, pricing tiers, routes, and mailto behavior are unchanged. Minimal heading styles keep “self-sacrifice” together and scale the headline for narrow phones.
 
 Validation: full copy and stylesheet diff reviewed against the owner’s service description. Desktop, 390px, and 320px browser checks found no horizontal overflow; heading wrapping checked visually. Nine contact links retain mailto:contact@fretgone.com. 214 offline quality checks passed; tsc retains only the pre-existing speech-input.tsx:55/56 TS2717 errors. No backend or image changes.
+
+
+## v1 baseline and explanatory detail pass — 2026-11-05
+
+Owner approved the sharp copy as the conversational “v1” and asked for the full text, then requested that explanatory sections actually explain rather than advertise. The complete v1 text, including expanded answers, controls, accessibility text, and metadata, is preserved in docs/HOMEPAGE_COPY_V1.md; source commit 2ef6362 remains the baseline.
+
+Preserve the approved hero, accountability, and closing headlines and existing imagery. Rewrite the body in a connected sequence: owners contact the board as usual; authorization lets the service handle those channels; gather views; discuss and revise proposals; document unresolved differences; execute within permissions; send sensitive actions for phone approval; expose the work in the board journal. Setup and FAQs explain who does what and where, including the available board computer, journal tasks, existing tools, and archive limitations. Contact buttons now describe opening a conversation rather than implying an immediate trial signup. No new product capability or runtime behavior is introduced.
+
+Validation: complete copy diff reviewed against the original service description; 214 offline checks passed. TypeScript retains the existing speech-input.tsx:55/56 TS2717 errors. Actual homepage component and CSS rendered at 390px and desktop without horizontal overflow; expanded existing-tools answer verified. Image, styles, prices, and routes unchanged.

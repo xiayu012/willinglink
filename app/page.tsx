@@ -67,17 +67,19 @@ export default function Home() {
               </span>
             </h1>
             <p className={styles.heroDescription}>
-              We take on your board’s daily work. Owners keep texting and
-              emailing. We gather their views, work toward agreement, and carry
-              out approved decisions.
+              Owners contact the board by text or email, as usual. With your
+              authorization, we receive those messages, discuss proposals with
+              owners, and carry out approved work.
             </p>
             <p className={styles.heroPromise}>
               From $200/month. For the whole HOA.
             </p>
             <a className={styles.button} href={email}>
-              Try us. First month free. <ArrowRight size={18} />
+              Email us to get started <ArrowRight size={18} />
             </a>
-            <p className={styles.heroNote}>No new accounts. No app to learn.</p>
+            <p className={styles.heroNote}>
+              First month free. No FretGone accounts required.
+            </p>
           </div>
         </section>
         <section
@@ -102,33 +104,33 @@ export default function Home() {
 
         <section id="service" className={styles.section}>
           <div className={styles.sectionHeading}>
-            <h2>
-              A text can start <br />a community decision.
-            </h2>
+            <h2>How the service works.</h2>
           </div>
           <div className={styles.steps}>
             <article>
               <span>01 / ASK</span>
-              <h3>Beyond the meeting room.</h3>
+              <h3>We gather owners’ views.</h3>
               <p>
-                We reach out to owners and gather their views by text and email.
-                Having a say shouldn’t require an evening at a meeting.
+                We receive messages through your board’s authorized channels and
+                follow up with owners to understand their concerns.
               </p>
             </article>
             <article>
-              <span>02 / RESOLVE</span>
-              <h3>Agreement takes work.</h3>
+              <span>02 / DISCUSS</span>
+              <h3>We work toward agreement.</h3>
               <p>
-                We work toward a proposal everyone can accept. When people still
-                disagree, the record says so.
+                We discuss proposals with owners and look for a plan everyone
+                can accept. If differences remain, we record the discussion and
+                unresolved points.
               </p>
             </article>
             <article>
               <span>03 / ACT</span>
-              <h3>Approval. From your phone.</h3>
+              <h3>We carry out approved work.</h3>
               <p>
-                We handle the routine work. Spending and other sensitive steps
-                need a board member’s approval. Read. Approve or decline.
+                Routine tasks run within the permissions you set. Spending,
+                orders, and other sensitive actions go to a board member’s phone
+                for approval or rejection.
               </p>
             </article>
           </div>
@@ -146,12 +148,13 @@ export default function Home() {
                 About ten minutes to begin.
               </h2>
               <p>
-                Authorize your email and text channels. Set our limits. We check
-                your existing tools before starting.
+                One member authorizes your board’s email and text channels.
+                Together, we check your existing tools, set permissions, and
+                arrange journal access and phone approvals.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
-              Start here <ArrowRight size={17} />
+              Discuss your setup <ArrowRight size={17} />
             </a>
           </div>
         </section>
@@ -163,8 +166,9 @@ export default function Home() {
               in the record.
             </h2>
             <p className={styles.faqIntro}>
-              Your board’s journal records the discussions, decisions, and our
-              actions—including problems and unfinished work.
+              We keep a Notion journal for your board: what owners raised, what
+              was discussed, what was decided, and what we did—including
+              problems and unfinished work.
             </p>
             <a className={styles.textLink} href={email}>
               Ask us anything <ArrowRight size={17} />
@@ -173,13 +177,13 @@ export default function Home() {
           <div className={styles.questions}>
             <details>
               <summary>
-                What are we paying for?
+                What does the service take over?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Replies, owner conversations, proposals, records, and approved
-                tasks. We do them. Owners keep using text and email. No FretGone
-                accounts required.
+                Owner correspondence, gathering views, developing proposals,
+                keeping records, and carrying out authorized tasks. Your board
+                sets the scope and reviews sensitive actions.
               </p>
             </details>
             <details>
@@ -188,8 +192,9 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Board members, without a Notion signup. We arrange access at
-                setup. Owners’ private messages stay out of other owners’ view.
+                The journal is for board members, who can read it without
+                creating a Notion account. Private owner messages are not shared
+                with other owners.
               </p>
             </details>
             <details>
@@ -198,9 +203,10 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Spending, orders, and other actions outside the limits we agree
-                on. We confirm phone approvals at setup. Your HOA’s voting rules
-                and board responsibilities still apply.
+                Spending, orders, and other sensitive actions. A board member
+                reads the proposed action on their phone and approves or
+                declines it. We confirm this flow before starting. Your HOA’s
+                voting rules and board responsibilities still apply.
               </p>
             </details>
             <details>
@@ -209,9 +215,10 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                We check compatibility first. The setup uses a browser agent on
-                an available board computer to work in your email, HOA, and
-                accounting websites. You don’t have to sit at the screen.
+                The proposed setup uses a browser agent on a board computer to
+                read tasks from the journal and work in your existing email,
+                HOA, and accounting websites. The computer must stay available;
+                you don’t need to watch it. We confirm compatibility first.
               </p>
             </details>
             <details>
@@ -220,10 +227,10 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Notion pages can be edited. AWS-backed archiving can help expose
-                changes; availability and coverage must be confirmed before we
-                promise that protection. We also explain data access,
-                processing, and retention before connecting accounts.
+                Notion pages can be edited. A separate AWS-backed archive can
+                help make later changes detectable. We confirm its availability
+                and coverage, along with who can access and process your data
+                and how long it is kept, before connecting accounts.
               </p>
             </details>
           </div>
@@ -234,7 +241,7 @@ export default function Home() {
             You should get to enjoy it.
           </h2>
           <a className={styles.button} href={email}>
-            Give us the work <ArrowRight size={18} />
+            Contact us <ArrowRight size={18} />
           </a>
           <a className={styles.contactEmail} href={email}>
             contact@fretgone.com
