@@ -80,3 +80,8 @@ Owner approved “We help neighbors work things out.” over the formal agreemen
 ## Remove the generic closing panel — 2026-11-07
 
 Owner rejected the softened closing as a loss of the sharp, distinctive style and explicitly allowed deleting it after reviewing the whole page. The page already presents its position, pricing, service steps, setup, recordkeeping, and questions. Remove the entire redundant lifestyle-ad closing panel and its unused styles; end after records/questions and the existing footer. Preserve the approved main headline and everyday neighbor-discussion wording. Existing header, hero, pricing, setup, question, and footer email links remain. No runtime changes.
+
+
+## Restore the shared-plan meaning — 2026-11-07
+
+Owner found the generic neighbor-help wording too vague: the essential meaning is working toward a specific plan all owners can accept. Owner approved “A plan everyone can live with.” and the explanation “We discuss ideas with owners and revise the plan until everyone can accept it—or record where and why people still disagree.” Apply this exact approved text. No promise of guaranteed consensus or runtime change.

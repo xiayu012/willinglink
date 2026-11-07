@@ -117,11 +117,10 @@ export default function Home() {
             </article>
             <article>
               <span>02 / DISCUSS</span>
-              <h3>We help neighbors work things out.</h3>
+              <h3>A plan everyone can live with.</h3>
               <p>
-                We talk through ideas with owners and look for a way forward
-                everyone can accept. Where views still differ, we keep a record
-                of the discussion.
+                We discuss ideas with owners and revise the plan until everyone
+                can accept it—or record where and why people still disagree.
               </p>
             </article>
             <article>
