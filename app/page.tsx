@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "FretGone — Self-governance. Without the self-sacrifice.",
   description:
-    "We take on your HOA board’s daily work. Owners participate by text and email. From $200/month for the whole HOA. First month free.",
+    "HOA work coordinated with ChatGPT or Claude. Your board authorizes the AI to access text and email accounts. From $200/month for the whole HOA. First month free.",
   openGraph: {
     title: "FretGone — Self-governance. Without the self-sacrifice.",
     description:
-      "Your board’s daily work, taken care of. Owner views gathered. Disagreements recorded. From $200/month for the whole HOA. First month free.",
+      "Your board authorizes ChatGPT or Claude to access its text and email accounts. FretGone coordinates the work. From $200/month for the whole HOA. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -67,9 +67,9 @@ export default function Home() {
               </span>
             </h1>
             <p className={styles.heroDescription}>
-              Owners contact the board by text or email, as usual. With your
-              authorization, we receive those messages, discuss proposals with
-              owners, and carry out approved work.
+              Owners contact the board as usual. Your board authorizes ChatGPT
+              or Claude to access its text and email accounts. FretGone sets up
+              and coordinates the work.
             </p>
             <p className={styles.heroPromise}>
               From $200/month. For the whole HOA.
@@ -109,27 +109,29 @@ export default function Home() {
           <div className={styles.steps}>
             <article>
               <span>01 / ASK</span>
-              <h3>We gather owners’ views.</h3>
+              <h3>Owners have their say.</h3>
               <p>
-                We receive messages through your board’s authorized channels and
-                follow up with owners to understand their concerns.
+                ChatGPT or Claude reads and replies through the accounts your
+                board authorizes, gathering owners’ views and asking follow-up
+                questions.
               </p>
             </article>
             <article>
               <span>02 / DISCUSS</span>
               <h3>A plan everyone can live with.</h3>
               <p>
-                We discuss ideas with owners and revise the plan until everyone
-                can accept it—or record where and why people still disagree.
+                The agent discusses ideas with owners and revises the plan until
+                everyone can accept it—or records where and why people still
+                disagree.
               </p>
             </article>
             <article>
               <span>03 / ACT</span>
-              <h3>We carry out approved work.</h3>
+              <h3>Approved work gets done.</h3>
               <p>
-                Routine tasks run within the permissions you set. Spending,
-                orders, and other sensitive actions go to a board member’s phone
-                for approval or rejection.
+                The agent handles routine tasks within the limits you set.
+                Spending, orders, and other sensitive actions go to a board
+                member’s phone for approval or rejection.
               </p>
             </article>
           </div>
@@ -147,9 +149,9 @@ export default function Home() {
                 About ten minutes to begin.
               </h2>
               <p>
-                One member authorizes your board’s email and text channels.
-                Together, we check your existing tools, set permissions, and
-                arrange journal access and phone approvals.
+                One member grants ChatGPT or Claude access to the board’s text
+                and email accounts. We help configure the workflow, journal, and
+                phone approvals, and check your existing tools.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
@@ -176,13 +178,26 @@ export default function Home() {
           <div className={styles.questions}>
             <details>
               <summary>
+                Who gets access to our text and email?
+                <ChevronDown size={17} />
+              </summary>
+              <p>
+                Your board authorizes ChatGPT or Claude through the selected
+                tool’s access controls. This account authorization is not
+                granted to FretGone. We confirm permissions and data handling
+                during setup.
+              </p>
+            </details>
+            <details>
+              <summary>
                 What does the service take over?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Owner correspondence, gathering views, developing proposals,
-                keeping records, and carrying out authorized tasks. Your board
-                sets the scope and reviews sensitive actions.
+                FretGone sets up and coordinates the workflow: owner
+                conversations, proposals, records, and authorized tasks. ChatGPT
+                or Claude works through the accounts your board authorizes. Your
+                board sets the limits and reviews sensitive actions.
               </p>
             </details>
             <details>
@@ -214,10 +229,11 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                The proposed setup uses a browser agent on a board computer to
-                read tasks from the journal and work in your existing email,
-                HOA, and accounting websites. The computer must stay available;
-                you don’t need to watch it. We confirm compatibility first.
+                The proposed setup uses a ChatGPT or Claude agent on a board
+                computer. It reads tasks from the journal and works in the
+                email, HOA, and accounting websites you authorize. The computer
+                must stay available; you don’t need to watch it. We confirm
+                compatibility first.
               </p>
             </details>
             <details>
@@ -227,9 +243,9 @@ export default function Home() {
               </summary>
               <p>
                 Notion pages can be edited. A separate AWS-backed archive can
-                help make later changes detectable. We confirm its availability
-                and coverage, along with who can access and process your data
-                and how long it is kept, before connecting accounts.
+                help make later changes detectable. We confirm archive coverage
+                and review the selected AI tool’s account permissions, data
+                access, processing, and retention before setup.
               </p>
             </details>
           </div>

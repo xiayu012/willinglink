@@ -1,8 +1,8 @@
 # HOA service homepage
 
-Owner-approved offering and page scope, 2026-11-04.
+Owner-approved offering and page scope, 2026-11-04; account-authorization model updated 2026-11-07.
 
-FretGone sells HOA back-office work rather than a new software account. Owners keep using SMS/email; the board authorizes the channels and work. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
+FretGone sells HOA back-office work rather than a new software account. Owners keep using SMS/email. The board grants account authorization to ChatGPT or Claude, not FretGone. FretGone sets up and coordinates the workflow; the AI agent works through the accounts the board authorizes. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
 
 One board member can begin with an approximately ten-minute setup conversation. Actual channel authorization and compatibility must be confirmed. The proposed workflow uses a board-readable Notion journal without reader signup and a browser agent on a designated board computer, with phone review for sensitive actions. This page is a service offer, not evidence that these integrations have been built in this repository.
 
@@ -85,3 +85,12 @@ Owner rejected the softened closing as a loss of the sharp, distinctive style an
 ## Restore the shared-plan meaning — 2026-11-07
 
 Owner found the generic neighbor-help wording too vague: the essential meaning is working toward a specific plan all owners can accept. Owner approved “A plan everyone can live with.” and the explanation “We discuss ideas with owners and revise the plan until everyone can accept it—or record where and why people still disagree.” Apply this exact approved text. No promise of guaranteed consensus or runtime change.
+
+
+## Account authorization goes to ChatGPT or Claude — 2026-11-07
+
+Owner explicitly changed the business model: SMS/email account authorization is granted to ChatGPT or Claude, not to the service provider. Update the current offer above and all affected homepage copy: search/sharing descriptions, hero, gathering views, proposal discussion, approved work, setup, service-scope answer, existing tools, and data-handling explanation. Add a direct question explaining the recipient of account authorization. FretGone configures and coordinates the service; the board grants access to its chosen AI tool and retains approval control.
+
+Do not infer from this change that FretGone never receives any data, that no provider processes messages, or that the chosen tools have universal compatibility. Existing compatibility and permission confirmation remains. This change updates the static service description only; it does not implement or modify credentials, OAuth, message routing, backend authorization, Twilio behavior, or the separate rental-alert program described by the existing legal pages. No reason for the business-model change was supplied; none is invented.
+
+Validation: full homepage copy and metadata reviewed for the recipient of account authorization. 214 offline checks passed; diff whitespace check passed. TypeScript retains only the existing speech-input.tsx:55/56 TS2717 errors. No account authorization or backend code changed.
