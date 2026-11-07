@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "FretGone — Self-governance. Without the self-sacrifice.",
     description:
-      "Your board authorizes ChatGPT or Claude to access its text and email accounts. FretGone coordinates the work. From $200/month for the whole HOA. First month free.",
+      "Your board authorizes ChatGPT or Claude to access its text and email accounts. FretGone helps your board get set up and coordinates the work. From $200/month for the whole HOA. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -68,8 +68,8 @@ export default function Home() {
             </h1>
             <p className={styles.heroDescription}>
               Owners contact the board as usual. Your board authorizes ChatGPT
-              or Claude to access its text and email accounts. FretGone sets up
-              and coordinates the work.
+              or Claude to access its text and email accounts. FretGone helps
+              your board get set up and coordinates the work.
             </p>
             <p className={styles.heroPromise}>
               From $200/month. For the whole HOA.
@@ -150,8 +150,9 @@ export default function Home() {
               </h2>
               <p>
                 One member grants ChatGPT or Claude access to the board’s text
-                and email accounts. We help configure the workflow, journal, and
-                phone approvals, and check your existing tools.
+                and email accounts. We help your board get the workflow,
+                journal, and phone approvals set up, and check compatibility
+                with your existing tools.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
@@ -194,10 +195,11 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                FretGone sets up and coordinates the workflow: owner
-                conversations, proposals, records, and authorized tasks. ChatGPT
-                or Claude works through the accounts your board authorizes. Your
-                board sets the limits and reviews sensitive actions.
+                FretGone helps your board get the workflow set up and
+                coordinates owner conversations, proposals, records, and
+                authorized tasks. ChatGPT or Claude works through the accounts
+                your board authorizes. Your board sets the limits and reviews
+                sensitive actions.
               </p>
             </details>
             <details>
