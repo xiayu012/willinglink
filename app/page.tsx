@@ -117,11 +117,11 @@ export default function Home() {
             </article>
             <article>
               <span>02 / DISCUSS</span>
-              <h3>We work toward agreement.</h3>
+              <h3>We help neighbors work things out.</h3>
               <p>
-                We discuss proposals with owners and look for a plan everyone
-                can accept. If differences remain, we record the discussion and
-                unresolved points.
+                We talk through ideas with owners and look for a way forward
+                everyone can accept. Where views still differ, we keep a record
+                of the discussion.
               </p>
             </article>
             <article>
@@ -238,7 +238,7 @@ export default function Home() {
         <section className={styles.closing}>
           <h2>
             You live here. <br />
-            You should get to enjoy it.
+            More time to enjoy it.
           </h2>
           <a className={styles.button} href={email}>
             Contact us <ArrowRight size={18} />

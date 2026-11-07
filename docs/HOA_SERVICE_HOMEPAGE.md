@@ -70,3 +70,8 @@ Validation: complete copy diff reviewed against the original service description
 ## Faithful record wording — 2026-11-06
 
 Owner clarified that the public message should describe faithful, complete records preserved without deletion, allowing readers to infer that decisions and their outcomes remain visible. Do not explicitly foreground mistakes. Public heading: “Every step. Kept on record.” Supporting copy names conversations, decisions, actions, and outcomes as events happen, and explains that new entries add to history while earlier entries stay. This is the service’s recordkeeping commitment; existing archive verification limitations remain and no immutable implementation is claimed. Owner-deleted docs/HOMEPAGE_COPY_V1.md is not restored or included in this change.
+
+
+## Everyday wording — 2026-11-07
+
+Owner approved “We help neighbors work things out.” over the formal agreement wording and abstract common-ground wording. Supporting copy now uses talking through ideas and keeping a record where views differ. Owner also found “You should get to enjoy it” too directive; closing now reads “You live here. More time to enjoy it.” Static copy only; no service scope or behavior changes.
