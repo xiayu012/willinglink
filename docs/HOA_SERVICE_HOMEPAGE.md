@@ -75,3 +75,8 @@ Owner clarified that the public message should describe faithful, complete recor
 ## Everyday wording — 2026-11-07
 
 Owner approved “We help neighbors work things out.” over the formal agreement wording and abstract common-ground wording. Supporting copy now uses talking through ideas and keeping a record where views differ. Owner also found “You should get to enjoy it” too directive; closing now reads “You live here. More time to enjoy it.” Static copy only; no service scope or behavior changes.
+
+
+## Remove the generic closing panel — 2026-11-07
+
+Owner rejected the softened closing as a loss of the sharp, distinctive style and explicitly allowed deleting it after reviewing the whole page. The page already presents its position, pricing, service steps, setup, recordkeeping, and questions. Remove the entire redundant lifestyle-ad closing panel and its unused styles; end after records/questions and the existing footer. Preserve the approved main headline and everyday neighbor-discussion wording. Existing header, hero, pricing, setup, question, and footer email links remain. No runtime changes.

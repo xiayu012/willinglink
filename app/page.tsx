@@ -235,18 +235,6 @@ export default function Home() {
             </details>
           </div>
         </section>
-        <section className={styles.closing}>
-          <h2>
-            You live here. <br />
-            More time to enjoy it.
-          </h2>
-          <a className={styles.button} href={email}>
-            Contact us <ArrowRight size={18} />
-          </a>
-          <a className={styles.contactEmail} href={email}>
-            contact@fretgone.com
-          </a>
-        </section>
       </main>
       <footer className={styles.footer}>
         <div>

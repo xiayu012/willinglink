@@ -400,29 +400,6 @@
   color: var(--muted);
   margin: 16px 15px 0 0;
 }
-.closing {
-  text-align: center;
-  background: #f2ecdf;
-  padding: 57px 25px 50px;
-  border-top: 1px solid #e9e2d5;
-}
-.closing > .eyebrow {
-  font-size: 8px;
-  color: #81836f;
-}
-.closing h2 {
-  font-size: 36px;
-  letter-spacing: -1.2px;
-}
-.closing .button {
-  margin-top: 26px;
-}
-.contactEmail {
-  display: block;
-  font-size: 11px;
-  color: #657568 !important;
-  margin-top: 17px;
-}
 .footer {
   max-width: 1240px;
   margin: auto;
@@ -761,20 +738,6 @@
   }
   .questions p {
     font-size: 12px;
-  }
-  .closing {
-    padding: 42px 24px 37px;
-  }
-  .closing > .eyebrow {
-    font-size: 7px;
-    letter-spacing: 1.1px;
-  }
-  .closing h2 {
-    font-size: 28px;
-    letter-spacing: -0.9px;
-  }
-  .closing .button {
-    margin-top: 22px;
   }
   .footer {
     padding: 28px 24px;
