@@ -149,9 +149,9 @@ export default function Home() {
               </h2>
               <p>
                 One member grants ChatGPT or Claude access to the board’s text
-                and email accounts. We help your board get the workflow,
-                journal, and phone approvals set up, and check compatibility
-                with your existing tools.
+                and email accounts. We help your board get the workflow, work
+                log, and phone approvals set up, and check compatibility with
+                your existing tools.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
@@ -167,9 +167,9 @@ export default function Home() {
               Kept on record.
             </h2>
             <p className={styles.faqIntro}>
-              Your board’s Notion journal records the conversations, decisions,
-              actions, and outcomes as they happen. New entries add to the
-              history; earlier entries stay.
+              Your board can read the whole history: what people said, what was
+              decided, what the agent did in your browser, and what happened
+              next. Nothing is deleted.
             </p>
             <a className={styles.textLink} href={email}>
               Ask us anything <ArrowRight size={17} />
@@ -203,13 +203,14 @@ export default function Home() {
             </details>
             <details>
               <summary>
-                Who can read the journal?
+                Who can see the work log?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                The journal is for board members, who can read it without
-                creating a Notion account. Private owner messages are not shared
-                with other owners.
+                Board members can read the service’s work log on a Notion page
+                without creating a Notion account. It includes owner
+                discussions, decisions, and the agent’s browser actions. Private
+                owner messages are not shared with other owners.
               </p>
             </details>
             <details>
@@ -231,7 +232,7 @@ export default function Home() {
               </summary>
               <p>
                 The proposed setup uses a ChatGPT or Claude agent on a board
-                computer. It reads tasks from the journal and works in the
+                computer. It reads tasks from the work log and works in the
                 email, HOA, and accounting websites you authorize. The computer
                 must stay available; you don’t need to watch it. We confirm
                 compatibility first.
