@@ -148,10 +148,10 @@ export default function Home() {
                 About ten minutes to begin.
               </h2>
               <p>
-                One member grants ChatGPT or Claude access to the board’s text
-                and email accounts. We help your board get the workflow, work
-                log, and phone approvals set up, and check compatibility with
-                your existing tools.
+                Your existing tools stay as they are. We help your board add a
+                ChatGPT or Claude browser extension and WillingLink for owner
+                texts and emails. Your board grants account access to ChatGPT or
+                Claude.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
@@ -194,10 +194,10 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                We help your board set up the tools. From there, the service
-                handles incoming messages, proposals, records, and approved
-                tasks as new work comes in. ChatGPT or Claude uses the accounts
-                you authorize; your board sets the limits and approves sensitive
+                WillingLink handles incoming owner texts and emails and keeps
+                the work moving. A ChatGPT or Claude browser extension works in
+                the tools your board already uses, through the accounts you
+                authorize. Your board sets the limits and approves sensitive
                 actions.
               </p>
             </details>
@@ -231,11 +231,10 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                The proposed setup uses a ChatGPT or Claude agent on a board
-                computer. It reads tasks from the work log and works in the
-                email, HOA, and accounting websites you authorize. The computer
-                must stay available; you don’t need to watch it. We confirm
-                compatibility first.
+                Yes. Your email, HOA software, accounting tools, and everything
+                else stay as they are. We add only a ChatGPT or Claude browser
+                extension and WillingLink to handle incoming owner texts and
+                emails.
               </p>
             </details>
             <details>

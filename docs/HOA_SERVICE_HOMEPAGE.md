@@ -121,3 +121,8 @@ The service-scope answer explains ongoing work concretely: incoming messages, pr
 ## Plain work-log wording and browser execution history — 2026-11-07
 
 Owner approved the full-history explanation and explicitly requested browser execution records. The records introduction now names what people said, what was decided, what the agent did in the browser, and what happened next, ending “Nothing is deleted.” This describes the service’s recordkeeping commitment, not proof of an immutable implementation. Replace public “journal” references with “work log”; the access question becomes “Who can see the work log?” Its answer explains the board-readable Notion page, including discussions, decisions, and browser actions, with no Notion signup and no sharing of private owner messages with other owners. Setup and agent-task descriptions use the same term. No backend logging or data-retention behavior is changed.
+
+
+## Existing tools stay; two additions only — 2026-11-07
+
+Owner clarified the answer to keeping existing tools is yes: the board keeps everything it already uses unchanged. The service adds only a ChatGPT or Claude browser extension and WillingLink to handle incoming owner SMS/email. No migration or replacement tools. Rewrite the existing-tools answer to lead with this direct explanation; align setup and service-scope copy, removing wording that suggests changing or rebuilding the existing stack. Keep the board’s authorization to ChatGPT or Claude and approval limits. This is the owner’s service model, not a new integration implementation or a claim that every integration was tested. No reason for this boundary was supplied; none is invented.
