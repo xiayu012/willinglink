@@ -168,7 +168,7 @@ export default function Home() {
             </h2>
             <p className={styles.faqIntro}>
               Your board can read the whole history: what people said, what was
-              decided, what the agent did in your browser, and what happened
+              decided, what the AI did in your browser, and what happened
               next. Nothing is deleted.
             </p>
             <a className={styles.textLink} href={email}>
