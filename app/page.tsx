@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "WillingLink — Self-governance. Without the self-sacrifice.",
   description:
-    "Ongoing HOA support with ChatGPT or Claude. Your board authorizes the AI to access text and email accounts. From $200/month for the whole HOA. First month free.",
+    "HOA work handled from owner conversations through to approved action. ChatGPT or Claude uses the accounts your board authorizes. From $200/month. First month free.",
   openGraph: {
     title: "WillingLink — Self-governance. Without the self-sacrifice.",
     description:
-      "Your board authorizes ChatGPT or Claude to access its text and email accounts. FretGone helps your board get set up, then keeps the day-to-day work running. From $200/month for the whole HOA. First month free.",
+      "We take on the conversations, proposals, and follow-through—so your HOA can run without running your board into the ground. From $200/month for the whole HOA. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -67,9 +67,8 @@ export default function Home() {
               </span>
             </h1>
             <p className={styles.heroDescription}>
-              Owners contact the board as usual. Your board authorizes ChatGPT
-              or Claude to access its text and email accounts. FretGone helps
-              your board get set up, then keeps the day-to-day work running.
+              We take on the conversations, proposals, and follow-through—so
+              your HOA can run without running your board into the ground.
             </p>
             <p className={styles.heroPromise}>
               From $200/month. For the whole HOA.
@@ -195,10 +194,10 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                FretGone helps your board get set up, then keeps the workflow
-                running: owner conversations, proposals, records, and authorized
-                tasks. ChatGPT or Claude works through the accounts your board
-                authorizes. Your board sets the limits and reviews sensitive
+                We help your board set up the tools. From there, the service
+                handles incoming messages, proposals, records, and approved
+                tasks as new work comes in. ChatGPT or Claude uses the accounts
+                you authorize; your board sets the limits and approves sensitive
                 actions.
               </p>
             </details>

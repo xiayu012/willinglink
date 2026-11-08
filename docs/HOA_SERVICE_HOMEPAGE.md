@@ -109,3 +109,10 @@ Owner clarified that WillingLink is the public brand; FretGone is the company na
 ## Ongoing operation — 2026-11-07
 
 Owner clarified that “coordinates the work” understates sustained operation and sounds like a one-off action. Hero and sharing copy now say “helps your board get set up, then keeps the day-to-day work running.” The service answer explains the continuing workflow of owner conversations, proposals, records, and authorized tasks. Search description calls this ongoing HOA support. Do not infer a guaranteed uptime level or around-the-clock availability; no runtime change.
+
+
+## Restore editorial purpose instead of translating mechanics — 2026-11-07
+
+Owner rejected the literal setup-then-operation line as mechanical and asked for the whole conversation’s editorial intent to guide the page. Keep the approved sharp headline and page design. The hero now names the delegated work and connects it to the human cost of volunteer labor: “We take on the conversations, proposals, and follow-through—so your HOA can run without running your board into the ground.” This develops the self-governance/self-sacrifice position instead of using onboarding mechanics as the sales lead.
+
+The service-scope answer explains ongoing work concretely: incoming messages, proposals, records, and approved tasks as new work arrives. Account authorization to ChatGPT or Claude, setup assistance, board approval, record preservation, prices, and contact details remain in the explanatory sections. Metadata follows the new editorial lead. This does not introduce uptime guarantees or change product behavior.
