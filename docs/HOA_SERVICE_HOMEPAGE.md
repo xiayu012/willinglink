@@ -2,7 +2,7 @@
 
 Owner-approved offering and page scope, 2026-11-04; account-authorization model updated 2026-11-07.
 
-FretGone sells HOA back-office work rather than a new software account. Owners keep using SMS/email. The board grants account authorization to ChatGPT or Claude, not FretGone. FretGone helps the board get the workflow set up and coordinates the work; the AI agent works through the accounts the board authorizes. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
+FretGone sells HOA back-office work rather than a new software account. Owners keep using SMS/email. The board grants account authorization to ChatGPT or Claude, not FretGone. FretGone helps the board get the workflow set up, then keeps the day-to-day work running; the AI agent works through the accounts the board authorizes. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
 
 One board member can begin with an approximately ten-minute setup conversation. Actual channel authorization and compatibility must be confirmed. The proposed workflow uses a board-readable Notion journal without reader signup and a browser agent on a designated board computer, with phone review for sensitive actions. This page is a service offer, not evidence that these integrations have been built in this repository.
 
@@ -99,3 +99,13 @@ Validation: full homepage copy and metadata reviewed for the recipient of accoun
 ## Setup assistance — 2026-11-07
 
 Owner clarified that FretGone helps the board get configuration completed, rather than personally configuring the accounts. Public copy now says “helps your board get set up” and “helps your board get the workflow set up”; the setup explanation also explicitly says we help the board get configuration completed. Account authorization still belongs to the board and is granted to ChatGPT or Claude. Static wording only.
+
+
+## Brand wordmarks — 2026-11-07
+
+Owner clarified that WillingLink is the public brand; FretGone is the company name. Change the header and footer wordmarks to exact “WillingLink”, and align the homepage title, sharing title, home-link accessibility name, and product account reference. Keep FretGone LLC in copyright and contact@fretgone.com as the contact address. No runtime or link-destination changes.
+
+
+## Ongoing operation — 2026-11-07
+
+Owner clarified that “coordinates the work” understates sustained operation and sounds like a one-off action. Hero and sharing copy now say “helps your board get set up, then keeps the day-to-day work running.” The service answer explains the continuing workflow of owner conversations, proposals, records, and authorized tasks. Search description calls this ongoing HOA support. Do not infer a guaranteed uptime level or around-the-clock availability; no runtime change.

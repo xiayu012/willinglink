@@ -4,13 +4,13 @@ import { ArrowRight, ChevronDown, Leaf } from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
-  title: "FretGone — Self-governance. Without the self-sacrifice.",
+  title: "WillingLink — Self-governance. Without the self-sacrifice.",
   description:
-    "HOA work coordinated with ChatGPT or Claude. Your board authorizes the AI to access text and email accounts. From $200/month for the whole HOA. First month free.",
+    "Ongoing HOA support with ChatGPT or Claude. Your board authorizes the AI to access text and email accounts. From $200/month for the whole HOA. First month free.",
   openGraph: {
-    title: "FretGone — Self-governance. Without the self-sacrifice.",
+    title: "WillingLink — Self-governance. Without the self-sacrifice.",
     description:
-      "Your board authorizes ChatGPT or Claude to access its text and email accounts. FretGone helps your board get set up and coordinates the work. From $200/month for the whole HOA. First month free.",
+      "Your board authorizes ChatGPT or Claude to access its text and email accounts. FretGone helps your board get set up, then keeps the day-to-day work running. From $200/month for the whole HOA. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -30,8 +30,8 @@ export default function Home() {
         Skip to content
       </a>
       <header className={styles.header}>
-        <a className={styles.brand} href="/" aria-label="FretGone home">
-          fretgone<span>.</span>
+        <a className={styles.brand} href="/" aria-label="WillingLink home">
+          WillingLink
         </a>
         <nav aria-label="Main navigation">
           <a href="#service">The service</a>
@@ -69,7 +69,7 @@ export default function Home() {
             <p className={styles.heroDescription}>
               Owners contact the board as usual. Your board authorizes ChatGPT
               or Claude to access its text and email accounts. FretGone helps
-              your board get set up and coordinates the work.
+              your board get set up, then keeps the day-to-day work running.
             </p>
             <p className={styles.heroPromise}>
               From $200/month. For the whole HOA.
@@ -78,7 +78,7 @@ export default function Home() {
               Email us to get started <ArrowRight size={18} />
             </a>
             <p className={styles.heroNote}>
-              First month free. No FretGone accounts required.
+              First month free. No WillingLink accounts required.
             </p>
           </div>
         </section>
@@ -195,11 +195,11 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                FretGone helps your board get the workflow set up and
-                coordinates owner conversations, proposals, records, and
-                authorized tasks. ChatGPT or Claude works through the accounts
-                your board authorizes. Your board sets the limits and reviews
-                sensitive actions.
+                FretGone helps your board get set up, then keeps the workflow
+                running: owner conversations, proposals, records, and authorized
+                tasks. ChatGPT or Claude works through the accounts your board
+                authorizes. Your board sets the limits and reviews sensitive
+                actions.
               </p>
             </details>
             <details>
@@ -256,7 +256,7 @@ export default function Home() {
       <footer className={styles.footer}>
         <div>
           <a className={styles.brand} href="/">
-            fretgone.
+            WillingLink
           </a>
           <span>© {new Date().getFullYear()} FretGone LLC</span>
         </div>
