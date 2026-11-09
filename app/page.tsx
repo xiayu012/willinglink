@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "WillingLink — Self-governance. Without the self-sacrifice.",
   description:
-    "HOA work handled from owner conversations through to approved action. ChatGPT or Claude uses the accounts your board authorizes. From $200/month. First month free.",
+    "HOA work handled from owner conversations through to approved action. ChatGPT or Claude uses the accounts your board authorizes. $1 per owner per month. First month free.",
   openGraph: {
     title: "WillingLink — Self-governance. Without the self-sacrifice.",
     description:
-      "We take on the conversations, proposals, and follow-through—so your HOA can run without running your board into the ground. From $200/month for the whole HOA. First month free.",
+      "We take on the conversations, proposals, and follow-through—so your HOA can run without running your board into the ground. $1 per owner per month. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -71,7 +71,7 @@ export default function Home() {
               your HOA can run without running your board into the ground.
             </p>
             <p className={styles.heroPromise}>
-              From $200/month. For the whole HOA.
+              $1 per owner, per month.
             </p>
             <a className={styles.button} href={email}>
               Email us to get started <ArrowRight size={18} />
@@ -88,13 +88,13 @@ export default function Home() {
         >
           <div className={styles.basePrice}>
             <strong>
-              $200<span>/month</span>
+              $1<span>/owner/month</span>
             </strong>
-            <span>For your entire HOA · under 500 homes</span>
+            <span>Based on the number of owners in your HOA</span>
           </div>
           <div className={styles.largePrice}>
-            <strong>500–999 homes: $500/month</strong>
-            <span>1,000+ homes: not currently available</span>
+            <strong>Example: 100 owners, $100/month.</strong>
+            <span>Currently serving HOAs under 1,000 homes</span>
           </div>
           <a href={email}>
             First month free <ArrowRight size={18} />

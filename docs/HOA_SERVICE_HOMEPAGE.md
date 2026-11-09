@@ -6,7 +6,7 @@ FretGone sells HOA back-office work rather than a new software account. Owners k
 
 One board member can begin with an approximately ten-minute setup conversation. Actual channel authorization and compatibility must be confirmed. The proposed workflow uses a board-readable Notion journal without reader signup and a browser agent on a designated board computer, with phone review for sensitive actions. This page is a service offer, not evidence that these integrations have been built in this repository.
 
-Pricing: first month free; under 500 homes USD 200/month for the whole HOA; 500–999 homes USD 500/month; 1,000+ homes currently not served. All contact CTAs use mailto:contact@fretgone.com; they open the visitor’s email client and do not send email automatically.
+Pricing (updated 2026-11-09): USD 1 per owner per month, based on the HOA’s owner count; first month free. Example: 100 owners means USD 100/month after the free first month. The prior USD 200/500 tiers are superseded. The previously stated service-capacity limit of fewer than 1,000 homes remains; the owner changed pricing, not capacity. All contact CTAs use mailto:contact@fretgone.com; they open the visitor’s email client and do not send email automatically.
 
 Privacy and security: intended board-only records and private homeowner communications; agree on access/retention during setup. AWS-backed tamper-evident archiving is an option to confirm, not an implemented immutable Notion guarantee. Browser safeguards, approval delivery, availability, and data flows require verification in the selected tools. Do not promise no leaks, no third-party processing, universal consensus, or elimination of board responsibility.
 
@@ -126,3 +126,8 @@ Owner approved the full-history explanation and explicitly requested browser exe
 ## Existing tools stay; two additions only — 2026-11-07
 
 Owner clarified the answer to keeping existing tools is yes: the board keeps everything it already uses unchanged. The service adds only a ChatGPT or Claude browser extension and WillingLink to handle incoming owner SMS/email. No migration or replacement tools. Rewrite the existing-tools answer to lead with this direct explanation; align setup and service-scope copy, removing wording that suggests changing or rebuilding the existing stack. Keep the board’s authorization to ChatGPT or Claude and approval limits. This is the owner’s service model, not a new integration implementation or a claim that every integration was tested. No reason for this boundary was supplied; none is invented.
+
+
+## Owner-count pricing — 2026-11-09
+
+Owner replaced the fixed community-size tiers with USD 1 per owner per month and authorized supporting marketing copy. Lead with the unit price in the hero and pricing strip; explain that the HOA’s owner count determines the price, and give a concrete example: “Example: 100 owners, $100/month.” Keep the first month free and prior capacity boundary. Search and sharing descriptions use the new rate. Do not substitute homes, households, signups, or active users for owners, or invent billing mechanics, minimum fees, or new eligibility rules. Static display only; no payment calculation, subscription, or backend changes.
