@@ -122,9 +122,9 @@ export default function Home() {
               <span>01 / ASK</span>
               <h3>Owners have their say.</h3>
               <p>
-                Owners keep using text and email. ChatGPT or Claude gathers
-                their views and asks follow-up questions through the accounts
-                your board authorizes.
+                Owners keep using text and email. ChatGPT gathers their views
+                and asks follow-up questions through the accounts your board
+                authorizes.
               </p>
             </article>
             <article>
@@ -161,9 +161,8 @@ export default function Home() {
               </h2>
               <p>
                 Your existing tools stay as they are. We help your board add a
-                ChatGPT or Claude browser extension and WillingLink for owner
-                texts and emails. Your board grants account access to ChatGPT or
-                Claude.
+                ChatGPT browser extension and WillingLink for owner texts and
+                emails. Your board grants account access to ChatGPT.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
@@ -194,10 +193,9 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Your board authorizes ChatGPT or Claude through the selected
-                tool’s access controls. This account authorization is not
-                granted to FretGone. We confirm permissions and data handling
-                during setup.
+                Your board authorizes ChatGPT through the selected tool’s access
+                controls. This account authorization is not granted to FretGone.
+                We confirm permissions and data handling during setup.
               </p>
             </details>
             <details>
@@ -245,9 +243,8 @@ export default function Home() {
               </summary>
               <p>
                 Yes. Your email, HOA software, accounting tools, and everything
-                else stay as they are. We add only a ChatGPT or Claude browser
-                extension and WillingLink to handle incoming owner texts and
-                emails.
+                else stay as they are. We add only a ChatGPT browser extension
+                and WillingLink to handle incoming owner texts and emails.
               </p>
             </details>
             <details>
