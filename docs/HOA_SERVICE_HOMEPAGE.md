@@ -2,7 +2,7 @@
 
 Owner-approved offering and page scope, 2026-11-04; account-authorization model updated 2026-11-07.
 
-FretGone sells HOA back-office work rather than a new software account. Owners keep using SMS/email. The board grants account authorization to ChatGPT or Claude, not FretGone. FretGone helps the board get the workflow set up, then keeps the day-to-day work running; the AI agent works through the accounts the board authorizes. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
+WillingLink is FretGone’s service for making owner-run, self-managed HOAs easier to operate. The owner’s stated direction is to help communities move beyond high management fees and make self-management easier. The offer is performed back-office work rather than a new software account. Owners keep using SMS/email. The board grants account authorization to ChatGPT or Claude, not FretGone. FretGone helps the board get the workflow set up, then keeps the day-to-day work running; the AI agent works through the accounts the board authorizes. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
 
 One board member can begin with an approximately ten-minute setup conversation. Actual channel authorization and compatibility must be confirmed. The proposed workflow uses a board-readable Notion journal without reader signup and a browser agent on a designated board computer, with phone review for sensitive actions. This page is a service offer, not evidence that these integrations have been built in this repository.
 
@@ -136,3 +136,12 @@ Owner replaced the fixed community-size tiers with USD 1 per owner per month and
 ## One HOA payment, owner count sets the amount — 2026-11-09
 
 Owner clarified that the per-owner price must not look like each owner pays the provider separately. Lead the hero price line with “One HOA. One monthly payment.” The pricing area states the HOA pays, the owner count determines the rate, and owners do not pay individually. The example explicitly identifies the payer: “100 owners? Your HOA pays $100/month.” Search and sharing descriptions say one monthly HOA payment calculated at USD 1 per owner. Keep the first month free and capacity limit. Static explanation only; no billing system or collection flow is implemented.
+
+
+## Strengthen the self-managed HOA position — 2026-11-09
+
+Owner asked to review the whole page with greater emphasis on owner self-management: avoid high management fees and make self-managed HOAs easier. Preserve the approved “Self-governance. Without the self-sacrifice.” hero headline, the shared-plan and work-record language, existing image and layout, and the new unified HOA payment clarification.
+
+The hero audience label now names self-managed HOAs; its paragraph explains owner control, delegated conversations/proposals/daily follow-through, and self-management as a practical alternative to high management fees. Search/sharing titles and descriptions, navigation, process introduction, and service-scope answer follow the same position. Process copy explains owner participation, a shared plan, and board-approved execution; use plain “AI” consistently. Setup continues to explain just two additions and no replacement of existing tools.
+
+Do not suggest HOA dues, reserves, maintenance costs, or every management obligation disappear; do not invent quantified savings, guaranteed replacement of every professional service, or removal of board responsibilities. The offer remains USD 1 per owner per month paid together by the HOA, with the first month free and the existing capacity limit. No runtime or payment implementation changes.

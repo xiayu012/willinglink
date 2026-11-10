@@ -4,13 +4,13 @@ import { ArrowRight, ChevronDown, Leaf } from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
-  title: "WillingLink — Self-governance. Without the self-sacrifice.",
+  title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
   description:
-    "HOA work taken care of. One monthly payment by your HOA, calculated at $1 per owner. Owners do not pay individually. First month free.",
+    "Make your HOA easier to self-manage, with less reliance on costly management companies. One HOA payment per month, calculated at $1 per owner. First month free.",
   openGraph: {
-    title: "WillingLink — Self-governance. Without the self-sacrifice.",
+    title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
     description:
-      "Self-governance without the self-sacrifice. One monthly payment by your HOA, calculated at $1 per owner. First month free.",
+      "Your HOA, run by its owners. We take on the conversations, proposals, and daily follow-through. One monthly HOA payment, calculated at $1 per owner. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -34,7 +34,7 @@ export default function Home() {
           WillingLink
         </a>
         <nav aria-label="Main navigation">
-          <a href="#service">The service</a>
+          <a href="#service">How it works</a>
           <a href="#pricing">Pricing</a>
           <a href={email}>Contact</a>
         </nav>
@@ -57,7 +57,7 @@ export default function Home() {
           <div className={styles.heroVeil} />
           <div className={styles.heroContent}>
             <p className={styles.eyebrow}>
-              THE HOA’S WORK. TAKEN OFF YOUR HANDS.
+              FOR SELF-MANAGED HOAS
             </p>
             <h1 id="hero-title">
               Self-governance.
@@ -67,8 +67,9 @@ export default function Home() {
               </span>
             </h1>
             <p className={styles.heroDescription}>
-              We take on the conversations, proposals, and follow-through—so
-              your HOA can run without running your board into the ground.
+              Your HOA, run by its owners. We handle owner conversations,
+              proposals, and daily follow-through—making self-management a
+              practical alternative to high management fees.
             </p>
             <p className={styles.heroPromise}>
               One HOA. One monthly payment.
@@ -104,23 +105,23 @@ export default function Home() {
 
         <section id="service" className={styles.section}>
           <div className={styles.sectionHeading}>
-            <h2>How the service works.</h2>
+            <h2>How we make self-management easier.</h2>
           </div>
           <div className={styles.steps}>
             <article>
               <span>01 / ASK</span>
               <h3>Owners have their say.</h3>
               <p>
-                ChatGPT or Claude reads and replies through the accounts your
-                board authorizes, gathering owners’ views and asking follow-up
-                questions.
+                Owners keep using text and email. ChatGPT or Claude gathers
+                their views and asks follow-up questions through the accounts
+                your board authorizes.
               </p>
             </article>
             <article>
               <span>02 / DISCUSS</span>
               <h3>A plan everyone can live with.</h3>
               <p>
-                The agent discusses ideas with owners and revises the plan until
+                The AI discusses ideas with owners and revises the plan until
                 everyone can accept it—or records where and why people still
                 disagree.
               </p>
@@ -129,7 +130,7 @@ export default function Home() {
               <span>03 / ACT</span>
               <h3>Approved work gets done.</h3>
               <p>
-                The agent handles routine tasks within the limits you set.
+                The AI handles routine tasks within the limits your board sets.
                 Spending, orders, and other sensitive actions go to a board
                 member’s phone for approval or rejection.
               </p>
@@ -191,15 +192,15 @@ export default function Home() {
             </details>
             <details>
               <summary>
-                What does the service take over?
+                What does WillingLink do for a self-managed HOA?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                WillingLink handles incoming owner texts and emails and keeps
-                the work moving. A ChatGPT or Claude browser extension works in
-                the tools your board already uses, through the accounts you
-                authorize. Your board sets the limits and approves sensitive
-                actions.
+                WillingLink helps boards manage their own HOAs. It handles owner
+                texts and emails, keeps discussions and follow-ups moving, and
+                records the work. The browser extension carries out authorized
+                tasks in your existing tools. Your board sets the limits and
+                approves sensitive actions.
               </p>
             </details>
             <details>
@@ -210,7 +211,7 @@ export default function Home() {
               <p>
                 Board members can read the service’s work log on a Notion page
                 without creating a Notion account. It includes owner
-                discussions, decisions, and the agent’s browser actions. Private
+                discussions, decisions, and the AI’s browser actions. Private
                 owner messages are not shared with other owners.
               </p>
             </details>
