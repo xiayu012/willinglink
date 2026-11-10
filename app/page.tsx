@@ -56,9 +56,7 @@ export default function Home() {
           </div>
           <div className={styles.heroVeil} />
           <div className={styles.heroContent}>
-            <p className={styles.eyebrow}>
-              FOR SELF-MANAGED HOAS
-            </p>
+            <p className={styles.eyebrow}>FOR SELF-MANAGED HOAS</p>
             <h1 id="hero-title">
               Self-management.
               <span>
@@ -80,10 +78,40 @@ export default function Home() {
             </p>
           </div>
         </section>
-        <p id="pricing" className={styles.pricingNote}>
-          Your HOA’s monthly total: $20 for up to 20 owners, plus $1 for each
-          additional owner.
-        </p>
+        <section
+          id="pricing"
+          className={styles.pricingBand}
+          aria-label="HOA pricing"
+        >
+          <div className={styles.pricingInner}>
+            <div className={styles.pricingBase}>
+              <p className={styles.pricingAmount}>
+                <span className={styles.pricingNumber}>
+                  $20
+                  <svg
+                    className={styles.pricingStroke}
+                    viewBox="0 0 160 16"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <path d="M4 10C48 0 108 0 157 8C111 4 56 6 6 15C2 16 0 12 4 10Z" />
+                  </svg>
+                </span>
+                <span>/month per HOA</span>
+              </p>
+              <span className={styles.pricingCaption}>Up to 20 owners</span>
+            </div>
+            <div className={styles.pricingDetails}>
+              <p className={styles.pricingExtra}>
+                +$1/month for each additional owner
+              </p>
+              <p className={styles.pricingFootnote}>
+                One payment from your HOA. First month free.
+              </p>
+            </div>
+          </div>
+        </section>
 
         <section id="service" className={styles.section}>
           <div className={styles.sectionHeading}>
@@ -152,8 +180,8 @@ export default function Home() {
             </h2>
             <p className={styles.faqIntro}>
               Your board can read the whole history: what people said, what was
-              decided, what the AI did in your browser, and what happened
-              next. Nothing is deleted.
+              decided, what the AI did in your browser, and what happened next.
+              Nothing is deleted.
             </p>
             <a className={styles.textLink} href={email}>
               Ask us anything <ArrowRight size={17} />

@@ -160,3 +160,10 @@ Owner explicitly changed the hero’s first line from “Self-governance.” to 
 ## Preserve the paragraph when replacing its opening — 2026-11-09
 
 Owner clarified the previous instruction targeted only “Your HOA, run by its owners.” The replacement wrongly removed the rest of the paragraph. Restore the original following sentence about owner conversations, proposals, and daily follow-through as a practical alternative to high management fees. Keep the new WillingLink mission opening and the separately requested “Self-management.” heading. Also restore the corresponding omitted service sentence in the sharing description. No other page content changes.
+
+
+## Reference-led price band with gold underline — 2026-11-09
+
+Owner supplied a reference and requested its yellow underline and bottom pricing-bar treatment, with placement left to design judgment. This supersedes the earlier small-text-only presentation. Place a deep-teal band immediately below the hero, anchoring the hero image and the following service explanation. Underline the selectable USD 20 amount with a small decorative gold SVG brush curve; pair it with “/month per HOA” and “Up to 20 owners.” The second column explains +USD 1/month per additional owner and one HOA payment, with the first month free. Stack the columns on narrow screens. The screenshot’s old USD 200/500 prices, logo, photo, and headline are not copied. Existing approved copy, imagery, account authorization, and fee rules remain. No runtime or payment logic changes.
+
+Validation: actual homepage component and stylesheet rendered for visual review. Desktop 1280px and mobile 390px/320px had no horizontal overflow; gold underline, amount, owner limit, additional-owner rate, and HOA payer checked. Screenshot saved as gold-price-band.png in the session visualization folder. 214 offline checks passed; tsc retains only existing speech-input.tsx:55/56 TS2717 errors; diff whitespace check passed. This is a static homepage preview, not a full application end-to-end run.
