@@ -172,3 +172,8 @@ Validation: actual homepage component and stylesheet rendered for visual review.
 ## ChatGPT-only offering — 2026-11-09
 
 Owner decided to offer only ChatGPT and requested removing Claude references from the entire homepage. Replace the provider choice in process, setup, authorization, service-scope, and existing-tools explanations with ChatGPT. Current offering summary updated; historical entries remain historical. No reason for choosing ChatGPT only was supplied. This changes static service descriptions, not backend models or integrations.
+
+
+## First-viewport pricing and shorter introduction — 2026-11-09
+
+Owner requested removing the hero signup/free-month note, the ten-minute setup heading, the second promotional hero sentence, and “One payment from your HOA.” Preserve the mission opening, setup explanation, and free-month offer elsewhere. Move the gold-underlined pricing band into the hero so desktop pricing overlays the photograph within the first viewport. On mobile, place pricing immediately after the introduction and before the photograph. Pricing rules and service behavior remain unchanged.

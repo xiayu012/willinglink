@@ -88,9 +88,10 @@
   isolation: isolate;
   max-width: 1680px;
   margin: auto;
-  min-height: 760px;
+  min-height: calc(100svh - 90px);
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   overflow: hidden;
 }
 .heroArt {
@@ -121,7 +122,9 @@
 }
 .heroContent {
   position: relative;
-  padding: 40px 0 42px;
+  padding: 34px 0;
+  flex: 1;
+  align-content: center;
   margin-left: max(54px, calc((100% - 1428px) / 2));
   width: 520px;
 }
@@ -207,13 +210,16 @@
   margin: 13px 0 0;
 }
 .pricingBand {
+  position: relative;
+  z-index: 1;
+  width: 100%;
   background: var(--teal);
   color: var(--cream);
 }
 .pricingInner {
   max-width: 1536px;
   margin: 0 auto;
-  padding: 32px 54px;
+  padding: 24px 54px;
   display: flex;
   align-items: center;
   gap: 42px;
@@ -592,11 +598,11 @@
   .pricingInner {
     display: grid;
     grid-template-columns: 1fr;
-    padding: 26px 24px;
-    gap: 24px;
+    padding: 20px 24px;
+    gap: 14px;
   }
   .pricingBase {
-    padding: 0 0 24px;
+    padding: 0 0 16px;
     border-right: 0;
     border-bottom: 1px solid #dce6d647;
   }
@@ -705,6 +711,9 @@
     order: 0;
   }
   .heroArt {
+    order: 2;
+  }
+  .pricingBand {
     order: 1;
   }
   .priceBar {
@@ -883,4 +892,15 @@
   .button:hover {
     transform: none;
   }
+}
+
+/* Keep the headline and pricing together within the desktop first fold. */
+@media (min-width: 761px) {
+  .site h1 {
+    font-size: clamp(44px, 4.2vw, 66px);
+  }
+}
+.site h1 > .headlineLead {
+  margin-top: 0;
+  white-space: nowrap;
 }

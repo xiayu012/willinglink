@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
     description:
-      "WillingLink helps you move beyond property management companies and makes self-management easier. We take on the conversations, proposals, and daily follow-through. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
+      "WillingLink helps you move beyond property management companies and makes self-management easier. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -58,7 +58,7 @@ export default function Home() {
           <div className={styles.heroContent}>
             <p className={styles.eyebrow}>FOR SELF-MANAGED HOAS</p>
             <h1 id="hero-title">
-              Self-management.
+              <span className={styles.headlineLead}>Self-management.</span>
               <span>
                 Without the <br />
                 <span className={styles.noWrap}>self-sacrifice.</span>
@@ -66,51 +66,44 @@ export default function Home() {
             </h1>
             <p className={styles.heroDescription}>
               WillingLink helps you move beyond property management companies
-              and makes self-management easier. We handle owner conversations,
-              proposals, and daily follow-through—making self-management a
-              practical alternative to high management fees.
+              and makes self-management easier.
             </p>
             <a className={styles.button} href={email}>
               Email us to get started <ArrowRight size={18} />
             </a>
-            <p className={styles.heroNote}>
-              First month free. No WillingLink accounts required.
-            </p>
           </div>
-        </section>
-        <section
-          id="pricing"
-          className={styles.pricingBand}
-          aria-label="HOA pricing"
-        >
-          <div className={styles.pricingInner}>
-            <div className={styles.pricingBase}>
-              <p className={styles.pricingAmount}>
-                <span className={styles.pricingNumber}>
-                  $20
-                  <svg
-                    className={styles.pricingStroke}
-                    viewBox="0 0 160 16"
-                    preserveAspectRatio="none"
-                    aria-hidden="true"
-                    focusable="false"
-                  >
-                    <path d="M4 10C48 0 108 0 157 8C111 4 56 6 6 15C2 16 0 12 4 10Z" />
-                  </svg>
-                </span>
-                <span>/month per HOA</span>
-              </p>
-              <span className={styles.pricingCaption}>Up to 20 owners</span>
+          <section
+            id="pricing"
+            className={styles.pricingBand}
+            aria-label="HOA pricing"
+          >
+            <div className={styles.pricingInner}>
+              <div className={styles.pricingBase}>
+                <p className={styles.pricingAmount}>
+                  <span className={styles.pricingNumber}>
+                    $20
+                    <svg
+                      className={styles.pricingStroke}
+                      viewBox="0 0 160 16"
+                      preserveAspectRatio="none"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <path d="M4 10C48 0 108 0 157 8C111 4 56 6 6 15C2 16 0 12 4 10Z" />
+                    </svg>
+                  </span>
+                  <span>/month per HOA</span>
+                </p>
+                <span className={styles.pricingCaption}>Up to 20 owners</span>
+              </div>
+              <div className={styles.pricingDetails}>
+                <p className={styles.pricingExtra}>
+                  +$1/month for each additional owner
+                </p>
+                <p className={styles.pricingFootnote}>First month free.</p>
+              </div>
             </div>
-            <div className={styles.pricingDetails}>
-              <p className={styles.pricingExtra}>
-                +$1/month for each additional owner
-              </p>
-              <p className={styles.pricingFootnote}>
-                One payment from your HOA. First month free.
-              </p>
-            </div>
-          </div>
+          </section>
         </section>
 
         <section id="service" className={styles.section}>
@@ -154,11 +147,6 @@ export default function Home() {
               <Leaf size={33} strokeWidth={1.1} />
             </span>
             <div>
-              <h2>
-                One board member.
-                <br />
-                About ten minutes to begin.
-              </h2>
               <p>
                 Your existing tools stay as they are. We help your board add a
                 ChatGPT browser extension and WillingLink for owner texts and
