@@ -6,7 +6,7 @@ FretGone sells HOA back-office work rather than a new software account. Owners k
 
 One board member can begin with an approximately ten-minute setup conversation. Actual channel authorization and compatibility must be confirmed. The proposed workflow uses a board-readable Notion journal without reader signup and a browser agent on a designated board computer, with phone review for sensitive actions. This page is a service offer, not evidence that these integrations have been built in this repository.
 
-Pricing (updated 2026-11-09): USD 1 per owner per month, based on the HOA’s owner count; first month free. Example: 100 owners means USD 100/month after the free first month. The prior USD 200/500 tiers are superseded. The previously stated service-capacity limit of fewer than 1,000 homes remains; the owner changed pricing, not capacity. All contact CTAs use mailto:contact@fretgone.com; they open the visitor’s email client and do not send email automatically.
+Pricing (updated 2026-11-09): One monthly payment by the HOA, calculated at USD 1 per owner based on the HOA’s owner count; individual owners do not pay separately; first month free. Example: 100 owners means USD 100/month after the free first month. The prior USD 200/500 tiers are superseded. The previously stated service-capacity limit of fewer than 1,000 homes remains; the owner changed pricing, not capacity. All contact CTAs use mailto:contact@fretgone.com; they open the visitor’s email client and do not send email automatically.
 
 Privacy and security: intended board-only records and private homeowner communications; agree on access/retention during setup. AWS-backed tamper-evident archiving is an option to confirm, not an implemented immutable Notion guarantee. Browser safeguards, approval delivery, availability, and data flows require verification in the selected tools. Do not promise no leaks, no third-party processing, universal consensus, or elimination of board responsibility.
 
@@ -131,3 +131,8 @@ Owner clarified the answer to keeping existing tools is yes: the board keeps eve
 ## Owner-count pricing — 2026-11-09
 
 Owner replaced the fixed community-size tiers with USD 1 per owner per month and authorized supporting marketing copy. Lead with the unit price in the hero and pricing strip; explain that the HOA’s owner count determines the price, and give a concrete example: “Example: 100 owners, $100/month.” Keep the first month free and prior capacity boundary. Search and sharing descriptions use the new rate. Do not substitute homes, households, signups, or active users for owners, or invent billing mechanics, minimum fees, or new eligibility rules. Static display only; no payment calculation, subscription, or backend changes.
+
+
+## One HOA payment, owner count sets the amount — 2026-11-09
+
+Owner clarified that the per-owner price must not look like each owner pays the provider separately. Lead the hero price line with “One HOA. One monthly payment.” The pricing area states the HOA pays, the owner count determines the rate, and owners do not pay individually. The example explicitly identifies the payer: “100 owners? Your HOA pays $100/month.” Search and sharing descriptions say one monthly HOA payment calculated at USD 1 per owner. Keep the first month free and capacity limit. Static explanation only; no billing system or collection flow is implemented.

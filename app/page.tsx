@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "WillingLink — Self-governance. Without the self-sacrifice.",
   description:
-    "HOA work handled from owner conversations through to approved action. ChatGPT or Claude uses the accounts your board authorizes. $1 per owner per month. First month free.",
+    "HOA work taken care of. One monthly payment by your HOA, calculated at $1 per owner. Owners do not pay individually. First month free.",
   openGraph: {
     title: "WillingLink — Self-governance. Without the self-sacrifice.",
     description:
-      "We take on the conversations, proposals, and follow-through—so your HOA can run without running your board into the ground. $1 per owner per month. First month free.",
+      "Self-governance without the self-sacrifice. One monthly payment by your HOA, calculated at $1 per owner. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -71,7 +71,7 @@ export default function Home() {
               your HOA can run without running your board into the ground.
             </p>
             <p className={styles.heroPromise}>
-              $1 per owner, per month.
+              One HOA. One monthly payment.
             </p>
             <a className={styles.button} href={email}>
               Email us to get started <ArrowRight size={18} />
@@ -90,10 +90,11 @@ export default function Home() {
             <strong>
               $1<span>/owner/month</span>
             </strong>
-            <span>Based on the number of owners in your HOA</span>
+            <span>Paid by your HOA, calculated at $1 per owner</span>
           </div>
           <div className={styles.largePrice}>
-            <strong>Example: 100 owners, $100/month.</strong>
+            <strong>100 owners? Your HOA pays $100/month.</strong>
+            <span>Owners do not pay individually</span>
             <span>Currently serving HOAs under 1,000 homes</span>
           </div>
           <a href={email}>
