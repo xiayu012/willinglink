@@ -177,3 +177,8 @@ Owner decided to offer only ChatGPT and requested removing Claude references fro
 ## First-viewport pricing and shorter introduction — 2026-11-09
 
 Owner requested removing the hero signup/free-month note, the ten-minute setup heading, the second promotional hero sentence, and “One payment from your HOA.” Preserve the mission opening, setup explanation, and free-month offer elsewhere. Move the gold-underlined pricing band into the hero so desktop pricing overlays the photograph within the first viewport. On mobile, place pricing immediately after the introduction and before the photograph. Pricing rules and service behavior remain unchanged.
+
+
+## Visual explanation of the price — 2026-11-09
+
+Owner removed the self-managed HOA eyebrow and asked for visual communication of the pricing boundary. Group 1–20 included owners beneath the base price; connect one additional owner to one additional monthly dollar. Three aligned example cards show 10 owners/$20, 20 owners/$20, and 50 owners/$50 as HOA monthly totals. Preserve first-viewport placement and the gold price underline. Static examples only; no calculator or billing behavior.

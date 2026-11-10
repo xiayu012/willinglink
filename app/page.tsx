@@ -56,7 +56,6 @@ export default function Home() {
           </div>
           <div className={styles.heroVeil} />
           <div className={styles.heroContent}>
-            <p className={styles.eyebrow}>FOR SELF-MANAGED HOAS</p>
             <h1 id="hero-title">
               <span className={styles.headlineLead}>Self-management.</span>
               <span>
@@ -94,14 +93,47 @@ export default function Home() {
                   </span>
                   <span>/month per HOA</span>
                 </p>
-                <span className={styles.pricingCaption}>Up to 20 owners</span>
+                <span className={styles.pricingCaption}>
+                  <strong>1–20</strong> owners included
+                </span>
               </div>
               <div className={styles.pricingDetails}>
                 <p className={styles.pricingExtra}>
-                  +$1/month for each additional owner
+                  <span>After 20 owners</span>
+                  <span className={styles.ownerIncrement}>
+                    +1 owner <ArrowRight size={16} aria-hidden="true" />{" "}
+                    +$1/month
+                  </span>
                 </p>
-                <p className={styles.pricingFootnote}>First month free.</p>
+                <div
+                  className={styles.priceExamples}
+                  aria-label="Examples of your HOA’s monthly total"
+                >
+                  <div>
+                    <span>10 owners</span>
+                    <strong>
+                      $20<span>/mo</span>
+                    </strong>
+                  </div>
+                  <div>
+                    <span>20 owners</span>
+                    <strong>
+                      $20<span>/mo</span>
+                    </strong>
+                  </div>
+                  <div>
+                    <span>50 owners</span>
+                    <strong>
+                      $50<span>/mo</span>
+                    </strong>
+                  </div>
+                </div>
               </div>
+              <p className={styles.pricingFree}>
+                First month
+                <br />
+                free.
+              </p>
             </div>
           </section>
         </section>
