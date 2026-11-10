@@ -150,3 +150,8 @@ Do not suggest HOA dues, reserves, maintenance costs, or every management obliga
 ## Compact minimum-price explanation — 2026-11-09
 
 Owner rejected the prior price presentation and requested a single line of small text: USD 20/month for up to 20 owners, then USD 1/month for each additional owner. Replace the large unit-price display and example with that compact line, explicitly paid once by the HOA. Exactly 20 owners costs USD 20/month; 21 owners costs USD 21/month. Remove the large pricing strip, example, redundant payment slogan, and extra pricing CTA. Replace them with one small-text paragraph below the hero: “Your HOA’s monthly total: $20 for up to 20 owners, plus $1 for each additional owner.” It can wrap naturally on narrow screens. Keep first month free in the existing hero/header copy; move the capacity note into the service-scope answer. Preserve the rest of the approved self-management copy. Search and sharing descriptions use the same pricing. Static display only.
+
+
+## Self-management headline and direct mission — 2026-11-09
+
+Owner explicitly changed the hero’s first line from “Self-governance.” to “Self-management.” and replaced the owner-run opening with the mission of helping customers move beyond property management companies and making self-management easier. Public hero and sharing description now say “WillingLink helps you move beyond property management companies and makes self-management easier.” Preserve “Without the self-sacrifice.” and the approved compact HOA payment note. No new service scope or runtime behavior.
