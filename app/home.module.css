@@ -206,6 +206,14 @@
   color: #647268;
   margin: 13px 0 0;
 }
+.pricingNote {
+  max-width: 1536px;
+  margin: 0 auto;
+  padding: 18px 54px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
 .priceBar {
   background: var(--teal);
   color: #fff9ed;
@@ -526,6 +534,9 @@
   }
 }
 @media (max-width: 760px) {
+  .pricingNote {
+    padding-inline: 24px;
+  }
   .header {
     height: auto;
     padding: 23px 22px 19px;

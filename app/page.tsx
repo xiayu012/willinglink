@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
   description:
-    "Make your HOA easier to self-manage, with less reliance on costly management companies. One HOA payment per month, calculated at $1 per owner. First month free.",
+    "Make your HOA easier to self-manage, with less reliance on costly management companies. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
   openGraph: {
     title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
     description:
-      "Your HOA, run by its owners. We take on the conversations, proposals, and daily follow-through. One monthly HOA payment, calculated at $1 per owner. First month free.",
+      "Your HOA, run by its owners. We take on the conversations, proposals, and daily follow-through. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -71,9 +71,6 @@ export default function Home() {
               proposals, and daily follow-through—making self-management a
               practical alternative to high management fees.
             </p>
-            <p className={styles.heroPromise}>
-              One HOA. One monthly payment.
-            </p>
             <a className={styles.button} href={email}>
               Email us to get started <ArrowRight size={18} />
             </a>
@@ -82,26 +79,10 @@ export default function Home() {
             </p>
           </div>
         </section>
-        <section
-          id="pricing"
-          className={styles.priceBar}
-          aria-label="HOA service pricing"
-        >
-          <div className={styles.basePrice}>
-            <strong>
-              $1<span>/owner/month</span>
-            </strong>
-            <span>Paid by your HOA, calculated at $1 per owner</span>
-          </div>
-          <div className={styles.largePrice}>
-            <strong>100 owners? Your HOA pays $100/month.</strong>
-            <span>Owners do not pay individually</span>
-            <span>Currently serving HOAs under 1,000 homes</span>
-          </div>
-          <a href={email}>
-            First month free <ArrowRight size={18} />
-          </a>
-        </section>
+        <p id="pricing" className={styles.pricingNote}>
+          Your HOA’s monthly total: $20 for up to 20 owners, plus $1 for each
+          additional owner.
+        </p>
 
         <section id="service" className={styles.section}>
           <div className={styles.sectionHeading}>
@@ -200,7 +181,8 @@ export default function Home() {
                 texts and emails, keeps discussions and follow-ups moving, and
                 records the work. The browser extension carries out authorized
                 tasks in your existing tools. Your board sets the limits and
-                approves sensitive actions.
+                approves sensitive actions. We currently serve HOAs with fewer
+                than 1,000 homes.
               </p>
             </details>
             <details>
