@@ -182,3 +182,8 @@ Owner requested removing the hero signup/free-month note, the ten-minute setup h
 ## Visual explanation of the price — 2026-11-09
 
 Owner removed the self-managed HOA eyebrow and asked for visual communication of the pricing boundary. Group 1–20 included owners beneath the base price; connect one additional owner to one additional monthly dollar. Three aligned example cards show 10 owners/$20, 20 owners/$20, and 50 owners/$50 as HOA monthly totals. Preserve first-viewport placement and the gold price underline. Static examples only; no calculator or billing behavior.
+
+
+## Restore the earlier price band — 2026-11-09
+
+Owner rejected the visual pricing examples and requested reverting. Restore the preceding two-column price band: $20/month per HOA, Up to 20 owners, +$1/month for each additional owner, and First month free. Keep the requested removal of the FOR SELF-MANAGED HOAS eyebrow. Gold underline and first-viewport placement remain.
