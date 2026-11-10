@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
     description:
-      "WillingLink helps you move beyond property management companies and makes self-management easier. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
+      "WillingLink helps you move beyond property management companies and makes self-management easier. We take on the conversations, proposals, and daily follow-through. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -68,7 +68,9 @@ export default function Home() {
             </h1>
             <p className={styles.heroDescription}>
               WillingLink helps you move beyond property management companies
-              and makes self-management easier.
+              and makes self-management easier. We handle owner conversations,
+              proposals, and daily follow-through—making self-management a
+              practical alternative to high management fees.
             </p>
             <a className={styles.button} href={email}>
               Email us to get started <ArrowRight size={18} />

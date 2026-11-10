@@ -155,3 +155,8 @@ Owner rejected the prior price presentation and requested a single line of small
 ## Self-management headline and direct mission — 2026-11-09
 
 Owner explicitly changed the hero’s first line from “Self-governance.” to “Self-management.” and replaced the owner-run opening with the mission of helping customers move beyond property management companies and making self-management easier. Public hero and sharing description now say “WillingLink helps you move beyond property management companies and makes self-management easier.” Preserve “Without the self-sacrifice.” and the approved compact HOA payment note. No new service scope or runtime behavior.
+
+
+## Preserve the paragraph when replacing its opening — 2026-11-09
+
+Owner clarified the previous instruction targeted only “Your HOA, run by its owners.” The replacement wrongly removed the rest of the paragraph. Restore the original following sentence about owner conversations, proposals, and daily follow-through as a practical alternative to high management fees. Keep the new WillingLink mission opening and the separately requested “Self-management.” heading. Also restore the corresponding omitted service sentence in the sharing description. No other page content changes.
