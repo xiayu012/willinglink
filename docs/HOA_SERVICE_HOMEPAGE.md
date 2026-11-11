@@ -187,3 +187,8 @@ Owner removed the self-managed HOA eyebrow and asked for visual communication of
 ## Restore the earlier price band — 2026-11-09
 
 Owner rejected the visual pricing examples and requested reverting. Restore the preceding two-column price band: $20/month per HOA, Up to 20 owners, +$1/month for each additional owner, and First month free. Keep the requested removal of the FOR SELF-MANAGED HOAS eyebrow. Gold underline and first-viewport placement remain.
+
+
+## US HOA wording pass — 2026-11-11
+
+Owner authorized the whole-page wording revision following the terminology review. Use homeowners for people and homes for community size and the displayed pricing basis: $20/month per HOA for up to 20 homes, plus $1/month per additional home. This supersedes owner-person-count language in prior entries. Preserve the approved headline, shared-plan heading, record promise, layout, first month free, and fewer-than-1,000-home capacity. Use management company, payments/purchases, and approve/decline. Explain access and archival review in plain language and name ChatGPT directly. Setup remains assistance, authorization goes to ChatGPT, and privacy/archival limitations remain explicit. Static offer/copy change only; no billing or account-access implementation.

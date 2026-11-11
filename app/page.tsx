@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
   description:
-    "Make your HOA easier to self-manage, with less reliance on costly management companies. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
+    "Run your HOA without a management company. WillingLink makes self-management easier. One monthly HOA payment: $20 for up to 20 homes, plus $1 for each additional home. First month free.",
   openGraph: {
     title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
     description:
-      "WillingLink helps you move beyond property management companies and makes self-management easier. One monthly HOA payment: $20 for up to 20 owners, plus $1 for each additional owner. First month free.",
+      "WillingLink makes it easier to run your HOA without a management company. One monthly HOA payment: $20 for up to 20 homes, plus $1 for each additional home. First month free.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -64,8 +64,8 @@ export default function Home() {
               </span>
             </h1>
             <p className={styles.heroDescription}>
-              WillingLink helps you move beyond property management companies
-              and makes self-management easier.
+              WillingLink makes it easier to run your HOA without a management
+              company.
             </p>
             <a className={styles.button} href={email}>
               Email us to get started <ArrowRight size={18} />
@@ -93,11 +93,11 @@ export default function Home() {
                   </span>
                   <span>/month per HOA</span>
                 </p>
-                <span className={styles.pricingCaption}>Up to 20 owners</span>
+                <span className={styles.pricingCaption}>Up to 20 homes</span>
               </div>
               <div className={styles.pricingDetails}>
                 <p className={styles.pricingExtra}>
-                  +$1/month for each additional owner
+                  +$1/month for each additional home
                 </p>
                 <p className={styles.pricingFootnote}>First month free.</p>
               </div>
@@ -112,20 +112,20 @@ export default function Home() {
           <div className={styles.steps}>
             <article>
               <span>01 / ASK</span>
-              <h3>Owners have their say.</h3>
+              <h3>Homeowners have their say.</h3>
               <p>
-                Owners keep using text and email. ChatGPT gathers their views
-                and asks follow-up questions through the accounts your board
-                authorizes.
+                Homeowners keep texting and emailing the board as usual. Through
+                the accounts your board gives it access to, ChatGPT asks what
+                they think and follows up to understand their concerns.
               </p>
             </article>
             <article>
               <span>02 / DISCUSS</span>
               <h3>A plan everyone can live with.</h3>
               <p>
-                The AI discusses ideas with owners and revises the plan until
-                everyone can accept it—or records where and why people still
-                disagree.
+                The AI discusses ideas with homeowners and revises the plan
+                until everyone can accept it—or records where and why people
+                still disagree.
               </p>
             </article>
             <article>
@@ -133,8 +133,8 @@ export default function Home() {
               <h3>Approved work gets done.</h3>
               <p>
                 The AI handles routine tasks within the limits your board sets.
-                Spending, orders, and other sensitive actions go to a board
-                member’s phone for approval or rejection.
+                Payments, purchases, and other sensitive actions go to a board
+                member’s phone to approve or decline.
               </p>
             </article>
           </div>
@@ -148,12 +148,13 @@ export default function Home() {
             <div>
               <p>
                 Your existing tools stay as they are. We help your board add a
-                ChatGPT browser extension and WillingLink for owner texts and
-                emails. Your board grants account access to ChatGPT.
+                ChatGPT browser extension and WillingLink to handle homeowners’
+                texts and emails. Your board gives ChatGPT access to its
+                accounts.
               </p>
             </div>
             <a href={email} className={styles.textLink}>
-              Discuss your setup <ArrowRight size={17} />
+              Talk with us <ArrowRight size={17} />
             </a>
           </div>
         </section>
@@ -176,13 +177,14 @@ export default function Home() {
           <div className={styles.questions}>
             <details>
               <summary>
-                Who gets access to our text and email?
+                Who gets access to our texts and emails?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Your board authorizes ChatGPT through the selected tool’s access
-                controls. This account authorization is not granted to FretGone.
-                We confirm permissions and data handling during setup.
+                Your board gives ChatGPT access to its text and email accounts,
+                not WillingLink or FretGone. We help your board get set up and
+                review what ChatGPT can access and how that information is
+                handled.
               </p>
             </details>
             <details>
@@ -191,12 +193,12 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                WillingLink helps boards manage their own HOAs. It handles owner
-                texts and emails, keeps discussions and follow-ups moving, and
-                records the work. The browser extension carries out authorized
-                tasks in your existing tools. Your board sets the limits and
-                approves sensitive actions. We currently serve HOAs with fewer
-                than 1,000 homes.
+                WillingLink helps your board run a self-managed HOA. It handles
+                homeowners’ texts and emails, keeps discussions moving, follows
+                up, and records the work. The browser extension carries out
+                authorized tasks in your existing tools. Your board sets the
+                limits and approves sensitive actions. We currently serve HOAs
+                with fewer than 1,000 homes.
               </p>
             </details>
             <details>
@@ -206,9 +208,10 @@ export default function Home() {
               </summary>
               <p>
                 Board members can read the service’s work log on a Notion page
-                without creating a Notion account. It includes owner
-                discussions, decisions, and the AI’s browser actions. Private
-                owner messages are not shared with other owners.
+                without creating a Notion account. It includes conversations
+                with homeowners, decisions, the AI’s actions in your browser,
+                and what happened next. Homeowners’ private messages are not
+                shared with other homeowners.
               </p>
             </details>
             <details>
@@ -217,10 +220,11 @@ export default function Home() {
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Spending, orders, and other sensitive actions. A board member
+                Payments, purchases, and other sensitive actions. A board member
                 reads the proposed action on their phone and approves or
-                declines it. We confirm this flow before starting. Your HOA’s
-                voting rules and board responsibilities still apply.
+                declines it. We walk your board through the approval process
+                before getting started. Your HOA’s voting rules and board
+                responsibilities still apply.
               </p>
             </details>
             <details>
@@ -231,19 +235,21 @@ export default function Home() {
               <p>
                 Yes. Your email, HOA software, accounting tools, and everything
                 else stay as they are. We add only a ChatGPT browser extension
-                and WillingLink to handle incoming owner texts and emails.
+                and WillingLink to handle incoming texts and emails from
+                homeowners.
               </p>
             </details>
             <details>
               <summary>
-                How do you protect the record?
+                How do you protect the work log?
                 <ChevronDown size={17} />
               </summary>
               <p>
-                Notion pages can be edited. A separate AWS-backed archive can
-                help make later changes detectable. We confirm archive coverage
-                and review the selected AI tool’s account permissions, data
-                access, processing, and retention before setup.
+                The Notion page can be edited. A separate archive on AWS can
+                help reveal later changes to the record. Before getting started,
+                we review what the archive keeps, how long it keeps it, and who
+                can access it. We also review what ChatGPT can access and how it
+                handles and stores your information.
               </p>
             </details>
           </div>
