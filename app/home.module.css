@@ -1,9 +1,9 @@
 .site {
-  --cream: #faf6ee;
-  --teal: #103f39;
-  --ink: #163f39;
-  --muted: #596a61;
-  --gold: #d4a15d;
+  --cream: #f5f4ef;
+  --teal: #455f52;
+  --ink: #2e3d35;
+  --muted: #566358;
+  --gold: #8b947d;
   background: var(--cream);
   color: var(--ink);
   font-family: Arial, Helvetica, sans-serif;
@@ -19,7 +19,7 @@
   text-decoration: none;
 }
 .site a:focus-visible {
-  outline: 3px solid #a87030;
+  outline: 3px solid #6d8064;
   outline-offset: 5px;
 }
 .site svg {
@@ -52,7 +52,7 @@
   line-height: 1;
 }
 .brand span {
-  color: #b7803e;
+  color: #75826d;
 }
 .header nav {
   display: flex;
@@ -62,13 +62,13 @@
 }
 .header nav a:hover,
 .footer a:hover {
-  color: #a46e30;
+  color: #586e59;
 }
 .headerCta {
   display: inline-flex;
   gap: 18px;
   align-items: center;
-  border: 1px solid #b8c2b4;
+  border: 1px solid #d0d7cb;
   padding: 10px 17px;
   border-radius: 30px;
   font-size: 12px;
@@ -139,7 +139,7 @@
   font-size: 14px;
 }
 .button:hover {
-  background: #235a4e;
+  background: #374f42;
 }
 .heroNote {
   margin-top: 12px !important;
@@ -307,7 +307,7 @@
   max-width: 1440px;
   padding: 30px 56px;
   margin: auto;
-  border-top: 1px solid #d5dccd;
+  border-top: 1px solid #dde1d8;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -645,8 +645,9 @@
   min-width: 0;
 }
 .freeService {
-  background: var(--teal);
-  color: var(--cream);
+  background: #e8ede6;
+  color: var(--ink);
+  border: 1px solid #d9e0d4;
   display: flex;
   flex-direction: column;
 }
@@ -660,7 +661,7 @@
   letter-spacing: -1.2px;
 }
 .freeService .servicePrice {
-  color: #e4bb7c;
+  color: #455f52;
 }
 .freeService h1 {
   font-size: clamp(52px, 5.1vw, 76px);
@@ -674,7 +675,7 @@
 }
 .freeService .serviceDescription {
   max-width: 510px;
-  color: #e4eadd;
+  color: #4f6053;
 }
 .serviceButton {
   display: inline-flex;
@@ -689,9 +690,9 @@
   margin-top: 26px;
 }
 .freeService .serviceButton {
-  color: var(--teal);
-  background: var(--cream);
-  border-color: var(--cream);
+  color: var(--cream);
+  background: var(--teal);
+  border-color: var(--teal);
 }
 .serviceButton:hover {
   opacity: 0.85;
@@ -702,12 +703,13 @@
   margin-top: auto;
 }
 .servicePhotoImage {
+  filter: saturate(0.78) contrast(0.96);
   object-fit: cover;
   object-position: 70% 20%;
 }
 .paidService {
-  background: #edf0e6;
-  border: 1px solid #c9d2c1;
+  background: #fafbf8;
+  border: 1px solid #d9ded4;
   padding: 32px 32px 34px;
   display: flex;
   flex-direction: column;

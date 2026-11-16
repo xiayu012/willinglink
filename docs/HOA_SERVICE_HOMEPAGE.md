@@ -211,3 +211,8 @@ Owner rejected small-print persuasion and educational marketing: the page should
 ## Two distinct services in one visible frame — 2026-11-15
 
 Owner clarified the layout must make exactly two offers unmistakable, with free IDR/ADR prominent and the paid ongoing service smaller. Replace the image-led hero plus lower supplemental strip with two independently bounded service panels side by side: larger dark free panel with the existing photo inside it; smaller pale paid panel. Both follow price, service name, description, and contact action. Mobile stacks the two bounded panels. Keep approved descriptions, consolidated board summary, $1/unit/month HOA billing, and careers links. No new promotional copy or runtime behavior.
+
+
+## Softer, unified page palette — 2026-11-15
+
+Owner found the colors abrupt and unattractive. Replace the large dark green/gold free panel with light sage, a warm neutral page, off-white paid panel, muted forest text/buttons, and quiet borders. Both independent service panels retain their relative size and structure. Align shared navigation and careers accents with the same palette. Reduce saturation/contrast of the existing photo through display styling. Copy and service scope unchanged.
