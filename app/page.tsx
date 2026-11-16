@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { ArrowRight, ArrowUpRight, ChevronDown } from "lucide-react";
+import {
+  ArrowRight,
+  ArrowUpRight,
+  ArrowUpRight as StepsIcon,
+  X,
+} from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
@@ -56,99 +61,36 @@ export default function Home() {
               homeowners and HOA boards.
             </p>
             <div className={styles.freeActions}>
-              <a className={styles.serviceButton} href={email}>
-                Start <ArrowRight size={18} aria-hidden="true" />
-              </a>
-              <details className={styles.resolutionSteps}>
-                <summary>
-                  Detailed steps <ChevronDown size={15} aria-hidden="true" />
-                </summary>
-                <div className={styles.stepsContent}>
-                  <p className={styles.stepsIntro}>
-                    Start by emailing us about the dispute. IDR and ADR are
-                    separate procedures; the applicable path depends on the
-                    dispute.
-                  </p>
-                  <h3>IDR — HOA/member disputes</h3>
-                  <p>
-                    Follow your HOA’s compliant IDR policy. Otherwise, §5915
-                    applies.
-                  </p>
-                  <ol>
-                    <li>
-                      Request IDR in writing. The HOA must participate when a
-                      member requests it; a member may decline the HOA’s
-                      request.
-                    </li>
-                    <li>
-                      Under §5915, meet promptly with a board-designated
-                      director at a mutually convenient time and place. Explain
-                      both positions and confer in good faith.
-                    </li>
-                    <li>
-                      Put any agreement in writing, signed by both parties. It
-                      must comply with law and governing documents, and fall
-                      within the director’s authority or receive board
-                      ratification.
-                    </li>
-                  </ol>
-                  <h3>ADR — covered pre-lawsuit disputes</h3>
-                  <ol>
-                    <li>
-                      For disputes covered by §5930, serve every other party a
-                      Request for Resolution: dispute description, ADR request,
-                      and 30-day response/rejection notice. Include Article 3
-                      when serving a member. Use personal delivery, first-class
-                      mail, or another method reasonably calculated to give
-                      actual notice.
-                    </li>
-                    <li>Allow 30 days to accept. Silence means rejection.</li>
-                    <li>
-                      If accepted, agree on mediation and complete ADR within 90
-                      days after acceptance reaches the requester, unless both
-                      parties sign an extension. Settlement is voluntary.
-                    </li>
-                  </ol>
-                  <p className={styles.stepsScope}>
-                    Small-claims cases are excluded; assessment disputes are
-                    generally excluded. A covered lawsuit requires the §5950
-                    certificate.
-                  </p>
-                  <p className={styles.stepsScope}>
-                    Emailing WillingLink alone does not serve the required
-                    request. Our one-use offer does not limit statutory IDR
-                    rights: the HOA cannot charge a member to participate in
-                    IDR.
-                  </p>
-                  <p className={styles.stepsSources}>
-                    California Civil Code:{" "}
-                    <a
-                      href="https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&amp;division=4.&amp;title=&amp;part=5.&amp;chapter=10.&amp;article=2."
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      §§5900–5915
-                    </a>{" "}
-                    ·{" "}
-                    <a
-                      href="https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&amp;division=4.&amp;title=&amp;part=5.&amp;chapter=10.&amp;article=3."
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      §§5925–5950
-                    </a>{" "}
-                    ·{" "}
-                    <a
-                      href="https://dre.ca.gov/files/pdf/relaw/excerpts.pdf#page=294"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      State-published text
-                    </a>
-                    . General process summary, not legal advice.
-                  </p>
-                </div>
-              </details>
+              <div className={styles.servicePath}>
+                <a
+                  className={styles.serviceButton}
+                  href="mailto:contact@fretgone.com?subject=Free%20IDR%20inquiry"
+                >
+                  Start IDR <ArrowRight size={17} aria-hidden="true" />
+                </a>
+                <button
+                  className={styles.stepsTrigger}
+                  popoverTarget="idr-steps"
+                  type="button"
+                >
+                  IDR steps <StepsIcon size={13} aria-hidden="true" />
+                </button>
+              </div>
+              <div className={styles.servicePath}>
+                <a
+                  className={styles.serviceButton}
+                  href="mailto:contact@fretgone.com?subject=Free%20ADR%20inquiry"
+                >
+                  Start ADR <ArrowRight size={17} aria-hidden="true" />
+                </a>
+                <button
+                  className={styles.stepsTrigger}
+                  popoverTarget="adr-steps"
+                  type="button"
+                >
+                  ADR steps <StepsIcon size={13} aria-hidden="true" />
+                </button>
+              </div>
             </div>
             <p className={styles.freeUseNote}>* One free use per homeowner.</p>
           </div>
@@ -193,6 +135,174 @@ export default function Home() {
           </div>
         </section>
       </main>
+      <div
+        id="idr-steps"
+        popover="auto"
+        role="dialog"
+        aria-labelledby="idr-steps-title"
+        className={styles.stepsPopover}
+      >
+        <header className={styles.popoverHeader}>
+          <div>
+            <p>Internal dispute resolution</p>
+            <h2 id="idr-steps-title">IDR steps</h2>
+          </div>
+          <button
+            type="button"
+            popoverTarget="idr-steps"
+            popoverTargetAction="hide"
+            className={styles.closePopover}
+            aria-label="Close IDR steps"
+          >
+            <X size={21} aria-hidden="true" />
+          </button>
+        </header>
+        <div className={styles.popoverBody}>
+          <p className={styles.processContext}>
+            For HOA/member disputes. Follow your HOA’s compliant IDR policy;
+            otherwise, the default procedure in §5915 applies.
+          </p>
+          <ol className={styles.processList}>
+            <li>
+              <h3>Request IDR in writing</h3>
+              <p>
+                The HOA must participate when a member requests it. A member may
+                decline the HOA’s request.
+              </p>
+            </li>
+            <li>
+              <h3>Meet and discuss the issues</h3>
+              <p>
+                Under §5915, meet promptly with a board-designated director at a
+                mutually convenient time and place. Explain both positions and
+                confer in good faith.
+              </p>
+            </li>
+            <li>
+              <h3>Write down any agreement</h3>
+              <p>
+                Both parties sign. The agreement must comply with law and
+                governing documents, and fall within the director’s authority or
+                receive board ratification.
+              </p>
+            </li>
+          </ol>
+          <div className={styles.processNote}>
+            <strong>About the free service</strong>
+            <p>
+              Our one-use offer does not limit statutory IDR rights. The HOA
+              cannot charge a member to participate in IDR. Emailing WillingLink
+              alone does not deliver a request to the HOA.
+            </p>
+          </div>
+          <p className={styles.processSources}>
+            California Civil Code{" "}
+            <a
+              href="https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&amp;division=4.&amp;title=&amp;part=5.&amp;chapter=10.&amp;article=2."
+              target="_blank"
+              rel="noreferrer"
+            >
+              §§5900–5915
+            </a>{" "}
+            ·{" "}
+            <a
+              href="https://dre.ca.gov/files/pdf/relaw/excerpts.pdf#page=294"
+              target="_blank"
+              rel="noreferrer"
+            >
+              State-published text
+            </a>
+            . General process summary, not legal advice.
+          </p>
+        </div>
+      </div>
+      <div
+        id="adr-steps"
+        popover="auto"
+        role="dialog"
+        aria-labelledby="adr-steps-title"
+        className={styles.stepsPopover}
+      >
+        <header className={styles.popoverHeader}>
+          <div>
+            <p>Alternative dispute resolution</p>
+            <h2 id="adr-steps-title">ADR steps</h2>
+          </div>
+          <button
+            type="button"
+            popoverTarget="adr-steps"
+            popoverTargetAction="hide"
+            className={styles.closePopover}
+            aria-label="Close ADR steps"
+          >
+            <X size={21} aria-hidden="true" />
+          </button>
+        </header>
+        <div className={styles.popoverBody}>
+          <p className={styles.processContext}>
+            For pre-lawsuit disputes covered by §5930. IDR and ADR are separate
+            procedures; the applicable path depends on the dispute.
+          </p>
+          <ol className={styles.processList}>
+            <li>
+              <h3>Prepare a Request for Resolution</h3>
+              <p>
+                Describe the dispute, request ADR, and include the notice that a
+                response is due within 30 days or the request will be treated as
+                rejected. Include Article 3 when serving a member.
+              </p>
+            </li>
+            <li>
+              <h3>Serve every other party</h3>
+              <p>
+                Use personal delivery, first-class mail, or another method
+                reasonably calculated to give actual notice. Emailing
+                WillingLink alone does not serve this request.
+              </p>
+            </li>
+            <li>
+              <h3>Allow 30 days for a response</h3>
+              <p>
+                The recipient can accept or reject. Silence means rejection.
+              </p>
+            </li>
+            <li>
+              <h3>If accepted, complete ADR within 90 days</h3>
+              <p>
+                Agree on mediation. The 90 days start when the requester
+                receives acceptance; both parties may sign a written extension.
+                Settlement is voluntary.
+              </p>
+            </li>
+          </ol>
+          <div className={styles.processNote}>
+            <strong>Scope and court filing</strong>
+            <p>
+              Small-claims cases are excluded; assessment disputes are generally
+              excluded. A covered lawsuit requires the §5950 certificate.
+            </p>
+          </div>
+          <p className={styles.processSources}>
+            California Civil Code{" "}
+            <a
+              href="https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&amp;division=4.&amp;title=&amp;part=5.&amp;chapter=10.&amp;article=3."
+              target="_blank"
+              rel="noreferrer"
+            >
+              §§5925–5950
+            </a>{" "}
+            ·{" "}
+            <a
+              href="https://dre.ca.gov/files/pdf/relaw/excerpts.pdf#page=295"
+              target="_blank"
+              rel="noreferrer"
+            >
+              State-published text
+            </a>
+            . General process summary, not legal advice.
+          </p>
+        </div>
+      </div>
       <footer className={styles.footer}>
         <div>
           <a className={styles.brand} href="/">

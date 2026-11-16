@@ -827,89 +827,233 @@
 }
 
 .freeActions {
-  position: relative;
-  margin-top: 26px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  max-width: 380px;
+  margin-top: 27px;
 }
-.freeActions > .serviceButton {
-  position: absolute;
-  top: 0;
-  left: 0;
-  margin-top: 0;
-}
-.resolutionSteps {
-  display: block;
-}
-.resolutionSteps summary {
-  margin-left: 145px;
+.servicePath {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.servicePath + .servicePath {
+  border-left: 1px solid #ccd5c6;
+  padding-left: 24px;
+}
+.servicePath .serviceButton {
+  margin: 0;
+  padding: 13px 17px;
+  gap: 15px;
+  white-space: nowrap;
+}
+.stepsTrigger {
+  align-self: flex-start;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: fit-content;
-  min-height: 51px;
-  font-size: 13px;
-  font-weight: 500;
+  gap: 8px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
   cursor: pointer;
-  list-style: none;
 }
-.resolutionSteps summary::-webkit-details-marker {
-  display: none;
-}
-.resolutionSteps summary:focus-visible {
-  outline: 3px solid #6d8064;
-  outline-offset: 4px;
-}
-.resolutionSteps[open] summary svg {
-  transform: rotate(180deg);
-}
-.stepsContent {
-  overflow-wrap: anywhere;
-  margin-top: 20px;
-  padding-top: 20px;
-  border-top: 1px solid #c5cfbf;
-  font-size: 13px;
-  line-height: 1.75;
+.stepsTrigger:hover {
   color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 4px;
 }
-.stepsContent h3 {
-  font-size: 15px;
-  line-height: 1.4;
-  margin: 20px 0 9px;
+.site button:focus-visible {
+  outline: 3px solid #6d8064;
+  outline-offset: 5px;
+}
+.stepsPopover {
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - 36px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  margin: auto;
+  border: 1px solid #d1d9cb;
+  border-radius: 18px;
+  background: #fafbf8;
+  color: var(--ink);
+  box-shadow: 0 25px 90px #1b342e30;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.stepsPopover::backdrop {
+  background: #243d344a;
+  backdrop-filter: blur(4px);
+}
+.stepsPopover:popover-open {
+  animation: showSteps 0.18s ease-out;
+}
+.popoverHeader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  padding: 25px 32px 23px;
+  border-bottom: 1px solid #e0e5db;
+  background: #fafbf8f5;
+  backdrop-filter: blur(12px);
+}
+.popoverHeader > div > p {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+.popoverHeader h2 {
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -0.8px;
+  font-weight: 500;
+}
+.closePopover {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid #d8dfd1;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.closePopover:hover {
+  background: #e8ede6;
+}
+.popoverBody {
+  padding: 25px 32px 30px;
+}
+.processContext {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--muted);
+  margin-bottom: 28px !important;
+}
+.processList {
+  counter-reset: steps;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.processList > li {
+  position: relative;
+  padding: 0 0 26px 50px;
+  counter-increment: steps;
+}
+.processList > li::before {
+  content: counter(steps, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cdd9c6;
+  border-radius: 50%;
+  background: #edf2e9;
+  color: #455f52;
+  font-size: 12px;
   font-weight: 600;
 }
-.stepsContent ol {
-  margin: 10px 0 18px;
-  padding-left: 21px;
+.processList h3 {
+  font-size: 17px;
+  line-height: 1.5;
+  font-weight: 600;
+  margin-bottom: 7px;
 }
-.stepsContent li {
-  padding: 0 0 10px 4px;
-}
-.stepsIntro {
+.processList p {
+  font-size: 15px;
+  line-height: 1.8;
   color: var(--muted);
 }
-.stepsScope {
-  margin-top: 13px !important;
-  font-size: 12px;
+.processNote {
+  border-top: 1px solid #dce3d5;
+  padding-top: 22px;
+  margin-top: 1px;
 }
-.stepsSources {
-  margin-top: 18px !important;
+.processNote strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.processNote p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+.processSources {
+  margin-top: 22px !important;
+  color: var(--muted);
   font-size: 11px;
-  color: var(--muted);
+  line-height: 1.8;
 }
-.stepsSources a {
+.processSources a {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-@media (max-width: 380px) {
+@keyframes showSteps {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (max-width: 760px) {
   .freeActions {
-    column-gap: 14px;
+    gap: 14px;
   }
-  .freeActions > .serviceButton {
-    padding-inline: 15px;
-    gap: 15px;
+  .servicePath + .servicePath {
+    padding-left: 14px;
   }
-  .resolutionSteps summary {
-    margin-left: 112px;
-    font-size: 12px;
-    gap: 6px;
+  .servicePath .serviceButton {
+    padding: 12px 13px;
+    font-size: 13px;
+    gap: 10px;
+  }
+  .stepsPopover {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+    border-radius: 14px;
+  }
+  .popoverHeader {
+    padding: 21px 22px;
+  }
+  .popoverHeader h2 {
+    font-size: 27px;
+  }
+  .popoverBody {
+    padding: 22px;
+  }
+  .processList > li {
+    padding-left: 43px;
+  }
+  .processList h3 {
+    font-size: 16px;
+  }
+  .processList p {
+    font-size: 14px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stepsPopover:popover-open {
+    animation: none;
   }
 }
