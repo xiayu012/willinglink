@@ -83,7 +83,8 @@ export default function Home() {
             <h2 id="ongoing-title">Ongoing HOA mediation.</h2>
             <p>
               We collect homeowner feedback, mediate ongoing disagreements, and
-              help the community make decisions together.
+              help the community make decisions together. We then send the board
+              a consolidated summary.
             </p>
           </div>
           <div className={styles.ongoingPrice}>
