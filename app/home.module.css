@@ -818,3 +818,10 @@
     padding-top: 24px;
   }
 }
+
+.freeUseNote {
+  margin-top: 10px !important;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+}

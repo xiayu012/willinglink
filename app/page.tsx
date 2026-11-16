@@ -60,6 +60,7 @@ export default function Home() {
             <a className={styles.serviceButton} href={email}>
               Contact us <ArrowRight size={18} aria-hidden="true" />
             </a>
+            <p className={styles.freeUseNote}>* One free use per homeowner.</p>
           </div>
           <div className={styles.servicePhoto}>
             <Image

@@ -216,3 +216,8 @@ Owner clarified the layout must make exactly two offers unmistakable, with free 
 ## Softer, unified page palette — 2026-11-15
 
 Owner found the colors abrupt and unattractive. Replace the large dark green/gold free panel with light sage, a warm neutral page, off-white paid panel, muted forest text/buttons, and quiet borders. Both independent service panels retain their relative size and structure. Align shared navigation and careers accents with the same palette. Reduce saturation/contrast of the existing photo through display styling. Copy and service scope unchanged.
+
+
+## Free-use limit — 2026-11-15
+
+Owner specified one free use per homeowner, shown as discreet footnote-sized text on the free service only. Add “* One free use per homeowner.” below its contact button at 10px with readable contrast. No time-based reset or separate allowance per IDR/ADR is implied; no reason was provided. Static disclosure only; no eligibility enforcement added.
