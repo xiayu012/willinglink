@@ -1,5 +1,7 @@
 # HOA service homepage
 
+> Current offer (2026-11-15): free IDR/ADR; separately, ongoing HOA coordination at $1/unit/month. /careers lists rolling worldwide remote roles. Earlier pricing and setup descriptions below are historical; see the final service-pivot entry.
+
 Owner-approved offering and page scope, 2026-11-04; account-authorization model updated 2026-11-07.
 
 WillingLink is FretGone’s service for making owner-run, self-managed HOAs easier to operate. The owner’s stated direction is to help communities move beyond high management fees and make self-management easier. The offer is performed back-office work rather than a new software account. Owners keep using SMS/email. The board grants account authorization to ChatGPT, not FretGone. FretGone helps the board get the workflow set up, then keeps the day-to-day work running; the AI agent works through the accounts the board authorizes. The service collects owner views, seeks mutually acceptable proposals, documents disagreement, and follows through within granted authority. The owner’s reason is to support direct owner participation while relieving board members of routine work and pressure. The board retains oversight and responsibility.
@@ -192,3 +194,10 @@ Owner rejected the visual pricing examples and requested reverting. Restore the 
 ## US HOA wording pass — 2026-11-11
 
 Owner authorized the whole-page wording revision following the terminology review. Use homeowners for people and homes for community size and the displayed pricing basis: $20/month per HOA for up to 20 homes, plus $1/month per additional home. This supersedes owner-person-count language in prior entries. Preserve the approved headline, shared-plan heading, record promise, layout, first month free, and fewer-than-1,000-home capacity. Use management company, payments/purchases, and approve/decline. Explain access and archival review in plain language and name ChatGPT directly. Setup remains assistance, authorization goes to ChatGPT, and privacy/archival limitations remain explicit. Static offer/copy change only; no billing or account-access implementation.
+
+
+## Service pivot: free IDR/ADR and ongoing HOA coordination — 2026-11-15
+
+Owner explicitly replaced nearly all homepage positioning with two offers: prominent free IDR/ADR, and visually smaller ongoing HOA mediation, collective decision support, and opinion collection at USD 1 per unit. Monthly cadence continues the existing recurring offer. Old $20 minimum, trial-month, browser execution/setup, ChatGPT, and Notion/AWS homepage explanations are removed from this presentation; the new offer supersedes historical entries, without changing repository runtime. Free support is distinct from the ongoing paid service. Define IDR as internal dispute resolution and ADR as alternative dispute resolution with mediation as the described service; do not promise legal compliance, arbitration, guaranteed agreement, or litigation outcomes.
+
+Add a text-only /careers page, linked from the homepage: Community Dialogue Volunteer (unpaid), and Mediator & Community Coordinator (USD 20/hour), both remote/worldwide. Applications are rolling, reviewed against suitable opportunities and project needs, with no deadline or promise of an immediate assignment; do not invent a full roster, scarcity, or urgent vacancies. All inquiries and applications are mailto links to contact@fretgone.com with descriptive subjects. Public access adds only the exact /careers path. Original /legacy-home remains intact. No forms, application storage, subscriptions, messages, or backend behavior added.

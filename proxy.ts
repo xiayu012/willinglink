@@ -59,7 +59,7 @@ export async function proxy(request: NextRequest) {
   }
 
   // 静态服务首页与现有公开介绍/法律页无需建立访客账号。
-  if (["/", "/about", "/privacy", "/terms"].includes(pathname)) {
+  if (["/", "/about", "/privacy", "/terms", "/careers"].includes(pathname)) {
     return NextResponse.next();
   }
 

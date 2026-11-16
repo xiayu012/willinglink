@@ -1,16 +1,16 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { ArrowRight, ChevronDown, Leaf } from "lucide-react";
+import { ArrowRight, ArrowUpRight } from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
-  title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
+  title: "WillingLink — Free HOA IDR & ADR",
   description:
-    "Run your HOA without a management company. WillingLink makes self-management easier. One monthly HOA payment: $20 for up to 20 homes, plus $1 for each additional home. First month free.",
+    "Free IDR and ADR support for homeowners and HOA boards. Ongoing HOA mediation, homeowner feedback, and shared decision-making for $1 per unit per month.",
   openGraph: {
-    title: "WillingLink — Self-managed HOAs, without the self-sacrifice.",
+    title: "WillingLink — Free HOA IDR & ADR",
     description:
-      "WillingLink makes it easier to run your HOA without a management company. One monthly HOA payment: $20 for up to 20 homes, plus $1 for each additional home. First month free.",
+      "A dispute doesn’t have to define your community. Start with free IDR and ADR support. Ongoing HOA coordination is available separately for $1 per unit per month.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -21,7 +21,8 @@ export const metadata: Metadata = {
     ],
   },
 };
-const email = "mailto:contact@fretgone.com";
+const email =
+  "mailto:contact@fretgone.com?subject=Free%20IDR%20%2F%20ADR%20inquiry";
 
 export default function Home() {
   return (
@@ -31,242 +32,157 @@ export default function Home() {
       </a>
       <header className={styles.header}>
         <a className={styles.brand} href="/" aria-label="WillingLink home">
-          WillingLink
+          WillingLink<span>.</span>
         </a>
         <nav aria-label="Main navigation">
-          <a href="#service">How it works</a>
-          <a href="#pricing">Pricing</a>
-          <a href={email}>Contact</a>
+          <a href="#resolution">Free IDR &amp; ADR</a>
+          <a href="#ongoing">For HOAs</a>
+          <a href="/careers">Work with us</a>
         </nav>
         <a className={styles.headerCta} href={email}>
-          First month free <ArrowRight size={15} />
+          Get in touch <ArrowUpRight size={16} aria-hidden="true" />
         </a>
       </header>
       <main id="main">
         <section className={styles.hero} aria-labelledby="hero-title">
+          <div className={styles.heroContent}>
+            <span className={styles.freeTag}>
+              <span aria-hidden="true" />
+              Free. No subscription required.
+            </span>
+            <h1 id="hero-title">
+              Free IDR <span>&amp; ADR.</span>
+            </h1>
+            <p className={styles.heroLead}>You still have to be neighbors.</p>
+            <p className={styles.heroDescription}>
+              When homeowners and the board disagree, there should be a place to
+              start. We help people explain their concerns, explore options, and
+              work toward a resolution.
+            </p>
+            <a className={styles.button} href={email}>
+              Let’s talk it through <ArrowRight size={18} aria-hidden="true" />
+            </a>
+            <p className={styles.heroNote}>For homeowners and HOA boards.</p>
+          </div>
           <div className={styles.heroArt}>
             <Image
               className={styles.heroImage}
               src="/images/community-open-gate.webp"
-              alt="A homeowner opens her garden gate toward a sunlit neighborhood where people are enjoying their own daily lives."
+              alt="A homeowner opens her garden gate onto a sunlit neighborhood."
               fill
               priority
-              sizes="(max-width: 760px) 100vw, 76vw"
+              sizes="(max-width: 760px) 100vw, 48vw"
             />
-          </div>
-          <div className={styles.heroVeil} />
-          <div className={styles.heroContent}>
-            <h1 id="hero-title">
-              <span className={styles.headlineLead}>Self-management.</span>
-              <span>
-                Without the <br />
-                <span className={styles.noWrap}>self-sacrifice.</span>
-              </span>
-            </h1>
-            <p className={styles.heroDescription}>
-              WillingLink makes it easier to run your HOA without a management
-              company.
-            </p>
-            <a className={styles.button} href={email}>
-              Email us to get started <ArrowRight size={18} />
-            </a>
-          </div>
-          <section
-            id="pricing"
-            className={styles.pricingBand}
-            aria-label="HOA pricing"
-          >
-            <div className={styles.pricingInner}>
-              <div className={styles.pricingBase}>
-                <p className={styles.pricingAmount}>
-                  <span className={styles.pricingNumber}>
-                    $20
-                    <svg
-                      className={styles.pricingStroke}
-                      viewBox="0 0 160 16"
-                      preserveAspectRatio="none"
-                      aria-hidden="true"
-                      focusable="false"
-                    >
-                      <path d="M4 10C48 0 108 0 157 8C111 4 56 6 6 15C2 16 0 12 4 10Z" />
-                    </svg>
-                  </span>
-                  <span>/month per HOA</span>
-                </p>
-                <span className={styles.pricingCaption}>Up to 20 homes</span>
-              </div>
-              <div className={styles.pricingDetails}>
-                <p className={styles.pricingExtra}>
-                  +$1/month for each additional home
-                </p>
-                <p className={styles.pricingFootnote}>First month free.</p>
-              </div>
+            <div className={styles.imageCaption}>
+              A disagreement is part of the story.
+              <br />
+              It doesn’t have to be the whole story.
             </div>
-          </section>
-        </section>
-
-        <section id="service" className={styles.section}>
-          <div className={styles.sectionHeading}>
-            <h2>How we make self-management easier.</h2>
-          </div>
-          <div className={styles.steps}>
-            <article>
-              <span>01 / ASK</span>
-              <h3>Homeowners have their say.</h3>
-              <p>
-                Homeowners keep texting and emailing the board as usual. Through
-                the accounts your board gives it access to, ChatGPT asks what
-                they think and follows up to understand their concerns.
-              </p>
-            </article>
-            <article>
-              <span>02 / DISCUSS</span>
-              <h3>A plan everyone can live with.</h3>
-              <p>
-                The AI discusses ideas with homeowners and revises the plan
-                until everyone can accept it—or records where and why people
-                still disagree.
-              </p>
-            </article>
-            <article>
-              <span>03 / ACT</span>
-              <h3>Approved work gets done.</h3>
-              <p>
-                The AI handles routine tasks within the limits your board sets.
-                Payments, purchases, and other sensitive actions go to a board
-                member’s phone to approve or decline.
-              </p>
-            </article>
           </div>
         </section>
 
-        <section className={styles.setup}>
-          <div className={styles.setupInner}>
-            <span className={styles.setupMark}>
-              <Leaf size={33} strokeWidth={1.1} />
-            </span>
-            <div>
-              <p>
-                Your existing tools stay as they are. We help your board add a
-                ChatGPT browser extension and WillingLink to handle homeowners’
-                texts and emails. Your board gives ChatGPT access to its
-                accounts.
-              </p>
-            </div>
-            <a href={email} className={styles.textLink}>
-              Talk with us <ArrowRight size={17} />
-            </a>
-          </div>
-        </section>
-
-        <section className={`${styles.section} ${styles.faq}`}>
-          <div>
-            <h2>
-              Every step. <br />
-              Kept on record.
+        <section
+          id="resolution"
+          className={styles.resolution}
+          aria-labelledby="resolution-title"
+        >
+          <div className={styles.sectionIntro}>
+            <p className={styles.eyebrow}>A WAY TO BEGIN</p>
+            <h2 id="resolution-title">
+              Less talking past each other.
+              <br />
+              More working through it.
             </h2>
-            <p className={styles.faqIntro}>
-              Your board can read the whole history: what people said, what was
-              decided, what the AI did in your browser, and what happened next.
-              Nothing is deleted.
-            </p>
+          </div>
+          <div className={styles.resolutionGrid}>
+            <article>
+              <div className={styles.serviceLabel}>
+                <span>IDR</span>
+                <span className={styles.freeLabel}>Free</span>
+              </div>
+              <h3>Start within your community.</h3>
+              <p>
+                Internal dispute resolution helps homeowners and their HOA
+                discuss a disagreement directly. We help clarify the issues and
+                keep the conversation moving.
+              </p>
+            </article>
+            <article>
+              <div className={styles.serviceLabel}>
+                <span>ADR</span>
+                <span className={styles.freeLabel}>Free</span>
+              </div>
+              <h3>Bring in another perspective.</h3>
+              <p>
+                Alternative dispute resolution offers a way to work through a
+                dispute with neutral help. Our focus is mediation: hearing each
+                side and exploring a resolution together.
+              </p>
+            </article>
+          </div>
+          <div className={styles.startLine}>
+            <span>
+              Start with an email. Tell us what happened and what you’d like to
+              resolve.
+            </span>
             <a className={styles.textLink} href={email}>
-              Ask us anything <ArrowRight size={17} />
+              contact@fretgone.com <ArrowUpRight size={16} aria-hidden="true" />
             </a>
           </div>
-          <div className={styles.questions}>
-            <details>
-              <summary>
-                Who gets access to our texts and emails?
-                <ChevronDown size={17} />
-              </summary>
-              <p>
-                Your board gives ChatGPT access to its text and email accounts,
-                not WillingLink or FretGone. We help your board get set up and
-                review what ChatGPT can access and how that information is
-                handled.
-              </p>
-            </details>
-            <details>
-              <summary>
-                What does WillingLink do for a self-managed HOA?
-                <ChevronDown size={17} />
-              </summary>
-              <p>
-                WillingLink helps your board run a self-managed HOA. It handles
-                homeowners’ texts and emails, keeps discussions moving, follows
-                up, and records the work. The browser extension carries out
-                authorized tasks in your existing tools. Your board sets the
-                limits and approves sensitive actions. We currently serve HOAs
-                with fewer than 1,000 homes.
-              </p>
-            </details>
-            <details>
-              <summary>
-                Who can see the work log?
-                <ChevronDown size={17} />
-              </summary>
-              <p>
-                Board members can read the service’s work log on a Notion page
-                without creating a Notion account. It includes conversations
-                with homeowners, decisions, the AI’s actions in your browser,
-                and what happened next. Homeowners’ private messages are not
-                shared with other homeowners.
-              </p>
-            </details>
-            <details>
-              <summary>
-                What needs our approval?
-                <ChevronDown size={17} />
-              </summary>
-              <p>
-                Payments, purchases, and other sensitive actions. A board member
-                reads the proposed action on their phone and approves or
-                declines it. We walk your board through the approval process
-                before getting started. Your HOA’s voting rules and board
-                responsibilities still apply.
-              </p>
-            </details>
-            <details>
-              <summary>
-                Can we keep the tools we already use?
-                <ChevronDown size={17} />
-              </summary>
-              <p>
-                Yes. Your email, HOA software, accounting tools, and everything
-                else stay as they are. We add only a ChatGPT browser extension
-                and WillingLink to handle incoming texts and emails from
-                homeowners.
-              </p>
-            </details>
-            <details>
-              <summary>
-                How do you protect the work log?
-                <ChevronDown size={17} />
-              </summary>
-              <p>
-                The Notion page can be edited. A separate archive on AWS can
-                help reveal later changes to the record. Before getting started,
-                we review what the archive keeps, how long it keeps it, and who
-                can access it. We also review what ChatGPT can access and how it
-                handles and stores your information.
-              </p>
-            </details>
+        </section>
+
+        <section
+          id="ongoing"
+          className={styles.ongoing}
+          aria-labelledby="ongoing-title"
+        >
+          <div className={styles.ongoingIntro}>
+            <p className={styles.eyebrow}>ONGOING HOA COORDINATION</p>
+            <h2 id="ongoing-title">Keep the conversation going.</h2>
+            <p>
+              For the everyday issues that need more than a one-time
+              conversation.
+            </p>
+            <ul>
+              <li>Collect homeowner feedback</li>
+              <li>Work through disagreements as they arise</li>
+              <li>Help the community make decisions together</li>
+            </ul>
+          </div>
+          <div className={styles.ongoingPrice}>
+            <p>
+              <strong>$1</strong>
+              <span> / unit / month</span>
+            </p>
+            <span>Billed to your HOA based on its total unit count.</span>
+            <a
+              className={styles.textLink}
+              href="mailto:contact@fretgone.com?subject=Ongoing%20HOA%20coordination"
+            >
+              Talk about your HOA <ArrowUpRight size={16} aria-hidden="true" />
+            </a>
           </div>
         </section>
+        <aside className={styles.joinLine}>
+          <p>Good at helping people hear each other?</p>
+          <a className={styles.textLink} href="/careers">
+            Explore ongoing opportunities{" "}
+            <ArrowUpRight size={17} aria-hidden="true" />
+          </a>
+        </aside>
       </main>
       <footer className={styles.footer}>
         <div>
           <a className={styles.brand} href="/">
-            WillingLink
+            WillingLink<span>.</span>
           </a>
           <span>© {new Date().getFullYear()} FretGone LLC</span>
         </div>
-        <nav aria-label="Legal">
-          <a href="/about">About</a>
+        <nav aria-label="Footer navigation">
+          <a href="/careers">Work with us</a>
+          <a href="mailto:contact@fretgone.com">Contact</a>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>
-          <a href={email}>Contact</a>
         </nav>
       </footer>
     </div>
