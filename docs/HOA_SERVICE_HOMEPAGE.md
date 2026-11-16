@@ -231,3 +231,8 @@ Owner requested Start on the free contact button, with Detailed steps beside it,
 ## Separate floating IDR and ADR guides — 2026-11-15
 
 Owner requested two start buttons and two readable floating guides that do not move the page. Split the free service actions into Start IDR and Start ADR, with provider-specific mailto subjects and separate IDR steps / ADR steps controls. Use native HTML auto popovers in the browser top layer: Escape/outside dismissal, explicit close controls, independently scrollable panels, sticky heading, numbered steps with short titles, generous spacing, and responsive size. Preserve existing researched legal scope and source links; separate ADR request preparation from service for readability. No JavaScript case handling, backend, legal process automation, or new dependencies.
+
+
+## Anchored dropdowns with colored-dot steps — 2026-11-15
+
+Owner rejected the centered overlay and requested small dropdown-like panels, with one vertically aligned colored dot per step and shorter wording. Keep the two Start actions and independent native popovers, but anchor each panel below its own steps control using CSS anchor positioning. Remove page dimming/blur. Use a compact 380px panel, viewport-limited height, internal scrolling, short step titles and distinct colored dots on a vertical line. Condense existing procedural copy without dropping applicability, service, deadlines, board-authority, or free-IDR boundaries. No new legal interpretation or backend behavior.
