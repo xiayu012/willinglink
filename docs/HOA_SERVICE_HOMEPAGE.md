@@ -206,3 +206,8 @@ Add a text-only /careers page, linked from the homepage: Community Dialogue Volu
 ## Direct service description, without promotional filler — 2026-11-15
 
 Owner rejected small-print persuasion and educational marketing: the page should state what the service is. Remove the neighbor slogan, photo caption, separate IDR/ADR explanation cards, promotional section headings, repeated process/contact text, and recruiting teaser. Keep a prominent free IDR/ADR heading, one direct description expanding the acronyms, contact action, and a smaller ongoing HOA mediation section describing feedback collection, continuing mediation, shared decisions, and $1/unit/month paid by the HOA. Careers stays linked in navigation/footer; shorten its introduction to role information and rolling applications. No service scope or runtime changes.
+
+
+## Two distinct services in one visible frame — 2026-11-15
+
+Owner clarified the layout must make exactly two offers unmistakable, with free IDR/ADR prominent and the paid ongoing service smaller. Replace the image-led hero plus lower supplemental strip with two independently bounded service panels side by side: larger dark free panel with the existing photo inside it; smaller pale paid panel. Both follow price, service name, description, and contact action. Mobile stacks the two bounded panels. Keep approved descriptions, consolidated board summary, $1/unit/month HOA billing, and careers links. No new promotional copy or runtime behavior.

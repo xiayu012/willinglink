@@ -627,3 +627,192 @@
     margin-bottom: 40px;
   }
 }
+
+/* Two independent services share one frame and the same information order. */
+.services {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 22px 56px 50px;
+  display: grid;
+  grid-template-columns: 1.45fr 1fr;
+  gap: 24px;
+  align-items: stretch;
+}
+.freeService,
+.paidService {
+  border-radius: 12px;
+  overflow: hidden;
+  min-width: 0;
+}
+.freeService {
+  background: var(--teal);
+  color: var(--cream);
+  display: flex;
+  flex-direction: column;
+}
+.freeServiceContent {
+  padding: 32px 36px 34px;
+}
+.servicePrice {
+  font-size: 36px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -1.2px;
+}
+.freeService .servicePrice {
+  color: #e4bb7c;
+}
+.freeService h1 {
+  font-size: clamp(52px, 5.1vw, 76px);
+  letter-spacing: -2.8px;
+  margin: 14px 0 20px;
+  line-height: 1.05;
+}
+.serviceDescription {
+  font-size: 16px;
+  line-height: 1.8;
+}
+.freeService .serviceDescription {
+  max-width: 510px;
+  color: #e4eadd;
+}
+.serviceButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 30px;
+  padding: 13px 20px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 26px;
+}
+.freeService .serviceButton {
+  color: var(--teal);
+  background: var(--cream);
+  border-color: var(--cream);
+}
+.serviceButton:hover {
+  opacity: 0.85;
+}
+.servicePhoto {
+  height: 185px;
+  position: relative;
+  margin-top: auto;
+}
+.servicePhotoImage {
+  object-fit: cover;
+  object-position: 70% 20%;
+}
+.paidService {
+  background: #edf0e6;
+  border: 1px solid #c9d2c1;
+  padding: 32px 32px 34px;
+  display: flex;
+  flex-direction: column;
+}
+.paidService .servicePrice {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.paidService .servicePrice strong {
+  font-size: 36px;
+  font-weight: 600;
+}
+.paidService .servicePrice > span {
+  font-size: 14px;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.paidService h2 {
+  font-size: 35px;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -1px;
+  margin: 22px 0;
+}
+.paidService .serviceDescription {
+  font-size: 15px;
+  color: var(--muted);
+}
+.paidServiceAction {
+  margin-top: auto;
+  padding-top: 30px;
+}
+.paidServiceAction > p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.paidService .serviceButton {
+  margin-top: 18px;
+  color: var(--cream);
+  border-color: var(--teal);
+  background: var(--teal);
+}
+@media (max-width: 1050px) and (min-width: 761px) {
+  .services {
+    padding-inline: 32px;
+    gap: 20px;
+    grid-template-columns: 1.3fr 1fr;
+  }
+  .freeServiceContent,
+  .paidService {
+    padding: 28px;
+  }
+  .freeService h1 {
+    font-size: 54px;
+  }
+  .paidService h2 {
+    font-size: 30px;
+  }
+  .serviceDescription {
+    font-size: 15px;
+  }
+}
+@media (max-width: 760px) {
+  .services {
+    padding: 14px 24px 32px;
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .freeServiceContent {
+    padding: 27px 25px 29px;
+  }
+  .freeService .servicePrice {
+    font-size: 29px;
+  }
+  .freeService h1 {
+    font-size: clamp(42px, 10.8vw, 64px);
+    letter-spacing: -2px;
+    margin: 12px 0 18px;
+  }
+  .serviceDescription {
+    font-size: 14px;
+  }
+  .servicePhoto {
+    height: 145px;
+  }
+  .paidService {
+    padding: 27px 25px 29px;
+  }
+  .paidService .servicePrice strong {
+    font-size: 29px;
+  }
+  .paidService .servicePrice > span {
+    font-size: 13px;
+  }
+  .paidService h2 {
+    font-size: 29px;
+    margin: 18px 0;
+  }
+  .paidService .serviceDescription {
+    font-size: 14px;
+  }
+  .paidServiceAction {
+    padding-top: 24px;
+  }
+}

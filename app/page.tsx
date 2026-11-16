@@ -43,61 +43,61 @@ export default function Home() {
           Get in touch <ArrowUpRight size={16} aria-hidden="true" />
         </a>
       </header>
-      <main id="main">
+      <main id="main" className={styles.services} aria-label="Our two services">
         <section
           id="resolution"
-          className={styles.hero}
+          className={styles.freeService}
           aria-labelledby="hero-title"
         >
-          <div className={styles.heroContent}>
-            <h1 id="hero-title">
-              Free IDR <span>&amp; ADR.</span>
-            </h1>
-            <p className={styles.heroDescription}>
+          <div className={styles.freeServiceContent}>
+            <p className={styles.servicePrice}>Free</p>
+            <h1 id="hero-title">IDR &amp; ADR.</h1>
+            <p className={styles.serviceDescription}>
               We provide free internal dispute resolution (IDR) and
               mediation-based alternative dispute resolution (ADR) for
               homeowners and HOA boards.
             </p>
-            <a className={styles.button} href={email}>
+            <a className={styles.serviceButton} href={email}>
               Contact us <ArrowRight size={18} aria-hidden="true" />
             </a>
           </div>
-          <div className={styles.heroArt}>
+          <div className={styles.servicePhoto}>
             <Image
-              className={styles.heroImage}
+              className={styles.servicePhotoImage}
               src="/images/community-open-gate.webp"
               alt="A homeowner opens her garden gate onto a sunlit neighborhood."
               fill
               priority
-              sizes="(max-width: 760px) 100vw, 48vw"
+              sizes="(max-width: 760px) 100vw, 57vw"
             />
           </div>
         </section>
-
         <section
           id="ongoing"
-          className={styles.ongoing}
+          className={styles.paidService}
           aria-labelledby="ongoing-title"
         >
-          <div className={styles.ongoingIntro}>
-            <h2 id="ongoing-title">Ongoing HOA mediation.</h2>
-            <p>
-              We collect homeowner feedback, mediate ongoing disagreements, and
-              help the community make decisions together. We then send the board
-              a consolidated summary.
-            </p>
-          </div>
-          <div className={styles.ongoingPrice}>
-            <p>
-              <strong>$1</strong>
-              <span> / unit / month</span>
-            </p>
-            <span>Billed to your HOA based on its total unit count.</span>
+          <p className={styles.servicePrice}>
+            <strong>$1</strong>
+            <span> / unit / month</span>
+          </p>
+          <h2 id="ongoing-title">
+            Ongoing HOA
+            <br />
+            mediation.
+          </h2>
+          <p className={styles.serviceDescription}>
+            We collect homeowner feedback, mediate ongoing disagreements, and
+            help the community make decisions together. We then send the board a
+            consolidated summary.
+          </p>
+          <div className={styles.paidServiceAction}>
+            <p>Billed to your HOA based on its total unit count.</p>
             <a
-              className={styles.textLink}
+              className={styles.serviceButton}
               href="mailto:contact@fretgone.com?subject=Ongoing%20HOA%20coordination"
             >
-              Contact us <ArrowUpRight size={16} aria-hidden="true" />
+              Contact us <ArrowRight size={18} aria-hidden="true" />
             </a>
           </div>
         </section>
