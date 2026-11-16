@@ -35,9 +35,8 @@ export default function Home() {
           WillingLink<span>.</span>
         </a>
         <nav aria-label="Main navigation">
-          <a href="#resolution">Free IDR &amp; ADR</a>
           <a href="#ongoing">For HOAs</a>
-          <a href="/careers">Work with us</a>
+          <a href="/careers">Careers</a>
         </nav>
         <a className={styles.headerCta} href={email}>
           Get in touch <ArrowUpRight size={16} aria-hidden="true" />
@@ -111,7 +110,7 @@ export default function Home() {
           <span>© {new Date().getFullYear()} FretGone LLC</span>
         </div>
         <nav aria-label="Footer navigation">
-          <a href="/careers">Work with us</a>
+          <a href="/careers">Careers</a>
           <a href="mailto:contact@fretgone.com">Contact</a>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>
