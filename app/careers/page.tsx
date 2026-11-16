@@ -27,20 +27,13 @@ export default function Careers() {
         <a className={styles.backLink} href="/">
           ← Back to WillingLink
         </a>
-        <h1>
-          Help people find
-          <br />a way forward.
-        </h1>
+        <h1>Work with WillingLink.</h1>
         <p className={styles.careersLead}>
-          We’re building a worldwide network of people who can listen carefully,
-          work through disagreement, and help communities make decisions
-          together.
+          Remote opportunities in community mediation and coordination.
         </p>
         <p className={styles.rosterNote}>
-          Applications are open year-round. We build our network over time and
-          contact applicants as suitable opportunities arise. There is no
-          application deadline; submitting an application does not guarantee an
-          immediate assignment.
+          Applications are open year-round. We contact applicants as suitable
+          projects arise.
         </p>
         <section className={styles.role} aria-labelledby="volunteer-role">
           <span className={styles.roleMeta}>
@@ -48,9 +41,8 @@ export default function Careers() {
           </span>
           <h2 id="volunteer-role">Community Dialogue Volunteer</h2>
           <p>
-            Help make it easier for people to be heard. Support community
-            conversations by gathering concerns, organizing feedback, and
-            keeping clear notes and follow-ups.
+            Gather homeowner concerns, organize feedback, and keep clear notes
+            and follow-ups for community conversations.
           </p>
           <ul>
             <li>Listen without taking sides and communicate with care.</li>

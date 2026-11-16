@@ -148,7 +148,7 @@
 }
 .heroArt {
   position: relative;
-  min-height: 570px;
+  min-height: 460px;
   border-radius: 8px 80px 8px 8px;
   overflow: hidden;
   background: #d6dcc8;
@@ -156,22 +156,6 @@
 .heroImage {
   object-fit: cover;
   object-position: 70% center;
-}
-.heroArt::after {
-  content: "";
-  position: absolute;
-  inset: 50% 0 0;
-  background: linear-gradient(transparent, #103f39bd);
-}
-.imageCaption {
-  position: absolute;
-  bottom: 30px;
-  left: 30px;
-  right: 25px;
-  z-index: 1;
-  color: #fff8e9;
-  font-size: 16px;
-  line-height: 1.6;
 }
 .resolution {
   max-width: 1328px;
@@ -623,5 +607,23 @@
 @media (prefers-reduced-motion: reduce) {
   .site * {
     scroll-behavior: auto !important;
+  }
+}
+
+/* The page states the two services directly, without promotional sections. */
+.ongoing {
+  margin-bottom: 65px;
+}
+.ongoingIntro > p {
+  max-width: 620px;
+}
+@media (max-width: 1050px) and (min-width: 761px) {
+  .heroArt {
+    min-height: 460px;
+  }
+}
+@media (max-width: 760px) {
+  .ongoing {
+    margin-bottom: 40px;
   }
 }
