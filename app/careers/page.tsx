@@ -18,7 +18,6 @@ export default function Careers() {
           WillingLink<span>.</span>
         </a>
         <nav aria-label="Main navigation">
-          <a href="/#ongoing">For HOAs</a>
           <a href="mailto:contact@fretgone.com">Contact</a>
         </nav>
       </header>

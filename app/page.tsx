@@ -35,7 +35,6 @@ export default function Home() {
           WillingLink<span>.</span>
         </a>
         <nav aria-label="Main navigation">
-          <a href="#ongoing">For HOAs</a>
           <a href="/careers">Careers</a>
         </nav>
         <a className={styles.headerCta} href={email}>
