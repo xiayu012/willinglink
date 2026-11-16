@@ -221,3 +221,8 @@ Owner found the colors abrupt and unattractive. Replace the large dark green/gol
 ## Free-use limit — 2026-11-15
 
 Owner specified one free use per homeowner, shown as discreet footnote-sized text on the free service only. Add “* One free use per homeowner.” below its contact button at 10px with readable contrast. No time-based reset or separate allowance per IDR/ADR is implied; no reason was provided. Static disclosure only; no eligibility enforcement added.
+
+
+## Expandable California IDR/ADR process — 2026-11-15
+
+Owner requested Start on the free contact button, with Detailed steps beside it, and a minimal California-law-based procedure. Keep it collapsed by default with native details/summary. Separate HOA/member IDR (HOA compliant policy or statutory fallback) from ADR for covered pre-lawsuit disputes. The source is California DRE’s 2026 published Civil Code §§5900–5950 (excerpts.pdf, PDF pages 293–295); legislature site links are included for readers, but returned 403 during research. Do not claim emailing the service constitutes legal service, force IDR then ADR for every dispute, or substitute a third party for the board director in §5915. Explicitly preserve statutory IDR participation without member fees despite WillingLink’s one-free-use offer. Covered litigation certificate and scope exceptions are noted. Static informational copy only; no forms, notifications, case handling, deadline calculator, or automated eligibility/filing behavior implemented.
