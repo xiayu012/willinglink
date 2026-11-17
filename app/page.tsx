@@ -104,11 +104,12 @@ export default function Home() {
             <br />
             mediation.
           </h2>
-          <p className={styles.serviceDescription}>
-            We collect homeowner feedback, mediate ongoing disagreements, and
-            help the community make decisions together. We then send the board a
-            consolidated summary.
-          </p>
+          <ul className={styles.serviceFeatures}>
+            <li>Unlimited IDR &amp; ADR</li>
+            <li>Collect homeowner feedback</li>
+            <li>Help the community make decisions together</li>
+            <li>Send the board a consolidated summary</li>
+          </ul>
           <div className={styles.paidServiceAction}>
             <p>Billed to your HOA based on its total unit count.</p>
             <a

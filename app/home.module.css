@@ -742,6 +742,22 @@
   font-size: 15px;
   color: var(--muted);
 }
+.serviceFeatures {
+  margin: 0;
+  padding-left: 19px;
+  display: grid;
+  gap: 12px;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.serviceFeatures li::marker {
+  color: var(--teal);
+}
+.serviceFeatures li:first-child {
+  color: var(--teal);
+  font-weight: 600;
+}
 .paidServiceAction {
   margin-top: auto;
   padding-top: 30px;
