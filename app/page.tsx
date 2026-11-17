@@ -87,7 +87,7 @@ export default function Home() {
                 </button>
               </div>
             </div>
-            <p className={styles.freeUseNote}>* One free use per homeowner.</p>
+            <p className={styles.freeUseNote}>* One free case per homeowner.</p>
           </div>
         </section>
         <section
