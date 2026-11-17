@@ -19,15 +19,20 @@ export default function PrivacyPage() {
         information when you use the WillingLink website and related services.
       </p>
 
+      <p className="text-muted-foreground">Updated November 17, 2026</p>
+
       <h2 className="mt-4 font-semibold text-lg">1. Information We Collect</h2>
-      <p>We may collect the following information when you use our site:</p>
+      <p>
+        We may collect the following information when you visit, contact us, use
+        our services, or apply for a role:
+      </p>
       <ul className="list-disc space-y-1 pl-6">
         <li>First and last name</li>
         <li>Email address</li>
         <li>Phone number</li>
         <li>
-          Housing preferences or other details you voluntarily provide through
-          forms or messages
+          Your HOA or community, unit or property details, your role in the
+          dispute, and information or documents you choose to share
         </li>
         <li>
           Technical information such as IP address, browser type, and device
@@ -40,31 +45,35 @@ export default function PrivacyPage() {
       </h2>
       <p>We use the information we collect to:</p>
       <ul className="list-disc space-y-1 pl-6">
-        <li>Respond to your rental inquiries and housing requests</li>
         <li>
-          Coordinate viewings, share landlord contact details, and provide
-          customer support related to your search
+          Respond to questions about HOA dispute resolution and our services
+        </li>
+        <li>
+          Help prepare dispute-resolution requests, coordinate discussions,
+          collect homeowner feedback, and prepare summaries and agreed next
+          steps
         </li>
         <li>Send service-related updates you have requested or opted into</li>
-        <li>Improve our website, services, and user experience</li>
+        <li>Review applications for volunteer and paid roles</li>
+        <li>Maintain service records and operate and secure our website</li>
       </ul>
       <p>
         We do not use your information for unrelated promotional campaigns. Our
-        SMS program is limited to transactional and informational messages tied
-        to your housing inquiry.
+        SMS program is limited to transactional and informational messages
+        related to your inquiry or participation in our services.
       </p>
 
       <h2 className="mt-4 font-semibold text-lg">3. SMS Communication</h2>
       <p>
-        If you submit your phone number and opt in on our contact form, you
-        consent to receive{" "}
+        If you opt in to text messages from WillingLink, we may send{" "}
         <strong>transactional and informational text messages</strong> from
-        FretGone LLC (WillingLink) about your rental inquiry. These messages may
-        include viewing confirmations, landlord contact details, follow-up
-        questions about your housing needs, and related customer-care messages.
+        FretGone LLC (WillingLink) about your inquiry or service. These may
+        include follow-up questions, discussion arrangements, and service
+        updates. Contacting us by email does not by itself enroll you in text
+        messages.
       </p>
       <p>
-        Message frequency may vary depending on your inquiry and listing
+        Message frequency may vary depending on your inquiry and service
         activity. Message and data rates may apply according to your mobile
         carrier plan. You may opt out of SMS communication at any time by
         replying <strong>STOP</strong> to any message. For help, reply{" "}
@@ -96,9 +105,19 @@ export default function PrivacyPage() {
 
       <h2 className="mt-4 font-semibold text-lg">4. Information Sharing</h2>
       <p>
-        We do not sell your personal information. We may share information only
-        as needed to operate our services—for example, with SMS delivery
-        providers, hosting providers, or when required by law.
+        We do not sell your personal information. Providing dispute-resolution
+        support may involve sharing relevant information with the HOA, other
+        participants, or a mediator. Before a discussion begins, we clarify who
+        will receive information and how discussion records or summaries will be
+        shared. A private message to us should not be assumed to be legally
+        privileged or automatically confidential.
+      </p>
+
+      <p>
+        Service providers may process information to support email, messaging,
+        hosting, storage, and AI-assisted work. Information you authorize a
+        third-party tool to access is also subject to that provider’s privacy
+        terms. We may disclose information when required by law.
       </p>
 
       <h2 className="mt-4 font-semibold text-lg">

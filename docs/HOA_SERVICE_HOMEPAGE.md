@@ -251,3 +251,8 @@ Owner rejected legal-professional wording in the default steps and asked for a b
 ## Multi-state step synthesis — 2026-11-17
 
 Owner requested reviewing most states and synthesizing brief general steps rather than California-only instructions or a state-by-state explanation. Targeted official-source review covers 26 states; scope and sources are in `research/HOA_DISPUTE_PROCESS_MULTI_STATE_2026-11-17.md`. Replace the California legal detail panels with short optional process notes. Keep three colored-dot steps for each path, clarify HOA ownership of internal procedures and neutral mediation for ADR, request the community state at intake, and preserve settlement choice. No universal deadline, guaranteed compliance, compulsory settlement or automatic filing is claimed. Existing native popover behavior, pricing, imagery and unrelated content remain unchanged.
+
+
+## Privacy alignment and request wording — 2026-11-17
+
+Owner identified legacy rental-only privacy disclosures as a credibility problem and requested accurate HOA service copy. Update privacy categories and purposes for dispute intake, community coordination and recruitment; explain participant/mediator sharing and third-party processing without promising blanket mediation privilege. Preserve existing SMS opt-out mechanisms without changing runtime or enrollment. Clarify that IDR begins by checking the HOA procedure and uses an applicable legal fallback if no compliant procedure exists; do not impose a director meeting universally. ADR now says Send the formal request, with a short explanation of applicable delivery rules and the existing warning that email intake is not legal service. Static copy changes only.

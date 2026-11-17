@@ -162,8 +162,8 @@ export default function Home() {
             <li>
               <h3>Prepare the next step</h3>
               <p>
-                We review your HOA’s process and help prepare a request to the
-                board.
+                We check the applicable procedure, starting with your HOA’s own
+                process, and help prepare your request.
               </p>
             </li>
             <li>
@@ -179,7 +179,9 @@ export default function Home() {
             <p className={styles.processContext}>
               The process depends on your state and HOA’s rules. We help you
               understand the next steps; your HOA handles its internal process.
-              Emailing us does not itself submit a formal request to your HOA.
+              Where no compliant HOA procedure exists, the applicable legal
+              fallback governs. Emailing us does not itself submit a formal
+              request to your HOA.
             </p>
           </details>
         </div>
@@ -214,10 +216,10 @@ export default function Home() {
               </p>
             </li>
             <li>
-              <h3>Arrange the conversation</h3>
+              <h3>Send the formal request</h3>
               <p>
-                We help with the invitation and confirm the mediation
-                arrangements.
+                We help prepare the request and explain how to send it under the
+                applicable rules.
               </p>
             </li>
             <li>
