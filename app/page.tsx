@@ -61,7 +61,7 @@ export default function Home() {
                   className={styles.serviceButton}
                   href="mailto:contact@fretgone.com?subject=Free%20IDR%20inquiry"
                 >
-                  Start IDR <ArrowRight size={17} aria-hidden="true" />
+                  Start My IDR <ArrowRight size={17} aria-hidden="true" />
                 </a>
                 <button
                   className={styles.stepsTrigger}
@@ -76,7 +76,7 @@ export default function Home() {
                   className={styles.serviceButton}
                   href="mailto:contact@fretgone.com?subject=Free%20ADR%20inquiry"
                 >
-                  Start ADR <ArrowRight size={17} aria-hidden="true" />
+                  Start My ADR <ArrowRight size={17} aria-hidden="true" />
                 </a>
                 <button
                   className={styles.stepsTrigger}
