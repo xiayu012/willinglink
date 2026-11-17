@@ -152,37 +152,57 @@ export default function Home() {
           </button>
         </header>
         <div className={styles.popoverBody}>
-          <p className={styles.processContext}>
-            Follow your HOA’s IDR policy. If it has no compliant procedure,
-            §5915 applies.
-          </p>
           <ol className={styles.processList}>
             <li>
-              <h3>Request IDR in writing</h3>
+              <h3>Tell us what happened</h3>
+              <p>Email a short outline and what you’d like to resolve.</p>
+            </li>
+            <li>
+              <h3>Get ready for the conversation</h3>
               <p>
-                Send the HOA a written request. It must participate; a member
-                may decline an HOA-initiated request.
+                We help prepare the request and explain who needs to take part.
               </p>
             </li>
             <li>
-              <h3>Meet and discuss the issues</h3>
+              <h3>Talk through the options</h3>
               <p>
-                Under §5915, meet promptly with a board-designated director at a
-                mutually convenient time and place. Discuss both sides in good
-                faith.
-              </p>
-            </li>
-            <li>
-              <h3>Write down any agreement</h3>
-              <p>
-                Both parties sign. Terms must follow law and governing
-                documents, and be within the director’s authority or ratified by
-                the board.
+                We help both sides understand the issues and write down any
+                agreement.
               </p>
             </li>
           </ol>
           <details className={styles.processMore}>
-            <summary>Scope &amp; legal notes</summary>
+            <summary>California process details</summary>
+            <p className={styles.processContext}>
+              Follow your HOA’s IDR policy. If it has no compliant procedure,
+              §5915 applies.
+            </p>
+            <ol className={styles.legalProcedure}>
+              <li>
+                <h3>Request IDR in writing</h3>
+                <p>
+                  Send the HOA a written request. It must participate; a member
+                  may decline an HOA-initiated request.
+                </p>
+              </li>
+              <li>
+                <h3>Meet and discuss the issues</h3>
+                <p>
+                  Under §5915, meet promptly with a board-designated director at
+                  a mutually convenient time and place. Discuss both sides in
+                  good faith.
+                </p>
+              </li>
+              <li>
+                <h3>Write down any agreement</h3>
+                <p>
+                  Both parties sign. Terms must follow law and governing
+                  documents, and be within the director’s authority or ratified
+                  by the board.
+                </p>
+              </li>
+            </ol>
+
             <div className={styles.processNote}>
               <strong>About the free service</strong>
               <p>
@@ -235,44 +255,64 @@ export default function Home() {
           </button>
         </header>
         <div className={styles.popoverBody}>
-          <p className={styles.processContext}>
-            For pre-lawsuit disputes covered by §5930. This is separate from
-            IDR.
-          </p>
           <ol className={styles.processList}>
             <li>
-              <h3>Prepare a Request for Resolution</h3>
+              <h3>Tell us what happened</h3>
+              <p>Email a short outline and what you’d like to resolve.</p>
+            </li>
+            <li>
+              <h3>Invite the other side</h3>
               <p>
-                Describe the dispute, request ADR, and state that no response
-                within 30 days means rejection. Include Article 3 if serving a
-                member.
+                We help prepare the invitation and explain what happens next.
               </p>
             </li>
             <li>
-              <h3>Serve every other party</h3>
+              <h3>Explore a way forward</h3>
               <p>
-                Use personal delivery, first-class mail, or another method
-                reasonably calculated to give actual notice. Emailing us alone
-                is not service.
-              </p>
-            </li>
-            <li>
-              <h3>Allow 30 days for a response</h3>
-              <p>
-                The recipient can accept or reject. Silence means rejection.
-              </p>
-            </li>
-            <li>
-              <h3>If accepted, complete ADR within 90 days</h3>
-              <p>
-                Agree on mediation. The clock starts when the requester receives
-                acceptance. Both parties can sign a written extension;
-                settlement is voluntary.
+                If they agree to take part, we help you talk it through. You
+                decide what you accept.
               </p>
             </li>
           </ol>
           <details className={styles.processMore}>
-            <summary>Scope &amp; legal notes</summary>
+            <summary>California process details</summary>
+            <p className={styles.processContext}>
+              For pre-lawsuit disputes covered by §5930. This is separate from
+              IDR.
+            </p>
+            <ol className={styles.legalProcedure}>
+              <li>
+                <h3>Prepare a Request for Resolution</h3>
+                <p>
+                  Describe the dispute, request ADR, and state that no response
+                  within 30 days means rejection. Include Article 3 if serving a
+                  member.
+                </p>
+              </li>
+              <li>
+                <h3>Serve every other party</h3>
+                <p>
+                  Use personal delivery, first-class mail, or another method
+                  reasonably calculated to give actual notice. Emailing us alone
+                  is not service.
+                </p>
+              </li>
+              <li>
+                <h3>Allow 30 days for a response</h3>
+                <p>
+                  The recipient can accept or reject. Silence means rejection.
+                </p>
+              </li>
+              <li>
+                <h3>If accepted, complete ADR within 90 days</h3>
+                <p>
+                  Agree on mediation. The clock starts when the requester
+                  receives acceptance. Both parties can sign a written
+                  extension; settlement is voluntary.
+                </p>
+              </li>
+            </ol>
+
             <div className={styles.processNote}>
               <strong>Scope and court filing</strong>
               <p>

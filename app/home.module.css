@@ -1058,3 +1058,23 @@
     padding-inline: 8px;
   }
 }
+
+.legalProcedure {
+  padding-left: 18px;
+  margin: 12px 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.legalProcedure li {
+  padding-bottom: 12px;
+}
+.legalProcedure h3 {
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.processMore > .processContext {
+  margin-top: 12px !important;
+  font-size: 11px;
+}

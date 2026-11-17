@@ -241,3 +241,8 @@ Owner rejected the centered overlay and requested small dropdown-like panels, wi
 ## Shared community image below the two services — 2026-11-17
 
 Owner asked to reconsider the whole-page design and move the garden-gate image. Remove it from the free service card and place the existing image in a full-width shared row below both service cards. This prevents the photo appearing exclusive to the free offer and lets the two service cards stand independently above it. Preserve the soft palette, primary/secondary hierarchy, all copy, free-use footnote, start buttons, anchored step dropdowns, and careers links. Use a taller responsive crop showing the homeowner and neighborhood, without captions or promotional additions.
+
+
+## A reassuring customer journey before legal detail — 2026-11-17
+
+Owner rejected legal-professional wording in the default steps and asked for a balanced, caring commercial explanation that reduces uncertainty without false claims. The three visible dots now describe emailing a short account, getting help preparing the request/invitation, and discussing options. ADR participation remains conditional and settlement remains the customer’s choice; no guaranteed outcome, compulsory consent, immediate service, or automatic legal service is claimed. Preserve the previously researched statutory procedure, caveats, and sources inside optional California process details, collapsed by default. Keep the compact anchored dropdown design.
