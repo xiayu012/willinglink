@@ -698,14 +698,16 @@
   opacity: 0.85;
 }
 .servicePhoto {
-  height: 185px;
+  grid-column: 1 / -1;
+  height: clamp(260px, 27vw, 360px);
   position: relative;
-  margin-top: auto;
+  border-radius: 12px;
+  overflow: hidden;
 }
 .servicePhotoImage {
   filter: saturate(0.78) contrast(0.96);
   object-fit: cover;
-  object-position: 70% 20%;
+  object-position: 70% 28%;
 }
 .paidService {
   background: #fafbf8;
@@ -796,7 +798,7 @@
     font-size: 14px;
   }
   .servicePhoto {
-    height: 145px;
+    height: 290px;
   }
   .paidService {
     padding: 27px 25px 29px;
@@ -1046,8 +1048,13 @@
 }
 
 @media (max-width: 480px) {
-  .servicePath .serviceButton svg { display: none; }
+  .servicePath .serviceButton svg {
+    display: none;
+  }
 }
 @media (max-width: 380px) {
-  .servicePath .serviceButton { font-size: 12px; padding-inline: 8px; }
+  .servicePath .serviceButton {
+    font-size: 12px;
+    padding-inline: 8px;
+  }
 }

@@ -236,3 +236,8 @@ Owner requested two start buttons and two readable floating guides that do not m
 ## Anchored dropdowns with colored-dot steps — 2026-11-15
 
 Owner rejected the centered overlay and requested small dropdown-like panels, with one vertically aligned colored dot per step and shorter wording. Keep the two Start actions and independent native popovers, but anchor each panel below its own steps control using CSS anchor positioning. Remove page dimming/blur. Use a compact 380px panel, viewport-limited height, internal scrolling, short step titles and distinct colored dots on a vertical line. Condense existing procedural copy without dropping applicability, service, deadlines, board-authority, or free-IDR boundaries. No new legal interpretation or backend behavior.
+
+
+## Shared community image below the two services — 2026-11-17
+
+Owner asked to reconsider the whole-page design and move the garden-gate image. Remove it from the free service card and place the existing image in a full-width shared row below both service cards. This prevents the photo appearing exclusive to the free offer and lets the two service cards stand independently above it. Preserve the soft palette, primary/secondary hierarchy, all copy, free-use footnote, start buttons, anchored step dropdowns, and careers links. Use a taller responsive crop showing the homeowner and neighborhood, without captions or promotional additions.

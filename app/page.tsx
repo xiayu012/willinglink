@@ -89,16 +89,6 @@ export default function Home() {
             </div>
             <p className={styles.freeUseNote}>* One free use per homeowner.</p>
           </div>
-          <div className={styles.servicePhoto}>
-            <Image
-              className={styles.servicePhotoImage}
-              src="/images/community-open-gate.webp"
-              alt="A homeowner opens her garden gate onto a sunlit neighborhood."
-              fill
-              priority
-              sizes="(max-width: 760px) 100vw, 57vw"
-            />
-          </div>
         </section>
         <section
           id="ongoing"
@@ -129,6 +119,16 @@ export default function Home() {
             </a>
           </div>
         </section>
+        <div className={styles.servicePhoto}>
+          <Image
+            className={styles.servicePhotoImage}
+            src="/images/community-open-gate.webp"
+            alt="A homeowner opens her garden gate onto a sunlit neighborhood."
+            fill
+            priority
+            sizes="(max-width: 760px) 100vw, (max-width: 1440px) 92vw, 1328px"
+          />
+        </div>
       </main>
       <div
         id="idr-steps"
