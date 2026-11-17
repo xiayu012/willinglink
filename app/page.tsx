@@ -155,80 +155,31 @@ export default function Home() {
           <ol className={styles.processList}>
             <li>
               <h3>Tell us what happened</h3>
-              <p>Email a short outline and what you’d like to resolve.</p>
-            </li>
-            <li>
-              <h3>Get ready for the conversation</h3>
               <p>
-                We help prepare the request and explain who needs to take part.
+                Tell us the issue, your state, and what you’d like to resolve.
               </p>
             </li>
             <li>
-              <h3>Talk through the options</h3>
+              <h3>Prepare the next step</h3>
               <p>
-                We help both sides understand the issues and write down any
-                agreement.
+                We review your HOA’s process and help prepare a request to the
+                board.
+              </p>
+            </li>
+            <li>
+              <h3>Talk with your HOA</h3>
+              <p>
+                We help you prepare for the discussion and put any agreed next
+                steps in writing.
               </p>
             </li>
           </ol>
           <details className={styles.processMore}>
-            <summary>California process details</summary>
+            <summary>A few things to know</summary>
             <p className={styles.processContext}>
-              Follow your HOA’s IDR policy. If it has no compliant procedure,
-              §5915 applies.
-            </p>
-            <ol className={styles.legalProcedure}>
-              <li>
-                <h3>Request IDR in writing</h3>
-                <p>
-                  Send the HOA a written request. It must participate; a member
-                  may decline an HOA-initiated request.
-                </p>
-              </li>
-              <li>
-                <h3>Meet and discuss the issues</h3>
-                <p>
-                  Under §5915, meet promptly with a board-designated director at
-                  a mutually convenient time and place. Discuss both sides in
-                  good faith.
-                </p>
-              </li>
-              <li>
-                <h3>Write down any agreement</h3>
-                <p>
-                  Both parties sign. Terms must follow law and governing
-                  documents, and be within the director’s authority or ratified
-                  by the board.
-                </p>
-              </li>
-            </ol>
-
-            <div className={styles.processNote}>
-              <strong>About the free service</strong>
-              <p>
-                HOA IDR has no member participation fee; our one-use offer does
-                not limit that right. Emailing us alone does not deliver your
-                request to the HOA.
-              </p>
-            </div>
-            <p className={styles.processSources}>
-              California Civil Code{" "}
-              <a
-                href="https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&amp;division=4.&amp;title=&amp;part=5.&amp;chapter=10.&amp;article=2."
-                target="_blank"
-                rel="noreferrer"
-              >
-                §§5900–5915
-              </a>{" "}
-              ·{" "}
-              <a
-                href="https://dre.ca.gov/files/pdf/relaw/excerpts.pdf#page=294"
-                target="_blank"
-                rel="noreferrer"
-              >
-                State-published text
-              </a>
-              . General process summary, not legal advice.
+              The process depends on your state and HOA’s rules. We help you
+              understand the next steps; your HOA handles its internal process.
+              Emailing us does not itself submit a formal request to your HOA.
             </p>
           </details>
         </div>
@@ -258,87 +209,31 @@ export default function Home() {
           <ol className={styles.processList}>
             <li>
               <h3>Tell us what happened</h3>
-              <p>Email a short outline and what you’d like to resolve.</p>
+              <p>
+                Tell us the issue, your state, and what you’d like to resolve.
+              </p>
             </li>
             <li>
-              <h3>Invite the other side</h3>
+              <h3>Arrange the conversation</h3>
               <p>
-                We help prepare the invitation and explain what happens next.
+                We help with the invitation and confirm the mediation
+                arrangements.
               </p>
             </li>
             <li>
               <h3>Explore a way forward</h3>
               <p>
-                If they agree to take part, we help you talk it through. You
-                decide what you accept.
+                A neutral mediator helps both sides explore options. You choose
+                whether to settle; any agreement is put in writing.
               </p>
             </li>
           </ol>
           <details className={styles.processMore}>
-            <summary>California process details</summary>
+            <summary>A few things to know</summary>
             <p className={styles.processContext}>
-              For pre-lawsuit disputes covered by §5930. This is separate from
-              IDR.
-            </p>
-            <ol className={styles.legalProcedure}>
-              <li>
-                <h3>Prepare a Request for Resolution</h3>
-                <p>
-                  Describe the dispute, request ADR, and state that no response
-                  within 30 days means rejection. Include Article 3 if serving a
-                  member.
-                </p>
-              </li>
-              <li>
-                <h3>Serve every other party</h3>
-                <p>
-                  Use personal delivery, first-class mail, or another method
-                  reasonably calculated to give actual notice. Emailing us alone
-                  is not service.
-                </p>
-              </li>
-              <li>
-                <h3>Allow 30 days for a response</h3>
-                <p>
-                  The recipient can accept or reject. Silence means rejection.
-                </p>
-              </li>
-              <li>
-                <h3>If accepted, complete ADR within 90 days</h3>
-                <p>
-                  Agree on mediation. The clock starts when the requester
-                  receives acceptance. Both parties can sign a written
-                  extension; settlement is voluntary.
-                </p>
-              </li>
-            </ol>
-
-            <div className={styles.processNote}>
-              <strong>Scope and court filing</strong>
-              <p>
-                Small-claims cases are excluded; assessment disputes are
-                generally excluded. A covered lawsuit requires the §5950
-                certificate.
-              </p>
-            </div>
-            <p className={styles.processSources}>
-              California Civil Code{" "}
-              <a
-                href="https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&amp;division=4.&amp;title=&amp;part=5.&amp;chapter=10.&amp;article=3."
-                target="_blank"
-                rel="noreferrer"
-              >
-                §§5925–5950
-              </a>{" "}
-              ·{" "}
-              <a
-                href="https://dre.ca.gov/files/pdf/relaw/excerpts.pdf#page=295"
-                target="_blank"
-                rel="noreferrer"
-              >
-                State-published text
-              </a>
-              . General process summary, not legal advice.
+              Required notices, timing, and mediator qualifications vary. We
+              confirm whether our service fits before proceeding. Emailing us
+              does not itself serve a legal notice or meet a filing deadline.
             </p>
           </details>
         </div>

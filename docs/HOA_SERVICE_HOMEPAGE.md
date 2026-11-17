@@ -246,3 +246,8 @@ Owner asked to reconsider the whole-page design and move the garden-gate image. 
 ## A reassuring customer journey before legal detail — 2026-11-17
 
 Owner rejected legal-professional wording in the default steps and asked for a balanced, caring commercial explanation that reduces uncertainty without false claims. The three visible dots now describe emailing a short account, getting help preparing the request/invitation, and discussing options. ADR participation remains conditional and settlement remains the customer’s choice; no guaranteed outcome, compulsory consent, immediate service, or automatic legal service is claimed. Preserve the previously researched statutory procedure, caveats, and sources inside optional California process details, collapsed by default. Keep the compact anchored dropdown design.
+
+
+## Multi-state step synthesis — 2026-11-17
+
+Owner requested reviewing most states and synthesizing brief general steps rather than California-only instructions or a state-by-state explanation. Targeted official-source review covers 26 states; scope and sources are in `research/HOA_DISPUTE_PROCESS_MULTI_STATE_2026-11-17.md`. Replace the California legal detail panels with short optional process notes. Keep three colored-dot steps for each path, clarify HOA ownership of internal procedures and neutral mediation for ADR, request the community state at intake, and preserve settlement choice. No universal deadline, guaranteed compliance, compulsory settlement or automatic filing is claimed. Existing native popover behavior, pricing, imagery and unrelated content remain unchanged.
