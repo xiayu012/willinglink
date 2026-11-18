@@ -62,7 +62,7 @@ export function IdrIntakePreview() {
       recognition.current.stop();
       return;
     }
-    const support = window as Window & {
+    const support = window as unknown as {
       SpeechRecognition?: new () => Recognition;
       webkitSpeechRecognition?: new () => Recognition;
     };
