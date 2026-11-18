@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import { ArrowRight, ChevronDown, X } from "lucide-react";
 import styles from "./home.module.css";
+import { IdrIntakePreview } from "./idr-intake-preview";
 
 export const metadata: Metadata = {
   title: "WillingLink — Free HOA IDR & ADR",
@@ -126,7 +127,7 @@ export default function Home() {
       <section
         id="idr-preview"
         className={styles.idrPreview}
-        aria-labelledby="idr-preview-title"
+        aria-label="IDR preview"
       >
         <div className={styles.idrPanel}>
           <a
@@ -147,7 +148,7 @@ export default function Home() {
               <span>Talk with your HOA</span>
             </li>
           </ol>
-          <h2 id="idr-preview-title">Start My IDR</h2>
+          <IdrIntakePreview />
         </div>
       </section>
       <div
