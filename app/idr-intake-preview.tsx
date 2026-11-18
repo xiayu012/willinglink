@@ -140,20 +140,21 @@ export function IdrIntakePreview() {
           </select>
         </label>
       </div>
-      <label>
-        What happened?
+      <label htmlFor="idr-description">What happened?</label>
+      <div className={styles.idrInputSplit}>
         <textarea
+          id="idr-description"
           ref={input}
           value={description}
           onChange={(event) => setDescription(event.target.value)}
           placeholder="Tell us what happened and what you’d like to resolve."
           rows={7}
         />
-      </label>
-      <button className={styles.idrVoice} type="button" onClick={dictate}>
-        <Mic size={27} aria-hidden="true" />
-        {listening ? "Stop dictation" : "Speak instead"}
-      </button>
+        <button className={styles.idrVoice} type="button" onClick={dictate}>
+          <Mic size={36} aria-hidden="true" />
+          {listening ? "Stop dictation" : "Speak instead"}
+        </button>
+      </div>
       <p className={styles.idrVoiceHint}>
         Dictation uses your browser’s speech service.
       </p>

@@ -1209,18 +1209,30 @@
   font-size: 16px;
   font-weight: 400;
 }
-.idrIntake textarea {
-  resize: vertical;
+.idrInputSplit {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid #b6c5b7;
+  border-radius: 10px;
+}
+.idrInputSplit textarea {
+  border: 0;
+  border-radius: 0;
+  resize: none;
+}
+.idrInputSplit :focus-visible {
+  outline-offset: -3px;
 }
 .idrVoice {
   width: 100%;
   min-height: 64px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
   padding: 12px;
-  border-radius: 10px;
   background: var(--teal);
   color: var(--cream);
   font-weight: 650;
@@ -1233,5 +1245,9 @@
 @media (max-width: 480px) {
   .idrFields {
     grid-template-columns: 1fr;
+  }
+  .idrInputSplit {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(2, minmax(0, 1fr));
   }
 }
