@@ -5,11 +5,11 @@ import styles from "./home.module.css";
 import { IdrIntakePreview } from "./idr-intake-preview";
 
 export const metadata: Metadata = {
-  title: "WillingLink — Free HOA IDR & ADR",
+  title: "fretgone — Free HOA IDR & ADR",
   description:
     "Free IDR and ADR support for homeowners and HOA. Ongoing HOA mediation, homeowner feedback, and shared decision-making for $1 per unit per month.",
   openGraph: {
-    title: "WillingLink — Free HOA IDR & ADR",
+    title: "fretgone — Free HOA IDR & ADR",
     description:
       "Free IDR and ADR support for homeowners and HOA. Ongoing HOA coordination is available separately for $1 per unit per month.",
     images: [
@@ -30,8 +30,8 @@ export default function Home() {
         Skip to content
       </a>
       <header className={styles.header}>
-        <a className={styles.brand} href="/" aria-label="WillingLink home">
-          WillingLink<span>.</span>
+        <a className={styles.brand} href="/" aria-label="fretgone home">
+          fretgone<span>.</span>
         </a>
         <nav aria-label="Main navigation">
           <a href="/careers">Careers</a>
@@ -246,7 +246,7 @@ export default function Home() {
       <footer className={styles.footer}>
         <div>
           <a className={styles.brand} href="/">
-            WillingLink<span>.</span>
+            fretgone<span>.</span>
           </a>
           <span>© {new Date().getFullYear()} FretGone LLC</span>
         </div>
