@@ -1136,19 +1136,43 @@
 .idrProgress {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
   margin: 0 0 32px;
   padding: 0;
   list-style: none;
   font-size: clamp(12px, 2vw, 15px);
 }
 .idrProgress li {
-  border-top: 3px solid #d9e0d4;
-  padding-top: 10px;
+  position: relative;
+  padding-top: 28px;
+  text-align: center;
+}
+.idrProgress li::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 3px;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #aebdad;
+}
+.idrProgress li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 9px;
+  left: 50%;
+  width: 100%;
+  height: 2px;
+  background: #c5d1c2;
 }
 .idrProgress li[aria-current="step"] {
-  border-color: var(--teal);
   font-weight: 650;
+}
+.idrProgress li[aria-current="step"]::before {
+  background: var(--teal);
+  box-shadow: 0 0 0 4px #dce7db;
 }
 .idrProgress li:not([aria-current="step"]) span {
   display: none;
