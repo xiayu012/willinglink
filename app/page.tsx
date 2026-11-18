@@ -6,11 +6,11 @@ import styles from "./home.module.css";
 export const metadata: Metadata = {
   title: "WillingLink — Free HOA IDR & ADR",
   description:
-    "Free IDR and ADR support for homeowners and HOA boards. Ongoing HOA mediation, homeowner feedback, and shared decision-making for $1 per unit per month.",
+    "Free IDR and ADR support for homeowners and HOA. Ongoing HOA mediation, homeowner feedback, and shared decision-making for $1 per unit per month.",
   openGraph: {
     title: "WillingLink — Free HOA IDR & ADR",
     description:
-      "Free IDR and ADR support for homeowners and HOA boards. Ongoing HOA coordination is available separately for $1 per unit per month.",
+      "Free IDR and ADR support for homeowners and HOA. Ongoing HOA coordination is available separately for $1 per unit per month.",
     images: [
       {
         url: "/images/community-open-gate.webp",
@@ -48,7 +48,7 @@ export default function Home() {
             <p className={styles.serviceDescription}>
               We provide free internal dispute resolution (IDR) and
               mediation-based alternative dispute resolution (ADR) for
-              homeowners and HOA boards.
+              homeowners and HOA.
             </p>
             <div className={styles.freeActions}>
               <div className={styles.servicePath}>
@@ -100,7 +100,7 @@ export default function Home() {
             <li>Unlimited IDR &amp; ADR</li>
             <li>Collect homeowner feedback</li>
             <li>Help the community make decisions together</li>
-            <li>Send the board a consolidated summary</li>
+            <li>Send the HOA a consolidated summary</li>
           </ul>
           <div className={styles.paidServiceAction}>
             <p>Billed to your HOA based on its total unit count.</p>
