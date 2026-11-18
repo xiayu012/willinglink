@@ -28,17 +28,17 @@ export function IdrIntakePreview() {
           ))}
         </select>
       </label>
-      <label>
-        <span className="sr-only">Your email provider</span>
-        <select defaultValue="">
-          <option value="" disabled>
-            Select a provider
-          </option>
+      <fieldset className={styles.idrProviders}>
+        <legend>Which email provider do you use?</legend>
+        <div>
           {providers.map((provider) => (
-            <option key={provider}>{provider}</option>
+            <label key={provider}>
+              <input type="radio" name="idr-email-provider" value={provider} />
+              {provider}
+            </label>
           ))}
-        </select>
-      </label>
+        </div>
+      </fieldset>
     </div>
   );
 }

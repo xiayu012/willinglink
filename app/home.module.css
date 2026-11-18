@@ -1196,3 +1196,29 @@
   color: var(--ink);
   font-size: 16px;
 }
+.idrProviders {
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+}
+.idrProviders legend {
+  margin-bottom: 8px;
+  font-weight: 650;
+}
+.idrProviders > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
+}
+.idrProviders label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  gap: 8px;
+  cursor: pointer;
+}
+.idrProviders input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--teal);
+}
