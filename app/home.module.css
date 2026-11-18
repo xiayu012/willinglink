@@ -1182,23 +1182,11 @@
   font-weight: 650;
 }
 
-.idrIntake {
-  display: grid;
-  gap: 16px;
-}
 .idrFields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
-.idrIntake label {
-  display: grid;
-  gap: 6px;
-  font-size: 14px;
-  font-weight: 600;
-}
-.idrIntake select,
-.idrIntake textarea {
+.idrFields select {
   width: 100%;
   min-height: 46px;
   border: 1px solid #b6c5b7;
@@ -1207,54 +1195,4 @@
   background: #fff;
   color: var(--ink);
   font-size: 16px;
-  font-weight: 400;
-}
-.idrInputSplit {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  background: #fff;
-  overflow: hidden;
-  border: 1px solid #b6c5b7;
-  border-radius: 10px;
-}
-.idrInputSplit textarea {
-  border: 0;
-  border-radius: 0;
-  resize: none;
-}
-.idrInputSplit :focus-visible {
-  outline-offset: -3px;
-}
-.idrVoice {
-  place-self: stretch;
-  margin: 6px;
-  min-height: 88px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #d9e0d4;
-  border-radius: 14px;
-  background: #e8ede6;
-  color: var(--teal);
-  font-weight: 650;
-}
-.idrVoice:hover {
-  background: #dce7db;
-}
-.idrVoiceHint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-@media (max-width: 480px) {
-  .idrFields {
-    grid-template-columns: 1fr;
-  }
-  .idrInputSplit {
-    grid-template-columns: 1fr;
-    grid-template-rows: repeat(2, minmax(0, 1fr));
-  }
 }
