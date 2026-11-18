@@ -118,7 +118,7 @@ export function IdrIntakePreview() {
     <div className={styles.idrIntake}>
       <div className={styles.idrFields}>
         <label>
-          Property state
+          <span className="sr-only">Property state</span>
           <select defaultValue="">
             <option value="" disabled>
               Select a state
@@ -129,7 +129,7 @@ export function IdrIntakePreview() {
           </select>
         </label>
         <label>
-          Your email provider
+          <span className="sr-only">Your email provider</span>
           <select defaultValue="">
             <option value="" disabled>
               Select a provider
