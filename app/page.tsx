@@ -137,9 +137,15 @@ export default function Home() {
             <X size={36} aria-hidden="true" />
           </a>
           <ol className={styles.idrProgress}>
-            <li aria-current="step">Share the issue</li>
-            <li>Prepare your request</li>
-            <li>Talk with your HOA</li>
+            <li aria-current="step">
+              <span>Share the issue</span>
+            </li>
+            <li>
+              <span>Prepare your request</span>
+            </li>
+            <li>
+              <span>Talk with your HOA</span>
+            </li>
           </ol>
           <h2 id="idr-preview-title">Start My IDR</h2>
         </div>

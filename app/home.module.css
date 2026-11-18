@@ -1150,6 +1150,9 @@
   border-color: var(--teal);
   font-weight: 650;
 }
+.idrProgress li:not([aria-current="step"]) span {
+  display: none;
+}
 .idrPanel h2 {
   font-size: clamp(25px, 4vw, 38px);
   font-weight: 650;
