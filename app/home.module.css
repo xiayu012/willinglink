@@ -1095,3 +1095,62 @@
   margin-top: 12px !important;
   font-size: 11px;
 }
+
+.idrPreview {
+  display: none;
+}
+.idrPreview:target {
+  display: grid;
+  place-items: center;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  padding: clamp(12px, 4vw, 52px);
+  background: #172a2166;
+}
+.idrPanel {
+  position: relative;
+  width: min(100%, 1080px);
+  height: min(78dvh, 760px);
+  overflow: auto;
+  padding: 78px clamp(16px, 5vw, 64px) 32px;
+  border-radius: 16px;
+  background: #fafbf8;
+  color: var(--ink);
+  box-shadow: 0 20px 80px #172a2138;
+}
+.idrClose {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #e8ede6;
+}
+.idrClose:hover {
+  background: #d9e0d4;
+}
+.idrProgress {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 32px;
+  padding: 0;
+  list-style: none;
+  font-size: clamp(12px, 2vw, 15px);
+}
+.idrProgress li {
+  border-top: 3px solid #d9e0d4;
+  padding-top: 10px;
+}
+.idrProgress li[aria-current="step"] {
+  border-color: var(--teal);
+  font-weight: 650;
+}
+.idrPanel h2 {
+  font-size: clamp(25px, 4vw, 38px);
+  font-weight: 650;
+}

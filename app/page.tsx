@@ -52,10 +52,7 @@ export default function Home() {
             </p>
             <div className={styles.freeActions}>
               <div className={styles.servicePath}>
-                <a
-                  className={styles.serviceButton}
-                  href="mailto:contact@fretgone.com?subject=Free%20IDR%20inquiry"
-                >
+                <a className={styles.serviceButton} href="#idr-preview">
                   Start My IDR <ArrowRight size={17} aria-hidden="true" />
                 </a>
                 <button
@@ -126,6 +123,27 @@ export default function Home() {
           />
         </div>
       </main>
+      <section
+        id="idr-preview"
+        className={styles.idrPreview}
+        aria-labelledby="idr-preview-title"
+      >
+        <div className={styles.idrPanel}>
+          <a
+            href="#resolution"
+            className={styles.idrClose}
+            aria-label="Close IDR preview"
+          >
+            <X size={36} aria-hidden="true" />
+          </a>
+          <ol className={styles.idrProgress}>
+            <li aria-current="step">Share the issue</li>
+            <li>Prepare your request</li>
+            <li>Talk with your HOA</li>
+          </ol>
+          <h2 id="idr-preview-title">Start My IDR</h2>
+        </div>
+      </section>
       <div
         id="idr-steps"
         popover="auto"
