@@ -170,16 +170,6 @@ export default function Home() {
               </p>
             </li>
           </ol>
-          <details className={styles.processMore}>
-            <summary>A few things to know</summary>
-            <p className={styles.processContext}>
-              The process depends on your state and HOA’s rules. We help you
-              understand the next steps; your HOA handles its internal process.
-              Where no compliant HOA procedure exists, the applicable legal
-              fallback governs. Emailing us does not itself submit a formal
-              request to your HOA.
-            </p>
-          </details>
         </div>
       </div>
       <div
@@ -226,14 +216,6 @@ export default function Home() {
               </p>
             </li>
           </ol>
-          <details className={styles.processMore}>
-            <summary>A few things to know</summary>
-            <p className={styles.processContext}>
-              Required notices, timing, and mediator qualifications vary. We
-              confirm whether our service fits before proceeding. Emailing us
-              does not itself serve a legal notice or meet a filing deadline.
-            </p>
-          </details>
         </div>
       </div>
       <footer className={styles.footer}>
