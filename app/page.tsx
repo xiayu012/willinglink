@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { ArrowRight, ArrowUpRight, ChevronDown, X } from "lucide-react";
+import { ArrowRight, ChevronDown, X } from "lucide-react";
 import styles from "./home.module.css";
 
 export const metadata: Metadata = {
@@ -21,8 +21,6 @@ export const metadata: Metadata = {
     ],
   },
 };
-const email =
-  "mailto:contact@fretgone.com?subject=Free%20IDR%20%2F%20ADR%20inquiry";
 
 export default function Home() {
   return (
@@ -37,9 +35,6 @@ export default function Home() {
         <nav aria-label="Main navigation">
           <a href="/careers">Careers</a>
         </nav>
-        <a className={styles.headerCta} href={email}>
-          Get in touch <ArrowUpRight size={16} aria-hidden="true" />
-        </a>
       </header>
       <main id="main" className={styles.services} aria-label="Our two services">
         <section
