@@ -139,7 +139,7 @@ export default function Home() {
           </a>
           <ol className={styles.idrProgress}>
             <li aria-current="step">
-              <span>Email your HOA to start IDR</span>
+              <span>Sending the IDR email</span>
             </li>
             <li>
               <span>Prepare your request</span>
