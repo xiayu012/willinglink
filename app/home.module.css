@@ -1226,8 +1226,8 @@
   outline-offset: -3px;
 }
 .idrVoice {
-  place-self: center;
-  width: min(176px, calc(100% - 24px));
+  place-self: stretch;
+  margin: 6px;
   min-height: 88px;
   display: flex;
   flex-direction: column;
@@ -1255,6 +1255,6 @@
   }
   .idrInputSplit {
     grid-template-columns: 1fr;
-    padding-bottom: 14px;
+    grid-template-rows: repeat(2, minmax(0, 1fr));
   }
 }
