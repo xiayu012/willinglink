@@ -1186,7 +1186,8 @@
   display: grid;
   gap: 12px;
 }
-.idrFields select {
+.idrFields select,
+.idrDraft {
   width: 100%;
   min-height: 46px;
   border: 1px solid #b6c5b7;
@@ -1195,6 +1196,10 @@
   background: #fff;
   color: var(--ink);
   font-size: 16px;
+}
+.idrDraft {
+  line-height: 1.6;
+  resize: vertical;
 }
 .idrProviders {
   margin: 8px 0 0;
