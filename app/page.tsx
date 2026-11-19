@@ -138,9 +138,7 @@ export default function Home() {
             <X size={36} aria-hidden="true" />
           </a>
           <ol className={styles.idrProgress}>
-            <li aria-current="step">
-              <span>Sending the IDR email</span>
-            </li>
+            <li aria-current="step" aria-label="Step 1" />
             <li>
               <span>Prepare your request</span>
             </li>
