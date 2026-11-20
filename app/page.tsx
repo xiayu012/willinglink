@@ -65,10 +65,7 @@ export default function Home() {
                 </button>
               </div>
               <div className={styles.servicePath}>
-                <a
-                  className={styles.serviceButton}
-                  href="mailto:contact@fretgone.com?subject=Free%20ADR%20inquiry"
-                >
+                <a className={styles.serviceButton} href="#adr-preview">
                   Start My ADR <ArrowRight size={17} aria-hidden="true" />
                 </a>
                 <button
@@ -147,6 +144,31 @@ export default function Home() {
             </li>
           </ol>
           <IdrIntakePreview />
+        </div>
+      </section>
+      <section
+        id="adr-preview"
+        className={styles.idrPreview}
+        aria-label="ADR preview"
+      >
+        <div className={styles.idrPanel}>
+          <a
+            href="#resolution"
+            className={styles.idrClose}
+            aria-label="Close ADR preview"
+          >
+            <X size={36} aria-hidden="true" />
+          </a>
+          <ol className={styles.idrProgress}>
+            <li aria-current="step" aria-label="Step 1" />
+            <li>
+              <span>Prepare your request</span>
+            </li>
+            <li>
+              <span>Explore a way forward</span>
+            </li>
+          </ol>
+          <IdrIntakePreview mode="adr" />
         </div>
       </section>
       <div

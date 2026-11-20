@@ -3,10 +3,36 @@
 import { useState } from "react";
 import styles from "./home.module.css";
 
-const states =
-  "Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia".split(
-    "|"
-  );
+const idrOpenings: Record<string, string> = {
+  California:
+    "I'm formally requesting Internal Dispute Resolution (IDR) under California Civil Code §5910.",
+  Delaware:
+    "I request that the HOA share its internal dispute resolution procedure so we can address this matter.",
+};
+
+const adrOpenings: Record<string, string> = {
+  California:
+    "I request alternative dispute resolution under California Civil Code §§5925–5965 to resolve our dispute.",
+  Delaware:
+    "I propose nonbinding mediation under Delaware Code Title 25, §81-417(b) to resolve our dispute.",
+  "New Jersey":
+    "I request the association's alternative dispute resolution procedure under N.J.S.A. 46:8B-14(k), if applicable to our community.",
+  Nevada:
+    "I propose mediation to resolve our dispute and will check the filing requirements under Nevada Revised Statutes §§38.310–38.320.",
+  Florida:
+    "I propose presuit mediation under Florida Statutes §720.311 and will follow the applicable formal demand and delivery requirements.",
+  Hawaii:
+    "I request mediation under Hawaii Revised Statutes §514B-161, if this condominium dispute qualifies.",
+  Colorado:
+    "I propose mediation under Colorado Revised Statutes §38-33.3-124 to resolve our dispute.",
+  Texas:
+    "I propose mediation to resolve our dispute and ask about the HOA's applicable dispute resolution procedure.",
+  Washington:
+    "I propose nonbinding mediation under RCW 64.90.685, if applicable to our community.",
+  "North Carolina":
+    "I propose prelitigation mediation under North Carolina General Statutes §7A-38.3F to resolve our dispute.",
+};
+
 const providers = [
   "Gmail",
   "Outlook / Hotmail",
@@ -17,25 +43,12 @@ const providers = [
   "Other",
 ];
 
-const openingByState: Partial<Record<string, string>> = {
-  // California Civil Code §§5900–5915, https://dre.ca.gov/files/pdf/relaw/excerpts.pdf
-  California:
-    "I'm formally requesting Internal Dispute Resolution (IDR) under California Civil Code §5910.",
-  // Virginia uses an association complaint procedure, with its own scope and forms.
-  // https://law.lis.virginia.gov/vacode/title54.1/chapter23.3/section54.1-2354.4/
-  Virginia:
-    "I'd like to raise a concern with the association. Could you share your written complaint procedure under Virginia Code §54.1-2354.4 and let me know which form to use?",
-};
-
-const generalOpening =
-  "I'd like to resolve a concern through the HOA's internal process. Could you let me know how to submit a written request?";
-
-export function IdrIntakePreview() {
+export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
+  const openings = mode === "idr" ? idrOpenings : adrOpenings;
   const [state, setState] = useState("");
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({});
   const draft =
-    drafts[state] ??
-    (state ? `Dear HOA,\n\n${openingByState[state] ?? generalOpening}` : "");
+    drafts[state] ?? (state ? `Dear HOA,\n\n${openings[state]}` : "");
 
   return (
     <div className={styles.idrFields}>
@@ -48,7 +61,7 @@ export function IdrIntakePreview() {
           <option value="" disabled>
             Select a state
           </option>
-          {states.map((state) => (
+          {Object.keys(openings).map((state) => (
             <option key={state}>{state}</option>
           ))}
         </select>
@@ -58,7 +71,11 @@ export function IdrIntakePreview() {
         <div>
           {providers.map((provider) => (
             <label key={provider}>
-              <input type="radio" name="idr-email-provider" value={provider} />
+              <input
+                type="radio"
+                name={`${mode}-email-provider`}
+                value={provider}
+              />
               {provider}
             </label>
           ))}
