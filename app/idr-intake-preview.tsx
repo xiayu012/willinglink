@@ -18,7 +18,6 @@ const adrLaws: Record<string, string> = {
   Colorado: "Colorado Revised Statutes §38-33.3-124",
   Texas: "Texas Property Code §209.007(e)",
   Washington: "RCW §64.90.685",
-  "North Carolina": "North Carolina General Statutes §7A-38.3F",
 };
 
 const providers = [
