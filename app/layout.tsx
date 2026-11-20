@@ -8,7 +8,7 @@ import "./globals.css";
 import { SessionProvider } from "next-auth/react";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://willinglink.com"),
+  metadataBase: new URL("https://fretgone.com"),
   title: "WillingLink",
   description:
     "WillingLink helps Bay Area renters find housing options and coordinate service-related follow-up.",
