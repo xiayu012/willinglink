@@ -5,7 +5,7 @@ import styles from "./home.module.css";
 
 const idrLaws: Record<string, string> = {
   California: "California Civil Code §5910",
-  Delaware: "the HOA's governing documents",
+  Delaware: "29 Del. C. §2544(8) and the HOA's written complaint procedure",
 };
 
 const adrLaws: Record<string, string> = {
