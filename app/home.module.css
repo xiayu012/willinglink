@@ -1121,8 +1121,9 @@
 }
 .idrClose {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  top: calc((100dvh - min(78dvh, 760px)) / 2 + 14px);
+  right: max(calc((100vw - 1080px) / 2 + 14px), calc(clamp(12px, 4vw, 52px) + 14px));
+  z-index: 1;
   display: grid;
   place-items: center;
   width: 52px;

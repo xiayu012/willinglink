@@ -126,14 +126,14 @@ export default function Home() {
         className={styles.idrPreview}
         aria-label="IDR preview"
       >
+        <a
+          href="#resolution"
+          className={styles.idrClose}
+          aria-label="Close IDR preview"
+        >
+          <X size={36} aria-hidden="true" />
+        </a>
         <div className={styles.idrPanel}>
-          <a
-            href="#resolution"
-            className={styles.idrClose}
-            aria-label="Close IDR preview"
-          >
-            <X size={36} aria-hidden="true" />
-          </a>
           <ol className={styles.idrProgress}>
             <li aria-current="step" aria-label="Step 1" />
             <li>
@@ -151,14 +151,14 @@ export default function Home() {
         className={styles.idrPreview}
         aria-label="ADR preview"
       >
+        <a
+          href="#resolution"
+          className={styles.idrClose}
+          aria-label="Close ADR preview"
+        >
+          <X size={36} aria-hidden="true" />
+        </a>
         <div className={styles.idrPanel}>
-          <a
-            href="#resolution"
-            className={styles.idrClose}
-            aria-label="Close ADR preview"
-          >
-            <X size={36} aria-hidden="true" />
-          </a>
           <ol className={styles.idrProgress}>
             <li aria-current="step" aria-label="Step 1" />
             <li>
