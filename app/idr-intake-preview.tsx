@@ -19,15 +19,7 @@ const adrLaws: Record<string, string> = {
   Washington: "RCW §64.90.685",
 };
 
-const providers = [
-  "Gmail",
-  "Outlook / Hotmail",
-  "Yahoo Mail",
-  "iCloud Mail",
-  "AOL Mail",
-  "Proton Mail",
-  "Other",
-];
+const providers = ["Gmail", "Outlook / Hotmail", "Other"];
 
 export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
   const laws = mode === "idr" ? idrLaws : adrLaws;
