@@ -45,10 +45,14 @@ export function IdrIntakePreview({
     return () => media.removeEventListener("change", update);
   }, []);
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({});
+  const response =
+    mode === "idr" && state === "California"
+      ? "Please respond within 14 days and let me know the next steps. If I receive no response, I intend to pursue ADR under California Civil Code §5935, if applicable."
+      : "Please respond within 14 days and let me know the next steps.";
   const draft =
     drafts[state] ??
     (state
-      ? `Dear HOA,\n\nI'm formally requesting ${process} under ${laws[state]}.`
+      ? `Dear HOA,\n\nI'm formally requesting ${process} under ${laws[state]}.\n\nI've engaged WillingLink to handle communications regarding this dispute on my behalf. Please direct further correspondence to WillingLink and keep me copied.\n\nI also ask the board to authorize WillingLink to coordinate communications between us. Please confirm whether the board agrees and identify the board member or other authorized representative handling this ${mode.toUpperCase()} request.\n\n${response}\n\nThank you,`
       : "");
 
   return (
