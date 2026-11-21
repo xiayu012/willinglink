@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ArrowUpRight } from "lucide-react";
 import styles from "./home.module.css";
 
 const idrLaws: Record<string, string> = {
@@ -112,7 +113,7 @@ export function IdrIntakePreview({
           }
           rel="noopener noreferrer"
         >
-          Open to send
+          Open email draft <ArrowUpRight size={16} aria-hidden="true" />
         </a>
       </div>
     </div>

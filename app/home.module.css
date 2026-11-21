@@ -1212,6 +1212,9 @@
 
 .idrOpenMail {
   position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   right: 12px;
   bottom: 12px;
   padding: 10px 16px;
