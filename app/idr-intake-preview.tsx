@@ -21,7 +21,13 @@ const adrLaws: Record<string, string> = {
 
 const providers = ["Gmail", "Outlook / Hotmail", "Other"];
 
-export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
+export function IdrIntakePreview({
+  mode = "idr",
+  subject,
+}: {
+  mode?: "idr" | "adr";
+  subject?: string;
+}) {
   const laws = mode === "idr" ? idrLaws : adrLaws;
   const process =
     mode === "idr"
@@ -93,10 +99,10 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
           className={styles.idrOpenMail}
           href={
             !mobile && provider === "Gmail"
-              ? `https://mail.google.com/mail/?view=cm&fs=1&body=${encodeURIComponent(draft)}`
+              ? `https://mail.google.com/mail/?view=cm&fs=1&cc=contact%40fretgone.com${subject ? `&su=${encodeURIComponent(subject)}` : ""}&body=${encodeURIComponent(draft)}`
               : !mobile && provider === "Outlook / Hotmail"
-                ? `https://outlook.live.com/mail/0/deeplink/compose?body=${encodeURIComponent(draft)}`
-                : `mailto:?body=${encodeURIComponent(draft)}`
+                ? `https://outlook.live.com/mail/0/deeplink/compose?cc=contact%40fretgone.com${subject ? `&subject=${encodeURIComponent(subject)}` : ""}&body=${encodeURIComponent(draft)}`
+                : `mailto:?cc=contact%40fretgone.com${subject ? `&subject=${encodeURIComponent(subject)}` : ""}&body=${encodeURIComponent(draft)}`
           }
           target={
             !mobile &&

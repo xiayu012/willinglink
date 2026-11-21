@@ -143,7 +143,7 @@ export default function Home() {
               <span>Talk with your HOA</span>
             </li>
           </ol>
-          <IdrIntakePreview />
+          <IdrIntakePreview subject="Formal IDR Request" />
         </div>
       </section>
       <section
@@ -168,7 +168,7 @@ export default function Home() {
               <span>Explore a way forward</span>
             </li>
           </ol>
-          <IdrIntakePreview mode="adr" />
+          <IdrIntakePreview mode="adr" subject="Formal ADR Request" />
         </div>
       </section>
       <div
