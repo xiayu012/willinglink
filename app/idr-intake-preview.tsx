@@ -38,7 +38,6 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
   const [state, setState] = useState("");
   const [provider, setProvider] = useState("");
   const [mobile, setMobile] = useState(false);
-  const [copied, setCopied] = useState(false);
   useEffect(() => {
     const media = window.matchMedia("(pointer: coarse)");
     const update = () => setMobile(media.matches);
@@ -69,22 +68,24 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
           ))}
         </select>
       </label>
-      <fieldset className={styles.idrProviders}>
-        <legend>Which email provider do you use?</legend>
-        <div>
-          {providers.map((provider) => (
-            <label key={provider}>
-              <input
-                type="radio"
-                name={`${mode}-email-provider`}
-                value={provider}
-                onChange={(event) => setProvider(event.target.value)}
-              />
-              {provider}
-            </label>
-          ))}
-        </div>
-      </fieldset>
+      {!mobile && (
+        <fieldset className={styles.idrProviders}>
+          <legend>Which email provider do you use?</legend>
+          <div>
+            {providers.map((provider) => (
+              <label key={provider}>
+                <input
+                  type="radio"
+                  name={`${mode}-email-provider`}
+                  value={provider}
+                  onChange={(event) => setProvider(event.target.value)}
+                />
+                {provider}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
       <div className={styles.idrDraftWrap}>
         <textarea
           className={styles.idrDraft}
@@ -116,22 +117,6 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
           Open to send
         </a>
       </div>
-      {mobile && (
-        <button
-          type="button"
-          className={styles.idrCopy}
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(draft);
-              setCopied(true);
-            } catch {
-              setCopied(false);
-            }
-          }}
-        >
-          {copied ? "Copied" : "Copy email text"}
-        </button>
-      )}
     </div>
   );
 }
