@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import styles from "./home.module.css";
 
 const idrLaws: Record<string, string> = {
@@ -37,6 +37,15 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
       : "Alternative Dispute Resolution (ADR)";
   const [state, setState] = useState("");
   const [provider, setProvider] = useState("");
+  const [mobile, setMobile] = useState(false);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(pointer: coarse)");
+    const update = () => setMobile(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({});
   const draft =
     drafts[state] ??
@@ -90,14 +99,15 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
         <a
           className={styles.idrOpenMail}
           href={
-            provider === "Gmail"
+            !mobile && provider === "Gmail"
               ? `https://mail.google.com/mail/?view=cm&fs=1&body=${encodeURIComponent(draft)}`
-              : provider === "Outlook / Hotmail"
+              : !mobile && provider === "Outlook / Hotmail"
                 ? `https://outlook.live.com/mail/0/deeplink/compose?body=${encodeURIComponent(draft)}`
                 : `mailto:?body=${encodeURIComponent(draft)}`
           }
           target={
-            provider === "Gmail" || provider === "Outlook / Hotmail"
+            !mobile &&
+            (provider === "Gmail" || provider === "Outlook / Hotmail")
               ? "_blank"
               : undefined
           }
@@ -106,6 +116,22 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
           Open to send
         </a>
       </div>
+      {mobile && (
+        <button
+          type="button"
+          className={styles.idrCopy}
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(draft);
+              setCopied(true);
+            } catch {
+              setCopied(false);
+            }
+          }}
+        >
+          {copied ? "Copied" : "Copy email text"}
+        </button>
+      )}
     </div>
   );
 }

@@ -1209,6 +1209,12 @@
 .idrDraftWrap {
   position: relative;
 }
+.idrCopy {
+  justify-self: end;
+  color: var(--teal);
+  text-decoration: underline;
+  font-size: 14px;
+}
 .idrOpenMail {
   position: absolute;
   right: 12px;
