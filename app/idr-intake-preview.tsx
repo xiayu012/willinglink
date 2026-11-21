@@ -36,6 +36,7 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
       ? "Internal Dispute Resolution (IDR)"
       : "Alternative Dispute Resolution (ADR)";
   const [state, setState] = useState("");
+  const [provider, setProvider] = useState("");
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({});
   const draft =
     drafts[state] ??
@@ -68,22 +69,43 @@ export function IdrIntakePreview({ mode = "idr" }: { mode?: "idr" | "adr" }) {
                 type="radio"
                 name={`${mode}-email-provider`}
                 value={provider}
+                onChange={(event) => setProvider(event.target.value)}
               />
               {provider}
             </label>
           ))}
         </div>
       </fieldset>
-      <textarea
-        className={styles.idrDraft}
-        aria-label="Email draft to your HOA"
-        rows={8}
-        value={draft}
-        onChange={(event) => {
-          const value = event.target.value;
-          setDrafts((previous) => ({ ...previous, [state]: value }));
-        }}
-      />
+      <div className={styles.idrDraftWrap}>
+        <textarea
+          className={styles.idrDraft}
+          aria-label="Email draft to your HOA"
+          rows={8}
+          value={draft}
+          onChange={(event) => {
+            const value = event.target.value;
+            setDrafts((previous) => ({ ...previous, [state]: value }));
+          }}
+        />
+        <a
+          className={styles.idrOpenMail}
+          href={
+            provider === "Gmail"
+              ? `https://mail.google.com/mail/?view=cm&fs=1&body=${encodeURIComponent(draft)}`
+              : provider === "Outlook / Hotmail"
+                ? `https://outlook.live.com/mail/0/deeplink/compose?body=${encodeURIComponent(draft)}`
+                : `mailto:?body=${encodeURIComponent(draft)}`
+          }
+          target={
+            provider === "Gmail" || provider === "Outlook / Hotmail"
+              ? "_blank"
+              : undefined
+          }
+          rel="noopener noreferrer"
+        >
+          Open to send
+        </a>
+      </div>
     </div>
   );
 }

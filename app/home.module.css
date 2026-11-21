@@ -1122,7 +1122,10 @@
 .idrClose {
   position: absolute;
   top: calc((100dvh - min(78dvh, 760px)) / 2 + 14px);
-  right: max(calc((100vw - 1080px) / 2 + 14px), calc(clamp(12px, 4vw, 52px) + 14px));
+  right: max(
+    calc((100vw - 1080px) / 2 + 14px),
+    calc(clamp(12px, 4vw, 52px) + 14px)
+  );
   z-index: 1;
   display: grid;
   place-items: center;
@@ -1201,6 +1204,20 @@
 .idrDraft {
   line-height: 1.6;
   resize: vertical;
+  padding-bottom: 70px;
+}
+.idrDraftWrap {
+  position: relative;
+}
+.idrOpenMail {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 10px 16px;
+  border-radius: 7px;
+  background: var(--teal);
+  color: var(--cream);
+  font-weight: 600;
 }
 .idrProviders {
   margin: 8px 0 0;
