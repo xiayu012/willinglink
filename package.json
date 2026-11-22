@@ -42,7 +42,8 @@
     "coliving:db": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-db.ts",
     "coliving:outreach": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-outreach.ts",
     "coliving:ingest": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-ingest.ts",
-    "coliving:watch": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-watch.ts"
+    "coliving:watch": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-watch.ts",
+    "fretgone:gmail-selftest": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/fretgone-gmail-receipts-selftest.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "2.0.0-beta.85",
@@ -93,6 +94,7 @@
     "fast-deep-equal": "^3.1.3",
     "framer-motion": "^11.3.19",
     "geist": "^1.3.1",
+    "google-auth-library": "^11.3.4",
     "katex": "^0.16.25",
     "lucide-react": "^0.446.0",
     "motion": "^12.23.26",

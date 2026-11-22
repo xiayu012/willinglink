@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/coliving",
       "schedule": "0 3,19 * * *"
+    },
+    {
+      "path": "/api/cron/fretgone-gmail-watch",
+      "schedule": "0 9 * * *"
     }
   ]
 }
