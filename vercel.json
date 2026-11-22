@@ -8,10 +8,14 @@
     {
       "path": "/api/cron/coliving",
       "schedule": "0 3,19 * * *"
-    },
-    {
-      "path": "/api/cron/fretgone-gmail-watch",
-      "schedule": "0 9 * * *"
     }
-  ]
+  ],
+  "daemons": {
+    "gmail-poller": {
+      "root": "workers/gmail",
+      "entrypoint": "Dockerfile",
+      "instances": { "iad1": 1 },
+      "resources": { "requests": { "memory": "1Gi" } }
+    }
+  }
 }

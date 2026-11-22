@@ -6,6 +6,8 @@ export const maxDuration = 60;
 
 /** Renew daily: Gmail watch registrations expire within seven days. */
 export async function GET(request: Request) {
+  return new Response("Gmail watch is retired", { status: 410 });
+  /*
   const secret = process.env.CRON_SECRET?.trim();
   if (secret && request.headers.get("authorization") !== `Bearer ${secret}`) {
     return new Response("unauthorized", { status: 401 });
@@ -23,4 +25,5 @@ export async function GET(request: Request) {
     );
     return new Response("watch renewal failed", { status: 500 });
   }
+  */
 }

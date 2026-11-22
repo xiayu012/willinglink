@@ -11,6 +11,9 @@ export const maxDuration = 60;
 
 /** Google Cloud Pub/Sub delivers Gmail Inbox changes here. */
 export async function POST(request: Request) {
+  // Retired: the polling daemon owns ingestion; no AI assessments are run.
+  return new Response("Gmail push is retired", { status: 410 });
+  /*
   let config;
   try {
     config = gmailConfig();
@@ -36,4 +39,5 @@ export async function POST(request: Request) {
     );
     return new Response("temporary receipt processing failure", { status: 500 });
   }
+  */
 }
