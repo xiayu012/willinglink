@@ -11,7 +11,7 @@ create table if not exists fretgone.gmail_watch_state (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists fretgone.gmail_send_receipt (
+create table if not exists fretgone.gmail_inbound_email (
   gmail_message_id text primary key,
   gmail_thread_id text,
   history_id text not null,
@@ -19,26 +19,31 @@ create table if not exists fretgone.gmail_send_receipt (
   sender text,
   recipients text[] not null default '{}',
   subject text not null,
-  intent_id text,
-  kind text check (kind in ('idr', 'adr')),
-  match_status text not null default 'unmatched'
-    check (match_status in ('matched', 'unmatched', 'ambiguous')),
+  body text not null,
+  body_truncated boolean not null default false,
   created_at timestamptz not null default now()
 );
 
-create index if not exists gmail_send_receipt_received_at_idx
-  on fretgone.gmail_send_receipt (received_at desc);
+create index if not exists gmail_inbound_email_received_at_idx
+  on fretgone.gmail_inbound_email (received_at desc);
 
-create table if not exists fretgone.gmail_send_intent (
-  id text primary key,
-  kind text not null check (kind in ('idr', 'adr')),
-  initiated_at timestamptz not null default now(),
-  expires_at timestamptz not null,
-  status text not null default 'pending' check (status in ('pending', 'matched')),
-  matched_message_id text unique,
-  matched_at timestamptz
+create table if not exists fretgone.gmail_case_assessment (
+  id bigserial primary key,
+  gmail_message_id text not null references fretgone.gmail_inbound_email(gmail_message_id),
+  model_id text not null,
+  prompt_version text not null,
+  input_subject text not null,
+  input_body text not null,
+  raw_model_output text not null,
+  is_case boolean not null,
+  reason text not null,
+  error text,
+  assessed_at timestamptz not null default now()
 );
 
-create index if not exists gmail_send_intent_pending_idx
-  on fretgone.gmail_send_intent (initiated_at desc)
-  where status = 'pending';
+create table if not exists fretgone.case (
+  case_number bigserial primary key,
+  source_gmail_message_id text not null unique references fretgone.gmail_inbound_email(gmail_message_id),
+  source_assessment_id bigint not null references fretgone.gmail_case_assessment(id),
+  created_at timestamptz not null default now()
+);

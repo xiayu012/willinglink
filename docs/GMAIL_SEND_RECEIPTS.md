@@ -1,13 +1,12 @@
 # Gmail send receipts
 
-FretGone detects a completed IDR/ADR email when the copied message reaches
-`contact@fretgone.com`. When a homeowner opens an email draft, the site records
-an anonymous six-hour send window; a copied email arriving in that window is
-matched to that click. This deliberately does **not** depend on the subject,
-which the homeowner is free to change. It does not access the homeowner's
-mailbox, send email, or store email bodies. A receipt is evidence that the
-FretGone mailbox received the copied email; it is not a claim that every
-recipient read it.
+FretGone treats `contact@fretgone.com` as an internal case intake mailbox.
+Every newly received email is read by the case classifier; when the model judges
+that it starts or materially concerns an HOA dispute, FretGone creates an
+internal case number. This does not require a website click or a particular
+subject line. The system stores the email text supplied to the model, the raw
+model output, decision, model version, and any error so every judgment can be
+debugged later.
 
 ## One-time Google Cloud setup
 
@@ -23,7 +22,7 @@ recipient read it.
    endpoint URL as its OIDC audience. Grant Pub/Sub's service agent the Token
    Creator permission if Google Cloud asks for it.
 4. In Google Cloud Credentials, create a Web application OAuth client. Request
-   only `https://www.googleapis.com/auth/gmail.metadata` for
+   only `https://www.googleapis.com/auth/gmail.readonly` for
    `contact@fretgone.com`; obtain an offline refresh token and put it in the
    Vercel environment. Do not put a token in source control.
 5. Add the environment variables in `.env.example` to Vercel Production and
@@ -36,11 +35,11 @@ recipient read it.
 ## First controlled test
 
 After the database migration, variables, Pub/Sub subscription, and deployment
-are all in place, click **Open email draft**, send it to a mailbox you control,
-and leave `contact@fretgone.com` copied. The Pub/Sub push endpoint should return
-200, and a single metadata-only row should appear in
-`fretgone.gmail_send_receipt` with `match_status = 'matched'`. Sending the same
-message again must not create a second row for the same Gmail message ID.
+are all in place, send a controlled HOA-dispute email to or copied to
+`contact@fretgone.com`. The Pub/Sub endpoint should return 200. Its mail record,
+model assessment, and—if classified as a case—numeric case number should appear
+in `fretgone.gmail_inbound_email`, `fretgone.gmail_case_assessment`, and
+`fretgone.case`.
 
 ## Operational limits
 
@@ -48,6 +47,6 @@ message again must not create a second row for the same Gmail message ID.
   the daily renewed watch are the recovery mechanism.
 - If Gmail says the stored history ID is too old, the listener sets a new
   baseline and deliberately does not import the old inbox as new receipts.
-- If more than one draft is opened during the same six-hour window, the receipt
-  is marked `ambiguous` rather than being guessed onto the wrong draft.
+- Attachments are not read or classified in this first version; only inline text
+  is retained and assessed.
 - Google may require OAuth consent-screen verification for wider deployment.

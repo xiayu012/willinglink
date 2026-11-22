@@ -26,6 +26,8 @@ const receipt = receiptFromMetadata(
     historyId: "988",
     internalDate: "1735689600000",
     payload: {
+      mimeType: "text/plain",
+      body: { data: Buffer.from("Please help begin HOA IDR.").toString("base64url") },
       headers: [
         { name: "From", value: "owner@example.com" },
         { name: "Cc", value: "contact@fretgone.com" },
@@ -36,7 +38,7 @@ const receipt = receiptFromMetadata(
   "contact@fretgone.com"
 );
 assert.equal(receipt?.subject, "A subject the homeowner rewrote");
-assert.equal("body" in (receipt ?? {}), false, "receipt must never retain an email body");
+assert.equal(receipt?.body, "Please help begin HOA IDR.");
 
 assert.equal(
   receiptFromMetadata(

@@ -55,23 +55,6 @@ export function IdrIntakePreview({
       ? `Dear HOA,\n\nI'm formally requesting ${process} under ${laws[state]}.\n\nI've engaged WillingLink to handle communications regarding this dispute on my behalf. Please direct further correspondence to WillingLink and keep me copied.\n\nI also ask the board to authorize WillingLink to coordinate communications between us. Please confirm whether the board agrees and identify the board member or other authorized representative handling this ${mode.toUpperCase()} request.\n\n${response}\n\nThank you,`
       : "");
 
-  function registerSendIntent() {
-    const body = JSON.stringify({ kind: mode });
-    if (navigator.sendBeacon) {
-      navigator.sendBeacon(
-        "/api/fretgone/gmail/send-intent",
-        new Blob([body], { type: "application/json" })
-      );
-      return;
-    }
-    void fetch("/api/fretgone/gmail/send-intent", {
-      method: "POST",
-      body,
-      headers: { "content-type": "application/json" },
-      keepalive: true,
-    });
-  }
-
   return (
     <div className={styles.idrFields}>
       <label>
@@ -133,7 +116,6 @@ export function IdrIntakePreview({
               : undefined
           }
           rel="noopener noreferrer"
-          onClick={registerSendIntent}
         >
           Open email draft <ArrowUpRight size={16} aria-hidden="true" />
         </a>
