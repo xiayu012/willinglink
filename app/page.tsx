@@ -195,24 +195,21 @@ export default function Home() {
         <div className={styles.popoverBody}>
           <ol className={styles.processList}>
             <li>
-              <h3>Tell us what happened</h3>
-              <p>
-                Tell us the issue, your state, and what you’d like to resolve.
-              </p>
+              <h3>Send your request</h3>
+              <p>We help prepare your request; you send it using your HOA’s process.</p>
             </li>
             <li>
-              <h3>Prepare the next step</h3>
-              <p>
-                We check the applicable procedure, starting with your HOA’s own
-                process, and help prepare your request.
-              </p>
+              <h3>Your HOA responds</h3>
+              <p>In California, the HOA must participate when an owner requests IDR.</p>
             </li>
             <li>
-              <h3>Talk with your HOA</h3>
-              <p>
-                We help you prepare for the discussion and put any agreed next
-                steps in writing.
-              </p>
+              <h3>Work toward a solution</h3>
+              <p>We help both sides exchange information and explore solutions.</p>
+            </li>
+            <li>
+              <h3>Record the outcome</h3>
+              <p>Put any agreement in writing, or record that no agreement was reached.</p>
+              <p>California’s default process includes a meeting when the HOA has no valid procedure of its own.</p>
             </li>
           </ol>
         </div>
@@ -241,24 +238,20 @@ export default function Home() {
         <div className={styles.popoverBody}>
           <ol className={styles.processList}>
             <li>
-              <h3>Tell us what happened</h3>
-              <p>
-                Tell us the issue, your state, and what you’d like to resolve.
-              </p>
+              <h3>Prepare your request</h3>
+              <p>We help prepare a request describing the dispute and asking for ADR.</p>
             </li>
             <li>
-              <h3>Send the formal request</h3>
-              <p>
-                We help prepare the request and explain how to send it under the
-                applicable rules.
-              </p>
+              <h3>Send it to your HOA</h3>
+              <p>Use the delivery method required for your request.</p>
             </li>
             <li>
-              <h3>Explore a way forward</h3>
-              <p>
-                A neutral mediator helps both sides explore options. You choose
-                whether to settle; any agreement is put in writing.
-              </p>
+              <h3>Wait for a response</h3>
+              <p>In California, a qualifying request is declined if not accepted within 30 days.</p>
+            </li>
+            <li>
+              <h3>Meet with a mediator</h3>
+              <p>If both sides proceed, a neutral mediator helps explore a solution. Record the outcome.</p>
             </li>
           </ol>
         </div>
