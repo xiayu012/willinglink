@@ -195,21 +195,24 @@ export default function Home() {
         <div className={styles.popoverBody}>
           <ol className={styles.processList}>
             <li>
-              <h3>Send your request</h3>
-              <p>We help prepare your request; you send it using your HOA’s process.</p>
+              <h3>Send an Email</h3>
+              <p>FretGone prepares your IDR email. All you need to do is add your HOA’s email address and click Send.</p>
             </li>
             <li>
-              <h3>Your HOA responds</h3>
-              <p>In California, the HOA must participate when an owner requests IDR.</p>
+              <h3>Wait for Your HOA to Respond</h3>
+              <p>Response times depend on state law and your HOA’s IDR policy.</p>
             </li>
             <li>
-              <h3>Work toward a solution</h3>
-              <p>We help both sides exchange information and explore solutions.</p>
+              <h3>Explain Your Case</h3>
+              <p>After your HOA agrees to IDR, one of our volunteers will email you. Reply to that email with what happened and what you’d like to achieve.</p>
             </li>
             <li>
-              <h3>Record the outcome</h3>
-              <p>Put any agreement in writing, or record that no agreement was reached.</p>
-              <p>California’s default process includes a meeting when the HOA has no valid procedure of its own.</p>
+              <h3>FretGone Negotiates for You</h3>
+              <p>FretGone handles the back-and-forth with your HOA to work toward a solution. We’ll ask for your input when needed.</p>
+            </li>
+            <li>
+              <h3>Agreement or ADR</h3>
+              <p>If both sides agree, FretGone will email the agreement for you and your HOA to e-sign. Otherwise, we’ll help you explore alternative dispute resolution (ADR).</p>
             </li>
           </ol>
         </div>
