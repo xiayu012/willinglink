@@ -241,20 +241,24 @@ export default function Home() {
         <div className={styles.popoverBody}>
           <ol className={styles.processList}>
             <li>
-              <h3>Prepare your request</h3>
-              <p>We help prepare a request describing the dispute and asking for ADR.</p>
+              <h3>Send an Email</h3>
+              <p>FretGone drafts your ADR email. All you need to do is add your HOA’s email address and click Send.</p>
             </li>
             <li>
-              <h3>Send it to your HOA</h3>
-              <p>Use the delivery method required for your request.</p>
+              <h3>Wait for Your HOA to Respond</h3>
+              <p>Your HOA will be asked to agree to ADR and accept FretGone as a neutral mediator.</p>
             </li>
             <li>
-              <h3>Wait for a response</h3>
-              <p>In California, a qualifying request is declined if not accepted within 30 days.</p>
+              <h3>Explain Your Case</h3>
+              <p>After your HOA agrees, one of our volunteers will email you. Reply to that email with what happened and what you’d like to achieve.</p>
             </li>
             <li>
-              <h3>Meet with a mediator</h3>
-              <p>If both sides proceed, a neutral mediator helps explore a solution. Record the outcome.</p>
+              <h3>FretGone Mediates for Both Sides</h3>
+              <p>FretGone handles the back-and-forth between you and your HOA to work toward a solution. We’ll ask for your input when needed.</p>
+            </li>
+            <li>
+              <h3>Agreement or Court</h3>
+              <p>If both sides agree, FretGone will email the agreement for you and your HOA to e-sign. Otherwise, we’ll provide a record of your ADR efforts, which may be required before taking your case to court.</p>
             </li>
           </ol>
         </div>
