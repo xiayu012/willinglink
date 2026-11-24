@@ -254,7 +254,7 @@ export default function Home() {
             </li>
             <li>
               <h3>FretGone Mediates for Both Sides</h3>
-              <p>FretGone handles the back-and-forth between you and your HOA to work toward a solution. We’ll ask for your input when needed.</p>
+              <p>FretGone handles the back-and-forth by email between you and your HOA to work toward a solution. We’ll only reach out when we need your input.</p>
             </li>
             <li>
               <h3>Agreement or Court</h3>
