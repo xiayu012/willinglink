@@ -196,7 +196,7 @@ export default function Home() {
           <ol className={styles.processList}>
             <li>
               <h3>Send an Email</h3>
-              <p>FretGone prepares your IDR email. All you need to do is add your HOA’s email address and click Send.</p>
+              <p>FretGone drafts your IDR email. All you need to do is add your HOA’s email address and click Send.</p>
             </li>
             <li>
               <h3>Wait for Your HOA to Respond</h3>
