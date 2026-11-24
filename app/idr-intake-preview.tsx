@@ -13,7 +13,6 @@ const adrLaws: Record<string, string> = {
   California: "California Civil Code §§5925–5965",
   Delaware: "Delaware Code Title 25, §81-417(b)",
   "New Jersey": "N.J.S.A. §45:22A-44(c)",
-  Florida: "Florida Statutes §720.311",
   Hawaii: "Hawaii Revised Statutes §514B-161",
   Colorado: "Colorado Revised Statutes §38-33.3-124",
   Texas: "Texas Property Code §209.007(e)",
