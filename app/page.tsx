@@ -200,7 +200,7 @@ export default function Home() {
             </li>
             <li>
               <h3>Wait for Your HOA to Respond</h3>
-              <p>Response times depend on state law and your HOA’s IDR policy.</p>
+              <p>The maximum response time depends on state law and your HOA’s IDR policy.</p>
             </li>
             <li>
               <h3>Explain Your Case</h3>
