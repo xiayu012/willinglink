@@ -44,7 +44,7 @@
     "coliving:ingest": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-ingest.ts",
     "coliving:watch": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/coliving-watch.ts",
     "fretgone:gmail-selftest": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/fretgone-gmail-receipts-selftest.ts",
-    "fretgone:gmail-worker-test": "node workers/gmail/reply.test.mjs && node workers/gmail/sender-names.test.mjs && node workers/gmail/apps-script.test.mjs && node workers/gmail/apps-script-source.test.mjs"
+    "fretgone:gmail-worker-test": "node workers/gmail/reply.test.mjs && node workers/gmail/sender-names.test.mjs && node workers/gmail/gmail-send.test.mjs && node workers/gmail/apps-script.test.mjs && node workers/gmail/apps-script-source.test.mjs"
   },
   "dependencies": {
     "@ai-sdk/gateway": "2.0.0-beta.85",

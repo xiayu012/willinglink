@@ -1,6 +1,6 @@
 import { OAuth2Client } from 'google-auth-library';
 import postgres from 'postgres';
-import { appsScriptConfig, sendIdrReplyViaAppsScript } from './apps-script.mjs';
+import { sendIdrReplyViaGmailApi } from './gmail-send.mjs';
 import { buildIdrReply, isIdrRequest } from './reply.mjs';
 import { pickSenderName, validateSenderName } from './sender-names.mjs';
 
@@ -9,43 +9,24 @@ const mailbox = (process.env.GOOGLE_GMAIL_WATCHED_ADDRESS || 'contact@fretgone.c
 const oauth = new OAuth2Client(required('GOOGLE_GMAIL_CLIENT_ID'), required('GOOGLE_GMAIL_CLIENT_SECRET'));
 oauth.setCredentials({ refresh_token: required('GOOGLE_GMAIL_REFRESH_TOKEN') });
 const sql = postgres(required('POSTGRES_URL'), { max: 1, idle_timeout: 0 });
-// Apps Script IDR auto-replies are optional. Missing or invalid configuration
-// disables only this feature: receipt ingestion must continue, and there is no
-// nameless Gmail API fallback that could send unintended mail.
-let appsScript = null;
-let appsScriptError = null;
+let replyEnabled = true;
 try {
-  appsScript = appsScriptConfig(process.env);
+  // Read-only check. If the additive migration was not applied, disable
+  // auto-replies rather than exiting and stopping receipt ingestion.
+  await sql`select sender_name from fretgone.gmail_idr_auto_reply limit 0`;
 } catch (error) {
-  appsScriptError = error;
-}
-let replyEnabled = Boolean(appsScript);
-if (!appsScript) {
-  const reason = appsScriptError
-    ? appsScriptError instanceof Error
-      ? appsScriptError.message
-      : String(appsScriptError)
-    : 'GOOGLE_APPS_SCRIPT_DEPLOYMENT_ID is not set';
-  console.warn(`IDR auto-reply disabled: ${reason}; receipts will still be ingested`);
-} else {
-  try {
-    // Read-only check. If the additive migration was not applied, disable
-    // auto-replies rather than exiting and stopping receipt ingestion.
-    await sql`select sender_name from fretgone.gmail_idr_auto_reply limit 0`;
-  } catch (error) {
-    // 42P01 = undefined_table, 42703 = undefined_column.
-    if (error?.code === '42P01' || error?.code === '42703') {
-      replyEnabled = false;
-      console.warn(
-        'IDR auto-reply disabled: fretgone.gmail_idr_auto_reply.sender_name is missing; apply lib/db/migrations/manual/fretgone-gmail-idr-sender-name.sql and restart. Receipts will still be ingested',
-      );
-    } else {
-      // Transient connection errors keep the existing retry loop alive.
-      console.warn(
-        'Could not verify the IDR sender_name migration at startup; auto-reply remains enabled:',
-        error instanceof Error ? error.message : String(error),
-      );
-    }
+  // 42P01 = undefined_table, 42703 = undefined_column.
+  if (error?.code === '42P01' || error?.code === '42703') {
+    replyEnabled = false;
+    console.warn(
+      'IDR auto-reply disabled: fretgone.gmail_idr_auto_reply.sender_name is missing; apply lib/db/migrations/manual/fretgone-gmail-idr-sender-name.sql and restart. Receipts will still be ingested',
+    );
+  } else {
+    // Transient connection errors keep the existing retry loop alive.
+    console.warn(
+      'Could not verify the IDR sender_name migration at startup; auto-reply remains enabled:',
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }
 let stopping = false;
@@ -97,27 +78,26 @@ async function saveMessage(db, id, enableReply = false) {
   return reply;
 }
 async function sendIdrReply(reply) {
-  if (!appsScript || !replyEnabled) {
-    console.error('Refusing to send an IDR reply without an enabled Apps Script deployment');
+  if (!replyEnabled) {
+    console.error('Refusing to send an IDR reply without the sender_name migration');
     return;
   }
   try {
-    const result = await sendIdrReplyViaAppsScript(
-      appsScript,
+    const result = await sendIdrReplyViaGmailApi(
       {
-        sourceMessageId: reply.sourceMessageId,
+        mailbox,
         displayName: reply.senderName,
+        to: reply.to,
+        subject: reply.subject,
         body: reply.body,
         threadId: reply.threadId,
+        originalId: reply.originalId,
+        references: reply.references,
       },
       { accessToken, request: fetch },
     );
-    // replyAll returns the original message for chaining, so no verified sent
-    // message ID exists. Record null unless a separate verification adds one.
-    await sql`update fretgone.gmail_idr_auto_reply set status='sent',sent_message_id=null,updated_at=now() where gmail_thread_id=${reply.threadId}`;
-    console.log(
-      `IDR reply accepted via Apps Script as ${reply.senderName} in thread ${result.threadId}; sent message ID is not available from replyAll`,
-    );
+    await sql`update fretgone.gmail_idr_auto_reply set status='sent',sent_message_id=${result.gmailMessageId},updated_at=now() where gmail_thread_id=${reply.threadId}`;
+    console.log(`IDR reply sent as ${reply.senderName} in thread ${result.gmailThreadId}`);
   } catch (e) {
     console.error('IDR reply needs review; will not retry automatically:', e.message);
     await sql`update fretgone.gmail_idr_auto_reply set status='unknown',updated_at=now() where gmail_thread_id=${reply.threadId}`;

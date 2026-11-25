@@ -1,1 +1,1 @@
-{"name":"fretgone-gmail-poller","private":true,"type":"module","scripts":{"test":"node reply.test.mjs && node sender-names.test.mjs && node apps-script.test.mjs && node apps-script-source.test.mjs"},"dependencies":{"google-auth-library":"^9.15.1","postgres":"^3.4.5"}}
+{"name":"fretgone-gmail-poller","private":true,"type":"module","scripts":{"test":"node reply.test.mjs && node sender-names.test.mjs && node gmail-send.test.mjs && node apps-script.test.mjs && node apps-script-source.test.mjs"},"dependencies":{"google-auth-library":"^9.15.1","postgres":"^3.4.5"}}

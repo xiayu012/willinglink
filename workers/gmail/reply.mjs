@@ -1,5 +1,6 @@
 const EMAIL = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?/g;
 const ID = /^<[^<>\s\x00-\x1f\x7f]+>$/;
+const REFERENCES = /^(<[^<>\s\x00-\x1f\x7f]+>)(\s+<[^<>\s\x00-\x1f\x7f]+>)*$/;
 const MESSAGE_ID = /^[^\s\x00-\x1f\x7f]+$/;
 const IDR_TRIGGER = /\b(?:internal dispute resolution|idr)\b/i;
 
@@ -14,10 +15,12 @@ export function buildIdrReply(message, mailbox) {
   const headers = new Map((message.payload?.headers || []).map(h => [h.name.toLowerCase(), h.value || '']));
   const subject = headers.get('subject') || '';
   const original = headers.get('message-id') || '';
+  const references = (headers.get('references') || '').replace(/\s+/g, ' ').trim();
   const senderHeader = headers.get('from') || '';
   const sender = senderHeader.match(EMAIL) || [];
   const cc = (headers.get('cc') || '').match(EMAIL) || [];
   if (sender.length !== 1 || sender[0].toLowerCase() === mailbox || !cc.some(v => v.toLowerCase() === mailbox) || !message.threadId || !ID.test(original)) return null;
+  if (references && !REFERENCES.test(references)) return null;
   if (typeof message.id !== 'string' || !MESSAGE_ID.test(message.id)) return null;
   if (!subject || /[\r\n\x00-\x1f\x7f]/.test(subject)) return null;
   const seen = new Set([mailbox, sender[0].toLowerCase()]);
@@ -27,16 +30,16 @@ export function buildIdrReply(message, mailbox) {
     seen.add(key);
     return true;
   });
-  // GmailApp.replyAll computes the actual recipients from the source message.
-  // These fields document and test the expected reply-all participant set.
-  const to = [sender[0], ...unique((headers.get('to') || '').match(EMAIL) || [])];
-  const replyCc = unique(cc);
+  // The reply puts the original sender, To and Cc recipients in a single To
+  // header and never adds a Cc header. Our own mailbox is removed.
+  const to = [sender[0], ...unique([...(headers.get('to') || '').match(EMAIL) || [], ...(headers.get('cc') || '').match(EMAIL) || []])];
+  if (!to.length || to.length > 100) return null;
   return {
     sourceMessageId: message.id,
     to,
-    cc: replyCc,
     threadId: message.threadId,
     originalId: original,
+    references: references || null,
     subject,
     body: IDR_REPLY_BODY,
   };
