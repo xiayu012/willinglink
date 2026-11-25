@@ -1210,7 +1210,7 @@
   position: relative;
 }
 
-.idrOpenMail {
+.site .idrOpenMail {
   position: absolute;
   display: inline-flex;
   align-items: center;
