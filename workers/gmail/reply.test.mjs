@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
-import { buildIdrReply, composeReply } from './reply.mjs';
+import { buildIdrReply, IDR_REPLY_BODY, isIdrRequest } from './reply.mjs';
+
+assert.equal(isIdrRequest('Please start an IDR.'), true);
+assert.equal(isIdrRequest('internal dispute resolution request'), true);
+assert.equal(isIdrRequest('This is an identification request'), false);
+assert.equal(isIdrRequest(''), false);
+
 const mailbox = 'contact@fretgone.com';
-const message = { threadId: 'thread-1', payload: { headers: [
+const message = { id: 'source-1', threadId: 'thread-1', payload: { headers: [
   { name: 'From', value: 'Example Owner <owner@example.com>' },
   { name: 'To', value: 'board@example.com' },
   { name: 'Cc', value: 'contact@fretgone.com, neighbor@example.com, OWNER@example.com' },
@@ -11,15 +17,22 @@ const message = { threadId: 'thread-1', payload: { headers: [
 const reply = buildIdrReply(message, mailbox);
 assert.deepEqual(reply.to, ['owner@example.com', 'board@example.com']);
 assert.deepEqual(reply.cc, ['neighbor@example.com']);
-const raw = Buffer.from(composeReply(reply), 'base64url').toString();
-assert.match(raw, /In-Reply-To: <original@example.com>/);
-assert.match(raw, /References: <original@example.com>/);
-assert.match(raw, /\r\n\r\ntest idr$/);
-assert.match(raw, /To: owner@example.com,\r\n board@example.com/);
-assert.match(raw, /Cc: neighbor@example.com/);
-assert.doesNotMatch(raw, /contact@fretgone.com/i);
+assert.equal(reply.sourceMessageId, 'source-1');
+assert.equal(reply.threadId, 'thread-1');
+assert.equal(reply.originalId, '<original@example.com>');
+assert.equal(reply.subject, 'Formal IDR Request');
+assert.equal(reply.body, IDR_REPLY_BODY);
+assert.equal(IDR_REPLY_BODY.trim(), 'test idr');
+
 const noCc = structuredClone(message); noCc.payload.headers = noCc.payload.headers.filter(h => h.name !== 'Cc');
 assert.equal(buildIdrReply(noCc, mailbox), null);
 const invalidId = structuredClone(message); invalidId.payload.headers.find(h => h.name === 'Message-ID').value = 'bad\r\nBcc: bad@example.com';
 assert.equal(buildIdrReply(invalidId, mailbox), null);
-console.log('IDR reply format and recipient tests passed');
+const noMessageId = structuredClone(message); delete noMessageId.id;
+assert.equal(buildIdrReply(noMessageId, mailbox), null);
+const ownSender = structuredClone(message); ownSender.payload.headers.find(h => h.name === 'From').value = 'contact@fretgone.com';
+assert.equal(buildIdrReply(ownSender, mailbox), null);
+const badSubject = structuredClone(message); badSubject.payload.headers.find(h => h.name === 'Subject').value = 'bad\r\nBcc: bad@example.com';
+assert.equal(buildIdrReply(badSubject, mailbox), null);
+
+console.log('IDR reply eligibility and reply-all participant tests passed; no email was sent.');
