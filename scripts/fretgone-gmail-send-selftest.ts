@@ -19,6 +19,16 @@ async function main() {
   }) as typeof fetch };
   assert.deepEqual(await sendGmailMessage(message, deps), { gmailMessageId: "message-id", gmailThreadId: "thread-id" });
   assert.equal(calls, 1);
+  const reply = { ...message, reply: { threadId: "gmail-thread", messageId: "<original@example.com>", references: "<earlier@example.com>" } };
+  await sendGmailMessage(reply, { ...deps, request: (async (_url, init) => {
+    const sent = JSON.parse(String(init?.body));
+    assert.equal(sent.threadId, "gmail-thread");
+    const headers = Buffer.from(sent.raw, "base64url").toString();
+    assert.match(headers, /In-Reply-To: <original@example\.com>/);
+    assert.match(headers, /References: <earlier@example\.com> <original@example\.com>/);
+    return Response.json({ id: "reply-id", threadId: "gmail-thread" });
+  }) as typeof fetch });
+  assert.throws(() => composeGmailMessage({ ...reply, reply: { ...reply.reply, messageId: "<a@example.com>\r\nBcc: x@example.com" } }));
   await assert.rejects(sendGmailMessage(message, { ...deps, request: async () => { throw new Error("timeout"); } }), (error: unknown) => error instanceof GmailSendError && error.outcome === "unknown");
   await assert.rejects(sendGmailMessage(message, { ...deps, request: async () => new Response(null, { status: 403 }) }), (error: unknown) => error instanceof GmailSendError && error.outcome === "rejected" && error.status === 403);
   await assert.rejects(sendGmailMessage(message, { ...deps, request: async () => new Response(null, { status: 503 }) }), (error: unknown) => error instanceof GmailSendError && error.outcome === "unknown");

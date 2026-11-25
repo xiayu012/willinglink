@@ -1,5 +1,6 @@
 import { OAuth2Client } from 'google-auth-library';
 import postgres from 'postgres';
+import { buildIdrReply, composeReply } from './reply.mjs';
 
 const required = (name) => { const v = process.env[name]?.trim(); if (!v) throw new Error(`Missing ${name}`); return v; };
 const mailbox = (process.env.GOOGLE_GMAIL_WATCHED_ADDRESS || 'contact@fretgone.com').trim().toLowerCase();
@@ -30,7 +31,7 @@ async function bodyOf(part, messageId) {
   const text = decode(data);
   return part.mimeType?.toLowerCase() === 'text/html' ? text.replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<[^>]*>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').trim() : text;
 }
-async function saveMessage(db, id) {
+async function saveMessage(db, id, enableReply = false) {
   let m;
   try { m = await api(`/messages/${encodeURIComponent(id)}?format=full`); } catch (e) { if (e.status === 404) { console.warn('Message no longer available', id); return; } throw e; }
   if ((m.labelIds || []).some(x => x === 'SENT' || x === 'DRAFT')) return;
@@ -39,6 +40,29 @@ async function saveMessage(db, id) {
   const to = h.get('to') || null, cc = h.get('cc') || null;
   await db`insert into fretgone.gmail_inbound_email (gmail_message_id,gmail_thread_id,history_id,received_at,sender,recipients,subject,body,body_truncated,to_header,cc_header)
     values (${m.id},${m.threadId || null},${m.historyId || '0'},${m.internalDate ? new Date(Number(m.internalDate)) : null},${h.get('from') || null},${db.array([to,cc].filter(Boolean))}::text[],${h.get('subject') || ''},${body},false,${to},${cc}) on conflict (gmail_message_id) do nothing`;
+  if (!enableReply || !/\b(?:internal dispute resolution|idr)\b/i.test(body)) return null;
+  const reply = buildIdrReply(m, mailbox);
+  if (!reply) return null;
+  const claimed = await db`insert into fretgone.gmail_idr_auto_reply (gmail_thread_id, source_message_id, status) values (${reply.threadId}, ${m.id}, 'sending') on conflict do nothing returning gmail_thread_id`;
+  return claimed.length ? reply : null;
+}
+async function sendIdrReply(reply) {
+  try {
+    const { token } = await oauth.getAccessToken();
+    if (!token) throw new Error('Gmail access token unavailable');
+    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ raw: composeReply(reply), threadId: reply.threadId }), signal: AbortSignal.timeout(30000),
+    });
+    if (!response.ok) throw new Error(`Gmail send HTTP ${response.status}`);
+    const data = await response.json();
+    if (!data.id || data.threadId !== reply.threadId) throw new Error('Gmail returned an incomplete or mismatched reply');
+    await sql`update fretgone.gmail_idr_auto_reply set status='sent',sent_message_id=${data.id},updated_at=now() where gmail_thread_id=${reply.threadId}`;
+    console.log('IDR reply sent', data.id);
+  } catch (e) {
+    console.error('IDR reply needs review; will not retry automatically:', e.message);
+    await sql`update fretgone.gmail_idr_auto_reply set status='unknown',updated_at=now() where gmail_thread_id=${reply.threadId}`;
+  }
 }
 async function profile() {
   const p = await api('/profile');
@@ -60,6 +84,7 @@ async function fullSync(db) {
 }
 async function tick() {
   // Transaction-scoped locking also works with transaction-mode connection pools.
+  const replies = [];
   await sql.begin(async db => {
     const [{ locked }] = await db`select pg_try_advisory_xact_lock(hashtext('fretgone-gmail-poller'), hashtext(${mailbox})) as locked`;
     if (!locked) return;
@@ -90,10 +115,11 @@ async function tick() {
       console.log('Gmail full resync completed');
       return;
     }
-    for (const id of ids) { if (stopping) throw new Error('Stopping before cursor update'); await saveMessage(db, id); }
+    for (const id of ids) { if (stopping) throw new Error('Stopping before cursor update'); const reply = await saveMessage(db, id, true); if (reply) replies.push(reply); }
     await db`update fretgone.gmail_poll_state set history_id=${newest},updated_at=now() where mailbox=${mailbox}`;
     if (ids.size) console.log(`Gmail processed ${ids.size} changed messages`);
   });
+  for (const reply of replies) await sendIdrReply(reply);
 }
 let failures = 0;
 while (!stopping) {

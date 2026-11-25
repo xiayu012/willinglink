@@ -7,6 +7,7 @@ export type GmailOutgoingMessage = {
   cc?: string[];
   subject: string;
   text: string;
+  reply?: { threadId: string; messageId: string; references?: string };
 };
 
 export type GmailSendResult = { gmailMessageId: string; gmailThreadId: string };
@@ -52,11 +53,16 @@ export function composeGmailMessage(message: GmailOutgoingMessage): string {
   const to = addresses(message.to, true);
   const cc = addresses(message.cc || [], false);
   if (!message.text.trim() || message.text.includes("\0")) throw new Error("Email body is empty or invalid");
+  const reply = message.reply;
+  if (reply && (!reply.threadId || !/^<[^<>\s\x00-\x1f\x7f]+>$/.test(reply.messageId) || (reply.references && !/^(<[^<>\s\x00-\x1f\x7f]+>)(\s+<[^<>\s\x00-\x1f\x7f]+>)*$/.test(reply.references)))) {
+    throw new Error("Invalid reply headers");
+  }
   const body = Buffer.from(message.text.replace(/\r\n|\r|\n/g, "\r\n"), "utf8").toString("base64").match(/.{1,76}/g)?.join("\r\n") || "";
   const mime = [
     `To: ${to}`,
     ...(cc ? [`Cc: ${cc}`] : []),
     `Subject: ${encodedSubject(message.subject)}`,
+    ...(reply ? [`In-Reply-To: ${reply.messageId}`, `References: ${reply.references ? `${reply.references} ` : ""}${reply.messageId}`] : []),
     "MIME-Version: 1.0",
     "Content-Type: text/plain; charset=UTF-8",
     "Content-Transfer-Encoding: base64",
@@ -85,7 +91,7 @@ export async function sendGmailMessage(message: GmailOutgoingMessage, deps: Depe
     response = await deps.request("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ raw }),
+      body: JSON.stringify({ raw, ...(message.reply ? { threadId: message.reply.threadId } : {}) }),
       signal: AbortSignal.timeout(30_000),
     });
   } catch {
